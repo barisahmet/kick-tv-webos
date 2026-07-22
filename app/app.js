@@ -285,6 +285,7 @@ function returnToIdle() {
   state.tempChannel = null;
   PB.slug = null;
   setBanner('');
+  updateGear();
   showNothing();
 }
 function play(slug) {
@@ -297,6 +298,7 @@ function play(slug) {
   PB.slug = slug; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
   setBanner('');
   showState('hidden');
+  updateGear();
   loadChannel(slug, false);
 }
 // Fetch the channel again, which also hands us a fresh playback link since the
@@ -341,6 +343,10 @@ function attachStream(slug, url) {
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) onNetworkError(slug, hls);
       else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) onMediaError(slug, hls);
       else recoverPlayback(slug);                              // nothing we can patch, reload it all
+    });
+    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+      if (state.hls !== hls) return;                           // a newer stream took over
+      applyQualityPref();                                      // honour the saved quality choice
     });
     try { hls.loadSource(url); hls.attachMedia(video); }
     catch (e) { recoverPlayback(slug); return; }
@@ -501,6 +507,14 @@ function hideCursor() {
 function showCursor() {
   document.documentElement.classList.remove('hidecursor');
 }
+// The quality gear sits at the bottom-right and only makes sense while a stream
+// is playing and the sidebar is open, so show it exactly then.
+function updateGear() {
+  var g = document.getElementById('quality-gear');
+  if (!g) return;
+  if (state.sidebarOpen && state.current) g.classList.remove('hidden');
+  else g.classList.add('hidden');
+}
 function openSidebar() {
   if (!state.ready || browse.open) return;
   showCursor();
@@ -513,6 +527,7 @@ function openSidebar() {
     if (state.current && state.channels[state.current]) showOverlay(state.channels[state.current]);
   }
   resetIdle();
+  updateGear();
   // only refetch when the data is stale, so opening the list stays snappy
   if (Date.now() - state.lastFetch > 8000) {
     fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
@@ -525,6 +540,7 @@ function closeSidebar() {
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
+  updateGear();
 }
 // If nothing happens for a few seconds, close the sidebar. Any action restarts the timer.
 function resetIdle() {
@@ -957,6 +973,127 @@ function browseAddFavorite(slug) {
   renderBrowse();          // flip the card's + into a check
 }
 
+/* Quality selector (the gear at the bottom-right of an open sidebar) */
+var quality = { open: false, sel: 'auto', focus: 0, items: [] };
+function loadQualityPref() {
+  var v = null;
+  try { v = localStorage.getItem('kicktv.quality'); } catch (e) {}
+  if (v === null || v === 'auto') { quality.sel = 'auto'; return; }
+  var n = parseInt(v, 10);
+  quality.sel = isNaN(n) ? 'auto' : n;
+}
+function saveQualityPref() {
+  try { localStorage.setItem('kicktv.quality', quality.sel === 'auto' ? 'auto' : String(quality.sel)); } catch (e) {}
+}
+// The saved preference is a target height (or 'auto'). Turn it into a level index
+// for whatever stream is playing now: the matching height, or the closest one at
+// or below it, or failing that the highest the stream offers.
+function levelIndexForPref() {
+  if (quality.sel === 'auto' || !state.hls || !state.hls.levels || !state.hls.levels.length) return -1;
+  var levels = state.hls.levels, best = -1, bestH = -1, maxIdx = 0, maxH = -1;
+  for (var i = 0; i < levels.length; i++) {
+    var h = levels[i].height || 0;
+    if (h > maxH) { maxH = h; maxIdx = i; }
+    if (h <= quality.sel && h > bestH) { bestH = h; best = i; }
+  }
+  return best !== -1 ? best : maxIdx;
+}
+function applyQualityPref() {
+  if (!state.hls) return;
+  try { state.hls.currentLevel = levelIndexForPref(); } catch (e) {}
+}
+// Build the menu rows: Auto on top, then the stream's levels high to low.
+function qualityRows() {
+  var rows = [{ label: 'Auto', auto: true, h: -1, idx: -1 }];
+  if (state.hls && state.hls.levels && state.hls.levels.length) {
+    var lv = [];
+    state.hls.levels.forEach(function (l, i) {
+      var fps = (l.attrs && l.attrs['FRAME-RATE']) ? Math.round(parseFloat(l.attrs['FRAME-RATE'])) : 0;
+      var label = l.height ? (l.height + 'p') : (Math.round((l.bitrate || 0) / 1000) + 'k');
+      if (fps >= 50) label += String(fps);
+      lv.push({ label: label, auto: false, h: l.height || 0, idx: i });
+    });
+    lv.sort(function (a, b) { return b.h - a.h; });
+    rows = rows.concat(lv);
+  }
+  return rows;
+}
+function qualityIsSel(row) {
+  return row.auto ? quality.sel === 'auto' : (quality.sel !== 'auto' && row.h === quality.sel);
+}
+function openQuality() {
+  if (!state.ready || !state.current || quality.open) return;
+  quality.open = true;
+  setMode('quality');
+  quality.items = qualityRows();
+  quality.focus = 0;
+  for (var i = 0; i < quality.items.length; i++) {
+    if (qualityIsSel(quality.items[i])) { quality.focus = i; break; }
+  }
+  document.getElementById('qualitymodal').className = '';
+  renderQuality();
+}
+function closeQuality() {
+  quality.open = false;
+  document.getElementById('qualitymodal').className = 'hidden';
+  setMode('player');
+  if (state.sidebarOpen) resetIdle();
+}
+function renderQuality() {
+  var list = document.getElementById('quality-list');
+  list.innerHTML = '';
+  var marked = false;
+  quality.items.forEach(function (row, i) {
+    var sel = !marked && qualityIsSel(row);
+    if (sel) marked = true;
+    var el = document.createElement('div');
+    el.setAttribute('data-idx', i);
+    el.setAttribute('data-sel', sel ? '1' : '0');
+    var name = document.createElement('span');
+    name.className = 'qlabel'; name.textContent = row.label;
+    var chk = document.createElement('span');
+    chk.className = 'qcheck'; chk.textContent = sel ? '✓' : '';
+    el.appendChild(name); el.appendChild(chk);
+    list.appendChild(el);
+  });
+  applyQualityFocus();
+}
+function applyQualityFocus() {
+  var list = document.getElementById('quality-list');
+  for (var i = 0; i < list.children.length; i++) {
+    var row = list.children[i];
+    row.className = 'qrow' + (row.getAttribute('data-sel') === '1' ? ' sel' : '') +
+                    (i === quality.focus ? ' focused' : '');
+    if (i === quality.focus) {
+      var top = row.offsetTop - list.offsetTop;
+      if (top < list.scrollTop) list.scrollTop = top - 6;
+      else if (top + row.offsetHeight > list.scrollTop + list.clientHeight)
+        list.scrollTop = top + row.offsetHeight - list.clientHeight + 6;
+    }
+  }
+}
+function qualityMove(delta) {
+  if (!quality.items.length) return;
+  var n = quality.focus + delta;
+  if (n < 0 || n >= quality.items.length) return;
+  quality.focus = n;
+  applyQualityFocus();
+}
+function qualityActivate() {
+  var row = quality.items[quality.focus];
+  if (!row) return;
+  if (row.auto) {
+    quality.sel = 'auto';
+    if (state.hls) { try { state.hls.currentLevel = -1; } catch (e) {} }   // -1 hands control back to auto
+  } else {
+    quality.sel = row.h;
+    if (state.hls && row.idx >= 0) { try { state.hls.currentLevel = row.idx; } catch (e) {} }
+  }
+  saveQualityPref();
+  toast('Quality: ' + row.label);
+  closeQuality();
+}
+
 /* Small helpers */
 function toast(msg) {
   var t = document.getElementById('toast');
@@ -988,6 +1125,14 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.OK) browseActivate();
     return;
   }
+  if (quality.open) {
+    e.preventDefault();
+    if (k === KEY.BACK || k === KEY.YELLOW || k === KEY.LEFT) closeQuality();
+    else if (k === KEY.UP) qualityMove(-1);
+    else if (k === KEY.DOWN) qualityMove(1);
+    else if (k === KEY.OK) qualityActivate();
+    return;
+  }
   if (state.mode === 'add') {
     if (k === KEY.BACK) { e.preventDefault(); closeAdd(); }
     else if (k === KEY.OK) { e.preventDefault(); confirmAdd(); }
@@ -1007,14 +1152,15 @@ document.addEventListener('keydown', function (e) {
     resetIdle();
     if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
-    else if (k === KEY.OK || k === KEY.RIGHT) activateSide();
-    else if (k === KEY.GREEN) refreshSide();            // green button refreshes the list
-    else if (k === KEY.LEFT) closeSidebar();
+    else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
+    else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
+    else if (k === KEY.YELLOW) openQuality();            // yellow opens the quality menu
+    else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar(); // left or right tucks the list away
     else if (k === KEY.BACK) { closeSidebar(); hideCursor(); } // close the list and hide the pointer
     return;
   }
   if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
-  if (k === KEY.LEFT) openSidebar();
+  if (k === KEY.LEFT || k === KEY.RIGHT) openSidebar();  // left or right brings the list up
   else if (k === KEY.GREEN) refreshSide();              // green button refreshes even while watching
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
   else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
@@ -1140,6 +1286,26 @@ function browseCardFromEvent(e) {
     if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) loadBrowseMore(false);
   });
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
+  // Quality gear and its menu
+  var gear = document.getElementById('quality-gear');
+  if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openQuality(); });
+  var qlist = document.getElementById('quality-list');
+  function qRowIdx(e) {
+    var el = e.target;
+    while (el && el !== qlist && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    return (el && el !== qlist) ? parseInt(el.getAttribute('data-idx'), 10) : -1;
+  }
+  qlist.addEventListener('mouseover', function (e) {
+    var i = qRowIdx(e);
+    if (i >= 0 && i !== quality.focus) { quality.focus = i; applyQualityFocus(); }
+  });
+  qlist.addEventListener('click', function (e) {
+    var i = qRowIdx(e);
+    if (i >= 0) { quality.focus = i; qualityActivate(); }
+  });
+  document.getElementById('qualitymodal').addEventListener('click', function (e) {
+    if (e.target === this) closeQuality();
+  });
 })();
 
 /* Watching the video element for trouble */
@@ -1194,6 +1360,7 @@ window.addEventListener('offline', function () {
 });
 (function boot() {
   setMode('player');
+  loadQualityPref();
   showState('splash');
   startPlayerPoll();
   fetchFavorites(function () {

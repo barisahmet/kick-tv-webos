@@ -302,6 +302,40 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   font-size: 28px; color: #9a9a9d; pointer-events: none;
 }
 
+/* Quality gear, shown at the bottom-right while the sidebar is open */
+#quality-gear {
+  position: absolute; right: 40px; bottom: 36px;
+  width: 66px; height: 66px; border-radius: 33px;
+  background: rgba(11,14,15,0.82); border: 2px solid #2f3438;
+  display: flex; align-items: center; justify-content: center;
+  color: #cfcfd2; cursor: pointer;
+}
+#quality-gear:hover { border-color: #53fc18; color: #53fc18; }
+#quality-gear svg { width: 38px; height: 38px; }
+
+/* Quality menu, popping up from the gear */
+#qualitymodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  background: rgba(0,0,0,0.35);
+}
+#qualitybox {
+  position: absolute; right: 40px; bottom: 118px; width: 340px;
+  background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
+  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+}
+#quality-head {
+  font-size: 26px; font-weight: 800; color: #fff;
+  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 8px;
+}
+#quality-list { max-height: 640px; overflow: hidden; }
+.qrow {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 26px; font-size: 28px; color: #d6d7d8; cursor: pointer;
+}
+.qrow.focused { background: #2a2f33; }
+.qrow.sel { color: #53fc18; }
+.qrow .qcheck { color: #53fc18; font-size: 26px; width: 24px; text-align: right; }
+
 /* Little pop-up messages at the bottom */
 #toast {
   position: absolute; bottom: 90px; left: 50%; margin-left: -300px; z-index: 80;
