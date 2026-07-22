@@ -54,10 +54,11 @@ function kickGet(path, cb) {
   req.setTimeout(10000, function () { req.abort(); });
 }
 
-// The app calls this over the Luna bus with a path like /api/v2/channels/name.
+// The app calls this over the Luna bus with a kick.com path, either a channel
+// lookup (/api/v2/channels/name) or the live directory (/stream/livestreams/...).
 service.register('fetch', function (message) {
   var path = message.payload && message.payload.path;
-  if (typeof path !== 'string' || path.indexOf('/api/') !== 0) {
+  if (typeof path !== 'string' || (path.indexOf('/api/') !== 0 && path.indexOf('/stream/') !== 0)) {
     message.respond({ ok: false, error: 'bad path' });
     return;
   }

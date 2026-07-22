@@ -34,7 +34,9 @@ var state = {
   downRetry: false,      // true while a quick retry is already queued, so we do not stack them
   ready: false,          // false until the first load finishes; the splash ignores input until then
   quitArmed: false,      // set after the first Back press, so the next Back exits
-  quitTimer: null
+  quitTimer: null,
+  tempChannel: null,     // a browsed channel that is playing but not in the follow list
+  lastFetch: 0           // when favorites were last refreshed (to avoid redundant fetches)
 };
 var IDLE_MS = 5000;
 
@@ -178,6 +180,7 @@ function fetchFavorites(done) {
       if (!err) { state.channels[slug] = normalize(slug, raw); ok++; }
       else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
       if (--pending === 0) {
+        state.lastFetch = Date.now();
         setNetDown(ok === 0);           // if nothing at all got through, treat it as offline
         sortOrder(favs); detectOnline(favs); done();
       }
@@ -279,6 +282,7 @@ function teardownVideo() {
 function returnToIdle() {
   teardownVideo();
   state.current = null;
+  state.tempChannel = null;
   PB.slug = null;
   setBanner('');
   showNothing();
@@ -288,6 +292,8 @@ function play(slug) {
   teardownVideo();
   setMode('player');
   state.current = slug;
+  // if it is not one of your channels, it shows in the sidebar as a temporary row
+  state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
   PB.slug = slug; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
   setBanner('');
   showState('hidden');
@@ -350,6 +356,20 @@ function playVideo(video) {
     var p = video.play();
     if (p && p.catch) p.catch(function () {});   // play() may be blocked or interrupted, watchdog covers it
   } catch (e) {}
+}
+// While the browse popup is up, stop decoding/loading the stream so the popup
+// stays smooth, then pick playback back up when it closes.
+function pausePlaybackForBrowse() {
+  var v = document.getElementById('video');
+  try { v.pause(); } catch (e) {}
+  if (state.hls) { try { state.hls.stopLoad(); } catch (e) {} }
+  stopWatchdog();
+}
+function resumePlaybackAfterBrowse() {
+  if (!state.current) return;
+  if (state.hls) { try { state.hls.startLoad(); } catch (e) {} }
+  playVideo(document.getElementById('video'));
+  startWatchdog(state.current);
 }
 function onNetworkError(slug, hls) {
   if (state.current !== slug) return;
@@ -482,7 +502,7 @@ function showCursor() {
   document.documentElement.classList.remove('hidecursor');
 }
 function openSidebar() {
-  if (!state.ready) return;
+  if (!state.ready || browse.open) return;
   showCursor();
   if (!state.sidebarOpen) {
     state.sidebarOpen = true;
@@ -493,8 +513,10 @@ function openSidebar() {
     if (state.current && state.channels[state.current]) showOverlay(state.channels[state.current]);
   }
   resetIdle();
-  // pull fresh data every time the list is opened
-  fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
+  // only refetch when the data is stale, so opening the list stays snappy
+  if (Date.now() - state.lastFetch > 8000) {
+    fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
+  }
 }
 function closeSidebar() {
   clearTimeout(state.idleTimer);
@@ -515,7 +537,7 @@ function resetIdle() {
 }
 // Called when the pointer moves or Left is pressed. Open the sidebar and keep it up.
 function nudgeSidebar() {
-  if (!state.ready || state.mode !== 'player') return;
+  if (!state.ready || state.mode !== 'player' || browse.open) return;
   if (!state.sidebarOpen) openSidebar(); else resetIdle();
 }
 function focusKeyOf(item) { return item ? (item.type === 'add' ? 'add' : item.slug) : null; }
@@ -543,7 +565,11 @@ function renderSidebar(focusKey) {
   var prevKey = (typeof focusKey !== 'undefined' && focusKey !== null)
     ? focusKey : focusKeyOf(state.sideItems[state.sideFocus]);
 
-  state.sideItems = state.order.map(function (s) { return { type: 'chan', slug: s }; });
+  state.sideItems = [];
+  if (state.tempChannel && state.order.indexOf(state.tempChannel) === -1 && state.channels[state.tempChannel]) {
+    state.sideItems.push({ type: 'temp', slug: state.tempChannel });
+  }
+  state.order.forEach(function (s) { state.sideItems.push({ type: 'chan', slug: s }); });
   state.sideItems.push({ type: 'add' });
 
   var cc = document.getElementById('side-count');
@@ -565,8 +591,9 @@ function renderSidebar(focusKey) {
       list.appendChild(arow);
       return;
     }
-    var slug = item.slug, c = state.channels[slug], pinned = isPinned(slug);
-    var base = 'favrow' + (c.live ? '' : ' offline') +
+    var isTemp = item.type === 'temp';
+    var slug = item.slug, c = state.channels[slug], pinned = !isTemp && isPinned(slug);
+    var base = 'favrow' + (isTemp ? ' temp' : '') + (c.live ? '' : ' offline') +
                (slug === state.current ? ' current' : '') + (pinned ? ' pinned' : '');
     var row = document.createElement('div');
     row.setAttribute('data-base', base);
@@ -596,9 +623,13 @@ function renderSidebar(focusKey) {
 
     var act = document.createElement('div');
     act.className = 'favactions';
-    act.innerHTML =
-      '<span class="actbtn pinbtn' + (pinned ? ' on' : '') + '" data-act="pin">' + pinIcon() + '</span>' +
-      '<span class="actbtn rmbtn" data-act="remove">✕</span>';
+    if (isTemp) {
+      act.innerHTML = '<span class="actbtn addbtn" data-act="addfav" title="Add to your channels">+</span>';
+    } else {
+      act.innerHTML =
+        '<span class="actbtn pinbtn' + (pinned ? ' on' : '') + '" data-act="pin">' + pinIcon() + '</span>' +
+        '<span class="actbtn rmbtn" data-act="remove">✕</span>';
+    }
     row.appendChild(act);
 
     list.appendChild(row);
@@ -660,6 +691,15 @@ function togglePinFocused() {
   toast((nowPinned ? 'Pinned ' : 'Unpinned ') + state.channels[item.slug].name);
   fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(item.slug); });
 }
+// The temporary (browsed) channel row has an add icon that saves it for good.
+function addTempToFavorites() {
+  var slug = state.tempChannel;
+  if (!slug) return;
+  addFavorite(slug);
+  state.tempChannel = null;
+  toast('Added ' + (state.channels[slug] ? state.channels[slug].name : slug));
+  fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(slug); });
+}
 function refreshSide() {
   var btn = document.getElementById('side-refresh');
   btn.className = 'spinning';
@@ -667,7 +707,7 @@ function refreshSide() {
   function stop() { if (done && minned) btn.className = ''; }
   setTimeout(function () { minned = true; stop(); }, 700); // keep it spinning for at least one full turn
   fetchFavorites(function () {
-    if (state.sidebarOpen) renderSidebar();
+    if (state.sidebarOpen) renderSidebar(); else openSidebar(); // pop the list open once the refresh finishes
     if (!state.current) showState(idleModeForNothing());
     done = true; stop();
   });
@@ -708,6 +748,215 @@ function confirmAdd() {
   });
 }
 
+/* Browse live streams (blue button) */
+// Kick's directory has no language filter, so we pull the top live streams
+// (sorted by viewers) and filter by language here on the TV.
+var BROWSE_LANGS = [
+  { label: 'All',      value: 'all' },
+  { label: 'English',  value: 'English' },
+  { label: 'Turkce',   value: 'Turkish' },
+  { label: 'Espanol',  value: 'Spanish' },
+  { label: 'Portugues',value: 'Portuguese' },
+  { label: 'Arabic',   value: 'Arabic' },
+  { label: 'Francais', value: 'French' },
+  { label: 'Deutsch',  value: 'German' },
+  { label: 'Polski',   value: 'Polish' },
+  { label: 'Russian',  value: 'Russian' }
+];
+var BROWSE_COLS = 4;
+var browse = { open: false, lang: 'all', langIdx: 0, zone: 'grid', gridIdx: 0,
+               raw: [], streams: [], page: 1, hasMore: true, fetching: false };
+
+function loadBrowseLangPref() {
+  var v = null;
+  try { v = localStorage.getItem('kicktv.browselang'); } catch (e) {}
+  browse.lang = v || 'all';
+  browse.langIdx = 0;
+  for (var i = 0; i < BROWSE_LANGS.length; i++) {
+    if (BROWSE_LANGS[i].value === browse.lang) { browse.langIdx = i; break; }
+  }
+}
+function saveBrowseLangPref() { try { localStorage.setItem('kicktv.browselang', browse.lang); } catch (e) {} }
+function setBrowseStatus(msg) { document.getElementById('browse-status').textContent = msg || ''; }
+function thumbUrl(s) {
+  var t = s && s.thumbnail;
+  if (!t) return null;
+  return t.src || t.url || (typeof t === 'string' ? t : null);
+}
+function openBrowse() {
+  if (!state.ready) return;
+  browse.open = true;
+  showCursor();
+  closeSidebar();
+  pausePlaybackForBrowse();
+  document.getElementById('browse').className = '';
+  loadBrowseLangPref();
+  renderBrowseLangs();
+  browse.zone = 'grid'; browse.gridIdx = 0;
+  browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
+  document.getElementById('browse-grid').innerHTML = '';
+  loadBrowseMore(true);
+}
+function closeBrowse() {
+  browse.open = false;
+  document.getElementById('browse').className = 'hidden';
+  resumePlaybackAfterBrowse();
+}
+// Fetch one page of the live directory and append it. `initial` chains a few
+// pages on open to fill the grid; scrolling to the bottom pulls more.
+function loadBrowseMore(initial) {
+  if (browse.fetching || !browse.hasMore || browse.page > 8) return;
+  browse.fetching = true;
+  if (!browse.raw.length) setBrowseStatus('Loading...');
+  var pg = browse.page;
+  serviceGet('/stream/livestreams/en?page=' + pg + '&limit=50&sort=desc', function (err, data) {
+    browse.fetching = false;
+    if (!browse.open) return;
+    var arr = (!err && data && data.data) ? data.data : [];
+    if (!arr.length) {
+      browse.hasMore = false;
+      if (!browse.raw.length) setBrowseStatus('Could not reach Kick'); else renderBrowse();
+      return;
+    }
+    browse.raw = browse.raw.concat(arr);
+    browse.page = pg + 1;
+    renderBrowse();
+    if (initial && browse.page <= 3) loadBrowseMore(true);
+  });
+}
+function renderBrowseLangs() {
+  var box = document.getElementById('browse-langs');
+  box.innerHTML = '';
+  BROWSE_LANGS.forEach(function (l, i) {
+    var chip = document.createElement('span');
+    chip.className = 'blang';
+    chip.setAttribute('data-idx', i);
+    chip.textContent = l.label;
+    box.appendChild(chip);
+  });
+}
+function renderBrowse() {
+  var list = (browse.raw || []).slice();
+  if (browse.lang !== 'all') list = list.filter(function (s) { return s.language === browse.lang; });
+  list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
+  browse.streams = list;
+
+  var grid = document.getElementById('browse-grid');
+  var savedScroll = grid.scrollTop;
+  grid.innerHTML = '';
+  browse.streams.forEach(function (s, i) {
+    var ch = s.channel || {}, user = ch.user || {};
+    var card = document.createElement('div');
+    card.className = 'bcard';
+    card.setAttribute('data-idx', i);
+    var url = thumbUrl(s);
+    var thumb = document.createElement('div');
+    thumb.className = 'bthumb';
+    if (url) thumb.style.backgroundImage = 'url(' + url + ')';
+    var v = document.createElement('span');
+    v.className = 'bviewers';
+    v.innerHTML = '<span class="bdot"></span>';
+    v.appendChild(document.createTextNode(fmtViewers(s.viewer_count || 0)));
+    thumb.appendChild(v);
+    var already = getFavorites().indexOf(ch.slug) !== -1;
+    var add = document.createElement('span');
+    add.className = 'baddbtn' + (already ? ' added' : '');
+    add.setAttribute('data-act', 'badd');
+    add.setAttribute('data-slug', ch.slug || s.slug);
+    add.textContent = already ? '✓' : '+';
+    card.appendChild(thumb);
+    var meta = document.createElement('div');
+    meta.className = 'bmeta';
+    meta.innerHTML = '<div class="bname"></div><div class="btitle"></div><div class="bsub"></div>';
+    meta.children[0].textContent = user.username || ch.slug || s.slug;
+    meta.children[1].textContent = s.session_title || '';
+    meta.children[2].textContent =
+      ((s.categories && s.categories[0] && s.categories[0].name) || '') +
+      (s.language ? '  ·  ' + s.language : '');
+    card.appendChild(meta);
+    card.appendChild(add);
+    grid.appendChild(card);
+  });
+  grid.scrollTop = savedScroll;   // keep position while more pages append
+
+  if (!browse.streams.length) {
+    setBrowseStatus(browse.fetching ? 'Loading...' :
+      (browse.lang === 'all' ? 'Nothing live right now' : 'No live channels in this language yet'));
+  } else setBrowseStatus('');
+
+  if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
+  applyBrowseFocus();
+}
+function applyBrowseFocus() {
+  var langsEl = document.getElementById('browse-langs');
+  for (var i = 0; i < langsEl.children.length; i++) {
+    var chip = langsEl.children[i];
+    chip.className = 'blang' +
+      (BROWSE_LANGS[i].value === browse.lang ? ' sel' : '') +
+      (browse.zone === 'lang' && i === browse.langIdx ? ' focused' : '');
+  }
+  var grid = document.getElementById('browse-grid');
+  for (var j = 0; j < grid.children.length; j++) {
+    grid.children[j].className = 'bcard' + (browse.zone === 'grid' && j === browse.gridIdx ? ' focused' : '');
+  }
+  if (browse.zone === 'grid' && grid.children[browse.gridIdx]) {
+    var el = grid.children[browse.gridIdx];
+    var top = el.offsetTop - grid.offsetTop;
+    if (top < grid.scrollTop) grid.scrollTop = top - 12;
+    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
+      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
+  }
+}
+function selectBrowseLang(idx) {
+  browse.langIdx = idx;
+  browse.lang = BROWSE_LANGS[idx].value;
+  saveBrowseLangPref();
+  browse.gridIdx = 0;
+  renderBrowse();            // just re-filter what we already fetched
+}
+function browseMove(dx, dy) {
+  if (browse.zone === 'lang') {
+    if (dy === 1) { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
+    if (dx !== 0) {
+      var n = browse.langIdx + dx;
+      if (n >= 0 && n < BROWSE_LANGS.length) selectBrowseLang(n);
+    }
+    return;
+  }
+  var count = browse.streams.length;
+  if (dy === -1 && browse.gridIdx < BROWSE_COLS) { browse.zone = 'lang'; applyBrowseFocus(); return; }
+  if (!count) return;
+  var idx = browse.gridIdx;
+  if (dx === 1 && idx < count - 1) idx++;
+  else if (dx === -1 && idx > 0) idx--;
+  else if (dy === 1 && idx + BROWSE_COLS < count) idx += BROWSE_COLS;
+  else if (dy === -1 && idx - BROWSE_COLS >= 0) idx -= BROWSE_COLS;
+  else if (dy === 1 || dx === 1) loadBrowseMore(false);
+  browse.gridIdx = idx;
+  applyBrowseFocus();
+  // pull the next page as soon as focus reaches the last couple of rows
+  if (browse.gridIdx >= browse.streams.length - 2 * BROWSE_COLS) loadBrowseMore(false);
+}
+function browseActivate() {
+  if (browse.zone === 'lang') { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
+  var s = browse.streams[browse.gridIdx];
+  if (s && s.channel && s.channel.slug) {
+    browse.open = false;
+    document.getElementById('browse').className = 'hidden';
+    play(s.channel.slug);   // starts fresh, so no need to resume the paused stream
+  }
+}
+// The "+" on a browse card saves that streamer without leaving the popup.
+function browseAddFavorite(slug) {
+  if (!slug || getFavorites().indexOf(slug) !== -1) return;
+  addFavorite(slug);
+  if (slug === state.tempChannel) state.tempChannel = null;   // it is a real favorite now
+  state.lastFetch = 0;                                        // let the sidebar refresh next time
+  apiGet(slug, function (err, raw) { if (!err) state.channels[slug] = normalize(slug, raw); });
+  toast('Added ' + slug);
+  renderBrowse();          // flip the card's + into a check
+}
+
 /* Small helpers */
 function toast(msg) {
   var t = document.getElementById('toast');
@@ -729,6 +978,16 @@ document.addEventListener('keydown', function (e) {
   var k = e.keyCode;
   if (!state.ready) { e.preventDefault(); return; } // still on the splash, ignore input until data is ready
   if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
+  if (browse.open) {
+    e.preventDefault();
+    if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
+    else if (k === KEY.LEFT) browseMove(-1, 0);
+    else if (k === KEY.RIGHT) browseMove(1, 0);
+    else if (k === KEY.UP) browseMove(0, -1);
+    else if (k === KEY.DOWN) browseMove(0, 1);
+    else if (k === KEY.OK) browseActivate();
+    return;
+  }
   if (state.mode === 'add') {
     if (k === KEY.BACK) { e.preventDefault(); closeAdd(); }
     else if (k === KEY.OK) { e.preventDefault(); confirmAdd(); }
@@ -743,17 +1002,20 @@ document.addEventListener('keydown', function (e) {
   // watching a stream
   e.preventDefault();
   var video = document.getElementById('video');
+  if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
   if (state.sidebarOpen) {
     resetIdle();
     if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK || k === KEY.RIGHT) activateSide();
+    else if (k === KEY.GREEN) refreshSide();            // green button refreshes the list
     else if (k === KEY.LEFT) closeSidebar();
     else if (k === KEY.BACK) { closeSidebar(); hideCursor(); } // close the list and hide the pointer
     return;
   }
   if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
   if (k === KEY.LEFT) openSidebar();
+  else if (k === KEY.GREEN) refreshSide();              // green button refreshes even while watching
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
   else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
   else if (k === KEY.PLAY) { playVideo(video); }
@@ -772,6 +1034,14 @@ function favRowFromEvent(e) {
     if (list.children[i] === el) return { row: el, idx: i };
   }
   return null;
+}
+function browseCardFromEvent(e) {
+  var el = e.target;
+  while (el && el !== document.body && !(el.getAttribute && el.getAttribute('data-idx'))) el = el.parentNode;
+  if (!el || el === document.body) return null;
+  var i = parseInt(el.getAttribute('data-idx'), 10);
+  if (isNaN(i) || i < 0 || i >= browse.streams.length) return null;
+  return { el: el, idx: i };
 }
 (function wirePointer() {
   var playerEl = document.getElementById('player');
@@ -808,6 +1078,7 @@ function favRowFromEvent(e) {
     var slug = hit.row.getAttribute('data-slug');
     if (act === 'pin' && slug) { togglePinFocused(); }
     else if (act === 'remove' && slug) { askRemove(slug); }
+    else if (act === 'addfav') { addTempToFavorites(); }
     else { activateSide(); }
   });
   favList.addEventListener('wheel', function (e) {
@@ -838,6 +1109,37 @@ function favRowFromEvent(e) {
     e.stopPropagation();
     if (state.mode === 'player') openAdd();
   });
+  // Browse popup pointer
+  document.getElementById('browse-langs').addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-idx') !== null && el.getAttribute('data-idx') !== undefined)) el = el.parentNode;
+    if (el && el !== this && el.getAttribute('data-idx') != null) {
+      browse.zone = 'lang';
+      selectBrowseLang(parseInt(el.getAttribute('data-idx'), 10));
+      applyBrowseFocus();
+    }
+  });
+  var browseGrid = document.getElementById('browse-grid');
+  browseGrid.addEventListener('mouseover', function (e) {
+    var c = browseCardFromEvent(e);
+    if (c) { browse.zone = 'grid'; browse.gridIdx = c.idx; applyBrowseFocus(); }
+  });
+  browseGrid.addEventListener('click', function (e) {
+    if (e.target.getAttribute && e.target.getAttribute('data-act') === 'badd') {
+      e.stopPropagation();
+      browseAddFavorite(e.target.getAttribute('data-slug'));
+      return;
+    }
+    var c = browseCardFromEvent(e);
+    if (c) { browse.zone = 'grid'; browse.gridIdx = c.idx; browseActivate(); }
+  });
+  browseGrid.addEventListener('wheel', function (e) {
+    if (!browse.open) return;
+    e.preventDefault();
+    browseGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
+    if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) loadBrowseMore(false);
+  });
+  document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
 })();
 
 /* Watching the video element for trouble */
