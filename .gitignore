@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Built packages
+*.ipk
+
+# Node
+node_modules/
+npm-debug.log*

@@ -1,0 +1,243 @@
+html, body {
+  margin: 0; padding: 0;
+  width: 1920px; height: 1080px;
+  background: #0b0e0f; color: #efeff1;
+  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+.hidden { display: none !important; }
+.view { width: 1920px; height: 1080px; }
+html.hidecursor, html.hidecursor * { cursor: none !important; }
+
+/* Player and video */
+#player { background: #000; position: relative; }
+#video { width: 1920px; height: 1080px; background: #000; }
+
+/* Top info bar */
+#overlay {
+  position: absolute; top: 0; left: 0; width: 1920px;
+  background: rgba(0,0,0,0.82);
+  padding: 26px 60px 30px 60px; font-size: 34px;
+}
+#ov-name { font-weight: 800; color: #fff; margin-right: 24px; }
+#ov-live {
+  background: #e91916; color: #fff; font-size: 24px; font-weight: 700;
+  padding: 4px 14px; border-radius: 6px; margin-right: 18px; vertical-align: 4px;
+}
+#ov-viewers { color: #53fc18; margin-right: 24px; }
+#ov-title { display: block; font-size: 26px; color: #bcbcbe; margin-top: 8px; }
+
+/* Channel sidebar. Slate colours. Slides in from the left. */
+#sidebar {
+  position: absolute; top: 0; left: 0; width: 470px; height: 1080px;
+  background: rgba(27,30,32,0.97);
+  border-right: 2px solid #2f3438;
+  transform: translateX(-472px);
+  transition: transform 180ms ease-out;
+}
+#sidebar.open { transform: translateX(0); }
+#side-head {
+  display: flex; align-items: center;
+  padding: 22px 24px 16px 26px; background: #22262a; border-bottom: 1px solid #2f3438;
+}
+#side-title { font-size: 34px; font-weight: 800; color: #fff; }
+#side-add {
+  margin-left: 16px; width: 42px; height: 42px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 34px; line-height: 1; color: #0b0e0f; background: #53fc18;
+  border-radius: 8px; cursor: pointer;
+}
+#side-add:hover { background: #6bff3d; }
+#side-count { font-size: 22px; color: #53fc18; margin-left: auto; margin-right: 18px; }
+#side-count.neterr { color: #e91916; font-weight: 700; }
+#side-refresh { color: #9a9a9d; cursor: pointer; display: flex; align-items: center; }
+#side-refresh svg { width: 28px; height: 28px; }
+#side-refresh:hover { color: #53fc18; }
+#side-refresh.spinning svg { animation: spin 0.7s linear infinite; transform-origin: 50% 50%; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#fav-list { height: 984px; overflow: hidden; padding: 8px 0; }
+.favrow {
+  height: 76px; padding: 0 20px; margin: 2px 8px;
+  border-radius: 8px; border-left: 5px solid transparent;
+  position: relative; cursor: pointer; overflow: hidden;
+}
+.favrow.focused { background: #2a2f33; }
+.favrow.current { border-left-color: #53fc18; }
+.favrow.offline { opacity: 0.5; }            /* dim offline channels, and keep them dim on hover */
+.favrow.offline .pinmark { opacity: 0.45; }  /* fade the pin marker a bit more when offline */
+.favav {
+  position: absolute; left: 20px; top: 12px;
+  width: 52px; height: 52px; border-radius: 26px;
+  background: #3a3d40 center/cover no-repeat;
+  color: #fff; font-size: 26px; font-weight: 700;
+  text-align: center; line-height: 52px;
+}
+.favav.off { opacity: 0.5; }
+.favmid {
+  margin-left: 68px; margin-right: 110px; padding-top: 13px;
+}
+.favname {
+  font-size: 27px; font-weight: 700; color: #e7e9ea;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.favgame {
+  font-size: 21px; color: #9a9a9d; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The pin marker and viewer count on the right. Hidden while a row is focused. */
+.favinfo {
+  position: absolute; right: 18px; top: 0; height: 76px;
+  padding-top: 26px; text-align: right; white-space: nowrap;
+}
+.favrow.focused .favinfo { display: none; }
+.pinmark { color: #53fc18; margin-right: 8px; }
+.pinicon { display: inline-block; pointer-events: none; vertical-align: middle; }
+.pinmark .pinicon { width: 20px; height: 20px; }
+.pinbtn .pinicon { width: 26px; height: 26px; }
+.livedot {
+  display: inline-block; width: 12px; height: 12px; border-radius: 6px;
+  background: #e91916; margin-right: 8px; vertical-align: 2px;
+}
+.favview { font-size: 23px; color: #efeff1; }
+/* Pin and remove buttons, shown when a row is focused or hovered. */
+.favactions {
+  display: none;
+  position: absolute; right: 14px; top: 0; height: 76px; padding-top: 16px;
+}
+.favrow.focused .favactions { display: block; }
+.favrow.addrow .favactions { display: none; }
+.actbtn {
+  display: inline-block; width: 44px; height: 44px; line-height: 44px;
+  margin-left: 8px; text-align: center; border-radius: 22px;
+  font-size: 22px; background: #2a2d30; color: #cfcfd2; cursor: pointer;
+}
+.actbtn.pinbtn { color: #7a7d80; }
+.actbtn.pinbtn.on { color: #53fc18; background: #143206; }
+.actbtn:hover { background: #3a3d40; color: #fff; }
+.actbtn.rmbtn:hover { background: #e91916; color: #fff; }
+/* The Add channel row at the bottom of the list. */
+.favrow.addrow { height: 64px; color: #53fc18; }
+.addplus {
+  position: absolute; left: 24px; top: 6px; font-size: 44px; color: #53fc18;
+}
+.addtext {
+  position: absolute; left: 74px; top: 14px; font-size: 27px; font-weight: 700; color: #efeff1;
+}
+
+/* The "someone came online" note in the upper right. */
+#notify {
+  position: absolute; top: 28px; right: 40px; z-index: 50;
+  max-width: 760px;
+  background: rgba(27,30,32,0.97);
+  border: 2px solid #53fc18; border-left: 7px solid #53fc18;
+  color: #fff; font-size: 28px; font-weight: 700;
+  padding: 16px 26px; border-radius: 10px;
+  transform: translateX(130%); opacity: 0;
+  transition: transform 240ms ease-out, opacity 240ms;
+}
+#notify.show { transform: translateX(0); opacity: 1; }
+#notify .ndot {
+  display: inline-block; width: 13px; height: 13px; border-radius: 7px;
+  background: #53fc18; margin-right: 12px; vertical-align: 2px;
+}
+
+/* The "Reconnecting" message shown while a stream is recovering. */
+#pbstatus {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: rgba(11,14,15,0.85); border: 2px solid #53fc18;
+  color: #fff; font-size: 30px; padding: 18px 40px; border-radius: 12px; z-index: 40;
+}
+
+/* Idle screen, done up like an old CRT. */
+#idle {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  background: #060807; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+/* the scanlines and tube curvature belong to the splash only, not the message
+   screens, so they are scoped to #idle.splash */
+#idle.splash::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -20px; bottom: -20px; z-index: 2;
+  pointer-events: none;
+  background: repeating-linear-gradient(to bottom,
+    rgba(0,0,0,0) 0 3px, rgba(0,0,0,0.42) 3px 6px);
+  animation: crt-roll 8s linear infinite;
+}
+@keyframes crt-roll { to { transform: translateY(6px); } }
+/* darker corners, for a bit of tube curvature */
+#idle.splash::after {
+  content: ''; position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  background: radial-gradient(120% 120% at 50% 50%, transparent 55%, rgba(0,0,0,0.6) 100%);
+}
+#idle-wm {
+  position: relative; z-index: 1;
+  font-size: 190px; font-weight: 900; letter-spacing: 8px; color: #53fc18;
+  text-shadow: 3px 0 rgba(255,0,64,0.55), -3px 0 rgba(0,224,255,0.55), 0 0 44px rgba(83,252,24,0.45);
+  animation: crt-flicker 4.5s steps(1) infinite;
+}
+#idle-wm span { color: #efeff1; margin-left: 18px; }
+@keyframes crt-flicker {
+  0%, 91%, 95% { opacity: 1; }
+  93%, 97% { opacity: 0.8; }
+}
+/* Splash shows the wordmark. The other states show a short message instead. */
+#idle-msg { display: none; position: relative; z-index: 1; text-align: center; padding: 0 80px; }
+#idle.splash #idle-wm { display: block; }
+#idle.splash #idle-msg { display: none; }
+#idle:not(.splash) #idle-wm { display: none; }
+#idle:not(.splash) #idle-msg { display: block; }
+.idle-big { font-size: 66px; font-weight: 800; color: #efeff1; letter-spacing: 1px; }
+.idle-sub { font-size: 30px; color: #9a9a9d; margin-top: 20px; }
+#idle.lost .idle-big { color: #e91916; }
+
+/* Add channel dialog */
+#addmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  background: rgba(0,0,0,0.8);
+}
+#addbox {
+  width: 820px; margin: 340px auto; background: #17191b;
+  border: 2px solid #53fc18; border-radius: 12px; padding: 44px 50px;
+}
+#addlabel { font-size: 32px; margin-bottom: 26px; }
+#addinput {
+  width: 700px; font-size: 36px; padding: 14px 16px;
+  background: #0b0e0f; color: #fff;
+  border: 2px solid #3a3d40; border-radius: 8px; outline: none;
+}
+#addinput:focus { border-color: #53fc18; }
+#addhint { font-size: 22px; color: #6d6f72; margin-top: 22px; }
+#addbuttons { margin-top: 26px; }
+#addbuttons button {
+  font-size: 30px; font-weight: 700; padding: 12px 40px; margin-right: 20px;
+  border-radius: 8px; border: 2px solid transparent; cursor: pointer;
+}
+#addok { background: #53fc18; color: #0b0e0f; }
+#addcancel { background: #3a3d40; color: #efeff1; }
+#addbuttons button:hover, #addbuttons button:focus { border-color: #fff; }
+
+/* Delete confirmation dialog */
+#confirmmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  background: rgba(0,0,0,0.8);
+}
+#confirmbox {
+  width: 760px; margin: 380px auto; background: #17191b;
+  border: 2px solid #e91916; border-radius: 12px; padding: 44px 50px; text-align: center;
+}
+#confirm-text { font-size: 34px; color: #fff; margin-bottom: 34px; }
+#confirmbuttons button {
+  font-size: 30px; font-weight: 700; padding: 12px 44px; margin: 0 12px;
+  border-radius: 8px; border: 2px solid transparent; cursor: pointer;
+}
+#confirm-yes { background: #e91916; color: #fff; }
+#confirm-no { background: #3a3d40; color: #efeff1; }
+#confirmbuttons button:hover, #confirmbuttons button:focus { border-color: #fff; }
+
+/* Little pop-up messages at the bottom */
+#toast {
+  position: absolute; bottom: 90px; left: 50%; margin-left: -300px;
+  width: 600px; text-align: center;
+  background: rgba(23,25,27,0.95); border: 2px solid #53fc18;
+  color: #fff; font-size: 28px; padding: 18px 10px; border-radius: 10px;
+}

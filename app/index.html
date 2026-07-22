@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1920, user-scalable=no">
+  <title>Kick TV</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="player" class="view">
+    <video id="video" autoplay></video>
+    <div id="idle" class="hidden">
+      <div id="idle-wm">KICK<span>TV</span></div>
+      <div id="idle-msg"></div>
+    </div>
+    <div id="notify"></div>
+    <div id="pbstatus" class="hidden"></div>
+    <div id="overlay" class="hidden">
+      <span id="ov-name"></span>
+      <span id="ov-live">LIVE</span>
+      <span id="ov-viewers"></span>
+      <span id="ov-title"></span>
+    </div>
+    <div id="sidebar">
+      <div id="side-head">
+        <span id="side-title">Channels</span>
+        <span id="side-add" class="hidden" title="Add channel">+</span>
+        <span id="side-count"></span>
+        <span id="side-refresh" title="Refresh"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 4V1L8 5l4 4V6a6 6 0 11-6 6H4a8 8 0 108-8z"/></svg></span>
+      </div>
+      <div id="fav-list"></div>
+    </div>
+  </div>
+
+  <div id="confirmmodal" class="hidden">
+    <div id="confirmbox">
+      <div id="confirm-text"></div>
+      <div id="confirmbuttons">
+        <button id="confirm-yes">Remove</button>
+        <button id="confirm-no">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="addmodal" class="hidden">
+    <div id="addbox">
+      <div id="addlabel">Add channel (kick.com/<b>name</b>)</div>
+      <input id="addinput" type="text" autocomplete="off">
+      <div id="addbuttons">
+        <button id="addok">Add</button>
+        <button id="addcancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="hls.min.js"></script>
+  <script src="favorites.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

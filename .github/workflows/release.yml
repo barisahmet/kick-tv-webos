@@ -1,0 +1,43 @@
+name: Release
+
+# Push a version tag (for example v1.0.0) and this builds the installable .ipk
+# and attaches it to a GitHub Release so people can download it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the webOS CLI
+        run: npm install -g @webos-tools/cli
+
+      - name: Match the app version to the tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const fs=require('fs'),p='app/appinfo.json',j=JSON.parse(fs.readFileSync(p));j.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');"
+
+      - name: Build the .ipk
+        run: ares-package ./app ./services/com.barisahmet.kicktv.service -o .
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" com.barisahmet.kicktv_*.ipk \
+            --title "Kick TV ${GITHUB_REF_NAME}" \
+            --notes "Download the .ipk below and sideload it onto your LG webOS TV in Developer Mode. See the README for the steps."

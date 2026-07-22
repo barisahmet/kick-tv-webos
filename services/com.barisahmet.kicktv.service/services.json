@@ -1,0 +1,10 @@
+{
+  "id": "com.barisahmet.kicktv.service",
+  "description": "Kick API fetch proxy",
+  "services": [
+    {
+      "name": "com.barisahmet.kicktv.service",
+      "description": "Fetches kick.com API JSON for the Kick TV app"
+    }
+  ]
+}

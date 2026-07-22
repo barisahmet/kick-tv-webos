@@ -1,0 +1,6 @@
+{
+  "name": "com.barisahmet.kicktv.service",
+  "version": "1.0.0",
+  "description": "Kick API fetch proxy (bypasses webview CORS)",
+  "main": "service.js"
+}
