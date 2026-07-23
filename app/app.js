@@ -2051,7 +2051,7 @@ function renderChpop() {
 function chpopActivate() {
   var slug = chpop.list[chpop.idx];
   closeChpop();
-  if (slug) { closeSidebar(); play(slug); }
+  if (slug && slug !== state.current) { closeSidebar(); play(slug); }   // same channel: just close
 }
 function closeChpop() {
   chpop.open = false;
