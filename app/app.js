@@ -1130,11 +1130,25 @@ function fmtDuration(ms) {
   function pad(n) { return n < 10 ? '0' + n : String(n); }
   return h > 0 ? (h + ':' + pad(m) + ':' + pad(ss)) : (m + ':' + pad(ss));
 }
-function fmtVodDate(str) {
-  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str || '');
+// Kick's created_at looks like "2026-07-21 21:25:29" and is UTC. Turn it into a
+// short "how long ago" label.
+function fmtVodAgo(str) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(str || '');
   if (!m) return '';
-  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return months[parseInt(m[2], 10) - 1] + ' ' + parseInt(m[3], 10);
+  var t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  var diff = Date.now() - t;
+  if (diff < 0) diff = 0;
+  function n(v, unit) { return v + ' ' + unit + (v === 1 ? '' : 's') + ' ago'; }
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return n(mins, 'min');
+  var hrs = Math.floor(mins / 60);
+  if (hrs < 24) return n(hrs, 'hour');
+  var days = Math.floor(hrs / 24);
+  if (days < 7) return n(days, 'day');
+  if (days < 30) return n(Math.floor(days / 7), 'week');
+  if (days < 365) return n(Math.floor(days / 30), 'month');
+  return n(Math.floor(days / 365), 'year');
 }
 function vodThumb(v) {
   var t = v && v.thumbnail;
@@ -1195,7 +1209,7 @@ function renderVods() {
     meta.innerHTML = '<div class="bname"></div><div class="btitle"></div><div class="bsub"></div>';
     meta.children[0].textContent = v.session_title || 'Untitled';
     meta.children[1].textContent = (v.categories && v.categories[0] && v.categories[0].name) || '';
-    meta.children[2].textContent = fmtVodDate(v.created_at);
+    meta.children[2].textContent = fmtVodAgo(v.created_at);
     card.appendChild(meta);
     grid.appendChild(card);
   });
@@ -1746,7 +1760,7 @@ document.addEventListener('keydown', function (e) {
   }
   if (settings.open) {
     e.preventDefault();
-    if (k === KEY.BACK || k === KEY.YELLOW || k === KEY.LEFT) closeSettings();
+    if (k === KEY.BACK || k === KEY.RED || k === KEY.LEFT) closeSettings();   // red toggles it shut
     else if (k === KEY.UP) settingsMove(-1);
     else if (k === KEY.DOWN) settingsMove(1);
     else if (k === KEY.OK || k === KEY.RIGHT) settingsActivate();
