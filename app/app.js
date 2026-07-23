@@ -1633,6 +1633,7 @@ function settingsBuild() {
     { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'header', label: 'Quality' }
   ];
+  if (updateInfo) items.unshift({ kind: 'update', label: 'Update to v' + updateInfo.version });
   qualityRows().forEach(function (r) {
     items.push({ kind: 'quality', label: r.label, auto: r.auto, h: r.h, idx: r.idx });
   });
@@ -1667,6 +1668,14 @@ function renderSettings() {
     if (it.kind === 'header') {
       el.className = 'shead';
       el.textContent = it.label;
+      list.appendChild(el);
+      return;
+    }
+    if (it.kind === 'update') {
+      el.setAttribute('data-focusable', '1');
+      var ul = document.createElement('span'); ul.className = 'slabel supd'; ul.textContent = it.label;
+      var ud = document.createElement('span'); ud.className = 'updot';
+      el.appendChild(ul); el.appendChild(ud);
       list.appendChild(el);
       return;
     }
@@ -1737,6 +1746,8 @@ function settingsActivate() {
     applyDim();
     toast('Dim ' + (settings.dim ? 'on' : 'off'));
     renderSettings();
+  } else if (it.kind === 'update') {
+    openUpdateNotes();
   }
 }
 // Make a toggle take effect right away.
@@ -1795,6 +1806,65 @@ function dimoptActivate() {
   saveSettings();
   applyDim();
   renderDimOpt();
+}
+
+/* Update check. Compare our appinfo version to the latest GitHub release. A
+   sandboxed webOS app cannot install anything itself, so this only flags a red
+   dot on the gear and shows the release notes; the user re-sideloads manually. */
+var updateInfo = null;      // { version, notes } once a newer release is found
+var updateopen = false;
+var GH_LATEST = 'https://api.github.com/repos/barisahmet/kick-tv-webos/releases/latest';
+function isNewerVersion(a, b) {
+  var pa = String(a).split('.'), pb = String(b).split('.');
+  for (var i = 0; i < 3; i++) {
+    var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+function checkForUpdate() {
+  var xi = new XMLHttpRequest();
+  xi.open('GET', 'appinfo.json', true);
+  xi.onload = function () {
+    var cur; try { cur = JSON.parse(xi.responseText).version; } catch (e) { return; }
+    var xg = new XMLHttpRequest();
+    xg.open('GET', GH_LATEST, true);
+    xg.onload = function () {
+      if (xg.status !== 200) return;
+      var rel; try { rel = JSON.parse(xg.responseText); } catch (e) { return; }
+      var latest = (rel.tag_name || '').replace(/^v/, '');
+      if (latest && isNewerVersion(latest, cur)) {
+        updateInfo = { version: latest, notes: rel.body || '' };
+        var g = document.getElementById('quality-gear');
+        if (g) g.classList.add('hasupdate');
+        if (settings.open) { settings.items = settingsBuild(); renderSettings(); }
+      }
+    };
+    xg.timeout = 12000;
+    xg.onerror = xg.ontimeout = function () {};
+    xg.send();
+  };
+  xi.onerror = function () {};
+  xi.send();
+}
+// Lightly de-markdown the release notes for plain-text display on the TV.
+function stripMd(s) {
+  return String(s || '').replace(/\r/g, '')
+    .replace(/^#+\s*/gm, '').replace(/\*\*/g, '')
+    .replace(/^\s*-\s+/gm, '• ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^---+\s*$/gm, '').trim();
+}
+function openUpdateNotes() {
+  if (!updateInfo) return;
+  updateopen = true;
+  document.getElementById('update-ver').textContent = 'Version ' + updateInfo.version;
+  document.getElementById('update-notes').textContent = stripMd(updateInfo.notes);
+  document.getElementById('updatemodal').className = '';
+}
+function closeUpdateNotes() {
+  updateopen = false;
+  document.getElementById('updatemodal').className = 'hidden';
 }
 
 /* Buffering spinner (live and VOD) and the centre play/pause button (VOD) */
@@ -2129,6 +2199,11 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.UP) vodMove(0, -1);
     else if (k === KEY.DOWN) vodMove(0, 1);
     else if (k === KEY.OK) vodActivate();
+    return;
+  }
+  if (updateopen) {
+    e.preventDefault();
+    if (k === KEY.BACK || k === KEY.OK || k === KEY.LEFT) closeUpdateNotes();
     return;
   }
   if (dimopt.open) {
@@ -2486,6 +2561,9 @@ function browseCardFromEvent(e) {
   dimoptList.addEventListener('mouseover', function (e) { var i = dimoptIdx(e); if (i >= 0 && i !== dimopt.focus) { dimopt.focus = i; renderDimOpt(); } });
   dimoptList.addEventListener('click', function (e) { var i = dimoptIdx(e); if (i >= 0) { dimopt.focus = i; dimoptActivate(); } });
   document.getElementById('dimoptmodal').addEventListener('click', function (e) { if (e.target === this) closeDimOpt(); });
+  // Update-available release notes popup
+  document.getElementById('update-close').addEventListener('click', function () { closeUpdateNotes(); });
+  document.getElementById('updatemodal').addEventListener('click', function (e) { if (e.target === this) closeUpdateNotes(); });
   // Live-channels surf popup pointer
   var chpopList = document.getElementById('chpop-list');
   function chRowIdx(e) {
@@ -2578,6 +2656,7 @@ window.addEventListener('offline', function () {
   loadQualityPref();
   loadSettings();
   applyDim();
+  setTimeout(checkForUpdate, 3000);           // check GitHub for a newer release, once the app has settled
   state.lastInput = Date.now();
   setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
   showState('splash');

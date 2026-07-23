@@ -502,6 +502,37 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #quality-gear:hover { border-color: #53fc18; color: #53fc18; }
 #quality-gear svg { width: 38px; height: 38px; }
+#quality-gear.hasupdate::after {   /* red dot when a newer release exists */
+  content: ''; position: absolute; top: 6px; right: 6px;
+  width: 18px; height: 18px; border-radius: 9px; background: #e91916; border: 3px solid #0b0e0f;
+}
+
+/* Update-available note in the Settings menu + the release-notes popup */
+.srow .supd { color: #53fc18; font-weight: 800; }
+.srow .updot { margin-left: auto; width: 14px; height: 14px; border-radius: 7px; background: #e91916; }
+#updatemodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 82;
+  background: rgba(0,0,0,0.6);
+}
+#updatebox {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  width: 940px; box-sizing: border-box; background: #17191b;
+  border: 2px solid #53fc18; border-radius: 16px; padding: 34px 44px;
+  box-shadow: 0 0 50px rgba(0,0,0,0.6);
+}
+#update-head { font-size: 34px; font-weight: 800; color: #fff; }
+#update-ver { font-size: 26px; color: #53fc18; margin: 6px 0 20px; }
+#update-notes {
+  max-height: 520px; overflow: hidden; font-size: 24px; line-height: 1.42;
+  color: #d6d7d8; white-space: pre-wrap;
+}
+#update-hint {
+  font-size: 22px; color: #9a9a9d; margin-top: 22px; padding-top: 18px; border-top: 1px solid #2f3438;
+}
+#update-close {
+  margin-top: 24px; display: inline-block; font-size: 28px; font-weight: 700;
+  padding: 12px 44px; border-radius: 8px; background: #53fc18; color: #0b0e0f; cursor: pointer;
+}
 
 /* Settings menu, popping up from the gear */
 #settingsmodal {
