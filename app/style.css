@@ -192,12 +192,28 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Add channel dialog */
 #addmodal {
-  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 76;
   background: rgba(0,0,0,0.8);
 }
 #addbox {
-  width: 820px; margin: 340px auto; background: #17191b;
-  border: 2px solid #53fc18; border-radius: 12px; padding: 44px 50px;
+  width: 820px; margin: 40px auto; background: #17191b;
+  border: 2px solid #53fc18; border-radius: 12px; padding: 34px 50px;
+}
+#addresults { max-height: 400px; overflow: hidden; margin-top: 20px; }
+.aresult {
+  display: flex; align-items: center; padding: 12px 14px; border-radius: 10px; cursor: pointer;
+}
+.aresult.focused { background: #2a2f33; }
+.aav {
+  width: 48px; height: 48px; border-radius: 24px; background: #3a3d40; flex-shrink: 0;
+  color: #fff; font-size: 24px; font-weight: 700; text-align: center; line-height: 48px; margin-right: 16px;
+}
+.amid { flex: 1; overflow: hidden; }
+.aname { font-size: 28px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.asub { font-size: 20px; color: #9a9a9d; margin-top: 2px; }
+.alive {
+  font-size: 20px; font-weight: 700; color: #fff; background: #e91916;
+  padding: 3px 12px; border-radius: 6px; margin-left: 12px;
 }
 #addlabel { font-size: 32px; margin-bottom: 26px; }
 #addinput {
@@ -218,7 +234,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Delete confirmation dialog */
 #confirmmodal {
-  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 76;
   background: rgba(0,0,0,0.8);
 }
 #confirmbox {
@@ -386,23 +402,95 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Colour-button legend at the bottom, to the right of the sidebar (never over it) */
 #cbguide {
-  position: absolute; left: 500px; bottom: 44px;
+  position: absolute; left: 500px; bottom: 40px;
   display: flex; align-items: center;
-  padding: 10px 22px; border-radius: 12px;
+  padding: 12px 20px; border-radius: 14px;
   background: rgba(11,14,15,0.82); border: 1px solid #2f3438;
 }
 .cbitem {
-  display: flex; align-items: center; font-size: 22px; color: #d6d7d8;
-  margin-right: 30px; white-space: nowrap;
+  display: flex; align-items: center; font-size: 28px; color: #d6d7d8;
+  margin-right: 14px; padding: 8px 16px; border-radius: 10px; white-space: nowrap; cursor: pointer;
 }
 .cbitem:last-child { margin-right: 0; }
+.cbitem:hover { background: #2a2f33; color: #fff; }
 .cbdot {
-  display: inline-block; width: 16px; height: 16px; border-radius: 8px; margin-right: 10px;
+  display: inline-block; width: 20px; height: 20px; border-radius: 10px; margin-right: 12px;
 }
 .cbdot.red { background: #e91916; }
 .cbdot.green { background: #00c853; }
 .cbdot.yellow { background: #ffd21e; }
 .cbdot.blue { background: #1f8fff; }
+
+/* Live-channels surf popup (channel up/down) */
+#chpop {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 55;
+  display: flex; align-items: center; justify-content: center;
+}
+#chpop-panel {
+  width: 640px; background: rgba(12,17,13,0.96);
+  border: 3px solid #53fc18; border-radius: 18px; overflow: hidden;
+  box-shadow: 0 0 50px rgba(0,0,0,0.6); pointer-events: auto;
+}
+#chpop-title {
+  font-size: 30px; font-weight: 800; color: #fff; padding: 20px 26px 14px;
+  border-bottom: 1px solid #26302a;
+}
+#chpop-list { max-height: 720px; overflow: hidden; padding: 10px; }
+.chrow { display: flex; align-items: center; height: 74px; padding: 0 16px; border-radius: 10px; cursor: pointer; }
+.chrow.focused { background: #2a2f33; }
+.chav {
+  width: 50px; height: 50px; border-radius: 25px; flex-shrink: 0; margin-right: 16px;
+  background: #3a3d40 center/cover no-repeat;
+  color: #fff; font-size: 24px; font-weight: 700; text-align: center; line-height: 50px;
+}
+.chmid { flex: 1; overflow: hidden; }
+.chname { font-size: 27px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chgame { font-size: 20px; color: #9a9a9d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chview { font-size: 23px; color: #efeff1; margin-left: 14px; white-space: nowrap; }
+.chview .chdot { display: inline-block; width: 11px; height: 11px; border-radius: 6px; background: #e91916; margin-right: 7px; vertical-align: 1px; }
+
+/* Centre play/pause button for past videos (shows with the overlay) */
+#vodplay {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  width: 116px; height: 116px; border-radius: 58px;
+  background: rgba(0,0,0,0.55); color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#vodplay:hover { background: rgba(0,0,0,0.72); }
+#vodplay svg { width: 60px; height: 60px; }
+
+/* Buffering spinner (live and VOD). Centred with margins, not transform, so the
+   spin animation (which sets transform) does not knock it off-centre. */
+#spinner {
+  position: absolute; top: 50%; left: 50%; margin: -42px 0 0 -42px;
+  width: 84px; height: 84px; border-radius: 50%;
+  border: 7px solid rgba(255,255,255,0.22); border-top-color: #53fc18;
+  animation: spin 0.9s linear infinite;
+}
+
+/* Manual dim for night viewing. Strength and layer (video-only vs everything)
+   are set from JS. Placed just above the video so, in video-only mode, the menus
+   and sidebar (later in the DOM / higher z-index) stay bright on top of it. */
+#dimscreen {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.8); pointer-events: none;
+}
+
+/* VOD seek bar: flat played line with a vertical handle */
+#vodbar {
+  position: absolute; left: 210px; right: 210px; bottom: 130px;
+  display: flex; align-items: center;
+}
+#vodbar-cur, #vodbar-dur {
+  font-size: 26px; font-weight: 700; color: #fff; min-width: 132px;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+}
+#vodbar-cur { text-align: right; margin-right: 26px; }
+#vodbar-dur { text-align: left; margin-left: 26px; }
+#vodbar-track { flex: 1; height: 54px; cursor: pointer; }
+#vodbar-track svg { width: 100%; height: 100%; overflow: visible; }
+#vodbar-remain { stroke: rgba(255,255,255,0.45); stroke-width: 4; stroke-linecap: round; }
+#vodbar-played { stroke: #53fc18; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+#vodbar-handle { fill: #fff; }
 
 /* Settings gear, shown at the bottom-right while the sidebar is open */
 #quality-gear {
@@ -417,7 +505,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Settings menu, popping up from the gear */
 #settingsmodal {
-  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 76;
   background: rgba(0,0,0,0.35);
 }
 #settingsbox {
@@ -448,6 +536,23 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   color: #7f8386; padding: 14px 26px 6px; margin-top: 4px; border-top: 1px solid #23272a;
 }
 
+/* Dim (night) options popup, opened from the Settings menu */
+#dimoptmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 78;
+  background: rgba(0,0,0,0.35);
+}
+#dimoptbox {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 440px;
+  background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
+  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+}
+#dimopt-head {
+  font-size: 26px; font-weight: 800; color: #fff;
+  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
+}
+.srow .sgear { color: #9a9a9d; margin-left: auto; margin-right: 14px; cursor: pointer; display: inline-flex; align-items: center; }
+.srow .sgear:hover { color: #53fc18; }
+
 /* Read-only chat overlay on the right edge */
 #chat {
   position: absolute; right: 0; top: 0; width: 452px; height: 1080px;
@@ -461,7 +566,9 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .cmsg {
   font-size: 24px; line-height: 1.32; margin-top: 10px; color: #e9e9ea;
   word-wrap: break-word; text-shadow: 0 1px 3px rgba(0,0,0,0.95);
+  transition: opacity 0.8s ease-out;
 }
+.cmsg.cfade { opacity: 0; }
 .cmsg .cuser { font-weight: 800; }
 .cmsg .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }
 .cmsg .cbadge {

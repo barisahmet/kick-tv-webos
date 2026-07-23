@@ -9,6 +9,7 @@
 <body>
   <div id="player" class="view">
     <video id="video" autoplay></video>
+    <div id="dimscreen" class="hidden"></div>
     <div id="idle" class="hidden">
       <div id="idle-wm">KICK<span>TV</span></div>
       <div id="idle-msg"></div>
@@ -63,11 +64,32 @@
         <div id="vods-status"></div>
       </div>
     </div>
+    <div id="chpop" class="hidden">
+      <div id="chpop-panel">
+        <div id="chpop-title">Live now</div>
+        <div id="chpop-list"></div>
+      </div>
+    </div>
+    <div id="vodbar" class="hidden">
+      <span id="vodbar-cur">0:00</span>
+      <div id="vodbar-track">
+        <svg viewBox="0 0 1500 40" preserveAspectRatio="none">
+          <line id="vodbar-remain" x1="0" y1="20" x2="1500" y2="20"></line>
+          <path id="vodbar-played" d="M0,20" fill="none"></path>
+          <rect id="vodbar-handle" x="-4" y="5" width="8" height="30" rx="4"></rect>
+        </svg>
+      </div>
+      <span id="vodbar-dur">0:00</span>
+    </div>
+    <div id="vodplay" class="hidden" title="Play / pause">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path id="vodplay-icon" d="M8 5v14l11-7z"/></svg>
+    </div>
+    <div id="spinner" class="hidden"></div>
     <div id="cbguide" class="hidden">
-      <span class="cbitem"><span class="cbdot red"></span>Settings</span>
-      <span class="cbitem"><span class="cbdot green"></span>Refresh</span>
-      <span class="cbitem"><span class="cbdot yellow"></span>Past videos</span>
-      <span class="cbitem"><span class="cbdot blue"></span>Browse</span>
+      <span class="cbitem" data-act="settings"><span class="cbdot red"></span>Settings</span>
+      <span class="cbitem" data-act="refresh"><span class="cbdot green"></span>Refresh</span>
+      <span class="cbitem" data-act="vods"><span class="cbdot yellow"></span>Past videos</span>
+      <span class="cbitem" data-act="browse"><span class="cbdot blue"></span>Browse</span>
     </div>
     <div id="quality-gear" class="hidden" title="Settings">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>
@@ -87,12 +109,13 @@
 
   <div id="addmodal" class="hidden">
     <div id="addbox">
-      <div id="addlabel">Add channel (kick.com/<b>name</b>)</div>
-      <input id="addinput" type="text" autocomplete="off">
+      <div id="addlabel">Add channel</div>
+      <input id="addinput" type="text" autocomplete="off" placeholder="type a name">
       <div id="addbuttons">
         <button id="addok">Add</button>
         <button id="addcancel">Cancel</button>
       </div>
+      <div id="addresults"></div>
     </div>
   </div>
 
@@ -100,6 +123,13 @@
     <div id="settingsbox">
       <div id="settings-head">Settings</div>
       <div id="settings-list"></div>
+    </div>
+  </div>
+
+  <div id="dimoptmodal" class="hidden">
+    <div id="dimoptbox">
+      <div id="dimopt-head">Dim (night)</div>
+      <div id="dimopt-list"></div>
     </div>
   </div>
 

@@ -162,17 +162,20 @@ function offlineStub(slug) {
   return { slug: slug, name: slug, live: false, viewers: 0, title: '',
            category: '', avatar: null, playbackUrl: null, chatroomId: null };
 }
-// Order the list. Pinned channels that are live go first, then the rest of the
-// live ones by viewer count, then everyone offline in alphabetical order. A pin
-// only pulls a channel to the top while that channel is actually live.
+// Order the list into four groups: pinned-and-live first, then the rest of the
+// live ones by viewer count, then pinned-but-offline, then everyone else
+// offline. The two offline groups are alphabetical.
 function sortOrder(favs) {
-  function grp(c) { return c.live ? (isPinned(c.slug) ? 0 : 1) : 2; }
+  function grp(c) {
+    if (c.live) return isPinned(c.slug) ? 0 : 1;
+    return isPinned(c.slug) ? 2 : 3;
+  }
   state.order = favs.slice().sort(function (a, b) {
     var ca = state.channels[a], cb2 = state.channels[b];
     var ga = grp(ca), gb = grp(cb2);
     if (ga !== gb) return ga - gb;
-    if (ga === 2) return ca.name.toLowerCase() < cb2.name.toLowerCase() ? -1 : 1;
-    return cb2.viewers - ca.viewers;
+    if (ga >= 2) return ca.name.toLowerCase() < cb2.name.toLowerCase() ? -1 : 1;   // offline: alphabetical
+    return cb2.viewers - ca.viewers;                                               // live: by viewers
   });
 }
 function fetchFavorites(done) {
@@ -263,6 +266,7 @@ function idleModeForNothing() {
 // Show the correct idle screen. On a brand new setup with no channels, open the
 // menu straight away so the Add row is right there.
 function showNothing() {
+  if (state.vod) return;                 // a past video is playing; never show an idle screen over it
   var m = idleModeForNothing();
   showState(m);
   if (m === 'empty' && state.ready) openSidebar();
@@ -273,9 +277,13 @@ function setBanner(msg) {
   if (!msg) { el.className = 'hidden'; el.textContent = ''; return; }
   el.textContent = msg;
   el.className = '';
+  hideSpinner();                 // the reconnecting banner replaces the plain buffering spinner
 }
 function teardownVideo() {
   PB.active = false;
+  hideVodBar();
+  hideSpinner();
+  hideVodPlay();
   stopWatchdog();
   if (PB.reconnectTimer) { clearTimeout(PB.reconnectTimer); PB.reconnectTimer = null; }
   var video = document.getElementById('video');
@@ -285,6 +293,7 @@ function teardownVideo() {
 function returnToIdle() {
   teardownVideo();
   state.current = null;
+  state.vod = null; state.vodReturn = null;
   state.tempChannel = null;
   PB.slug = null;
   setBanner('');
@@ -296,11 +305,13 @@ function play(slug) {
   if (!slug) return;
   teardownVideo();
   disconnectChat();          // drop the old channel's chat; the new one connects once it loads
+  state.vod = null; state.vodReturn = null;   // leaving any past-video playback
   setMode('player');
   state.current = slug;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
   state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
   PB.slug = slug; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
+  PB.recoverCount = 0; PB.endedCount = 0;
   setBanner('');
   showState('hidden');
   updateGear();
@@ -320,17 +331,7 @@ function loadChannel(slug, isRecovery) {
     }
     var c = normalize(slug, raw);
     state.channels[slug] = c;
-    if (!c.live || !c.playbackUrl) {
-      // Stream ended or the channel is offline. Hop to the next live favorite
-      // if auto-advance is on, otherwise fall back to the idle screen.
-      if (settings.autoadvance) {
-        var nx = nextLiveAfter(slug);
-        if (nx) { toast('Auto-advancing to ' + (state.channels[nx].name || nx)); play(nx); return; }
-      }
-      toast(c.name + ' is offline');
-      returnToIdle();
-      return;
-    }
+    if (!c.live || !c.playbackUrl) { advanceOrIdle(slug); return; }   // stream ended / offline
     saveLast(slug);
     if (isRecovery) setBanner('');
     else { showOverlay(c); if (state.sidebarOpen) renderSidebar(slug); }
@@ -408,11 +409,37 @@ function onMediaError(slug, hls) {
 // with a new playback link.
 function recoverPlayback(slug) {
   if (state.current !== slug || PB.reloading) return;
+  PB.recoverCount = (PB.recoverCount || 0) + 1;
+  if (PB.recoverCount > 3) { advanceOrIdle(slug); return; }   // it keeps failing: treat as ended
   PB.reloading = true;
   setBanner('Reconnecting...');
   stopWatchdog();
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   loadChannel(slug, true);
+}
+// Move on when a live stream ends: hop to the next live favorite if auto-advance
+// is on, otherwise show the idle screen.
+function advanceOrIdle(slug) {
+  if (settings.autoadvance) {
+    var nx = nextLiveAfter(slug);
+    if (nx) { toast('Auto-advancing to ' + (state.channels[nx].name || nx)); play(nx); return; }
+  }
+  toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' ended');
+  returnToIdle();
+}
+// A live stream that fires 'ended' has almost certainly stopped. Verify once and
+// move on if it is offline; give a single retry if the API still lags behind.
+function handleEnded(slug) {
+  if (state.current !== slug || !PB.active) return;
+  PB.endedCount = (PB.endedCount || 0) + 1;
+  if (PB.endedCount >= 2) { advanceOrIdle(slug); return; }
+  apiGet(slug, function (err, raw) {
+    if (state.current !== slug) return;
+    var live = !err && raw && raw.livestream && raw.livestream.is_live && raw.playback_url;
+    if (!live) { advanceOrIdle(slug); return; }
+    state.channels[slug] = normalize(slug, raw);
+    attachStream(slug, raw.playback_url);
+  });
 }
 function scheduleReconnect(slug) {
   setBanner('Reconnecting...');
@@ -437,6 +464,7 @@ function startWatchdog(slug) {
     } else {
       PB.stallCount = 0;
       PB.netRetries = 0; PB.mediaRetries = 0;
+      PB.recoverCount = 0; PB.endedCount = 0;          // healthy playback: clear the give-up counters
       setBanner('');                                   // it is moving again, clear the message
     }
     PB.lastTime = t;
@@ -453,11 +481,12 @@ function switchTo(slug) {
   if (slug !== state.current) play(slug);
 }
 function openVodsForContext() {
-  if (state.sidebarOpen) {
+  if (state.current) openVods(state.current);          // the channel you are watching
+  else if (state.vod) openVods(state.vod.slug);        // already in a past video: same channel
+  else if (state.sidebarOpen) {                        // idle: fall back to the highlighted row
     var item = state.sideItems[state.sideFocus];
     if (item && (item.type === 'chan' || item.type === 'temp')) openVods(item.slug);
-  } else if (state.current) openVods(state.current);
-  else if (state.vod) openVods(state.vod.slug);
+  }
 }
 function exitApp() { try { window.close(); } catch (e) {} }
 function armOrExit() {
@@ -733,21 +762,28 @@ function addTempToFavorites() {
   fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(slug); });
 }
 function refreshSide() {
+  if (!state.sidebarOpen) openSidebar();     // show the list right away, with the spinner turning
   var btn = document.getElementById('side-refresh');
   btn.className = 'spinning';
   var done = false, minned = false;
   function stop() { if (done && minned) btn.className = ''; }
   setTimeout(function () { minned = true; stop(); }, 700); // keep it spinning for at least one full turn
   fetchFavorites(function () {
-    if (state.sidebarOpen) renderSidebar(); else openSidebar(); // pop the list open once the refresh finishes
-    if (!state.current) showState(idleModeForNothing());
+    if (state.sidebarOpen) renderSidebar(); else openSidebar();
+    if (!state.current && !state.vod) showState(idleModeForNothing());
     done = true; stop();
   });
 }
 
 /* Add channel dialog */
+// The Add dialog is a search: type a name, get matching channels, pick one. It
+// still handles an exact slug or a kick.com URL as a fallback when search finds
+// nothing. 'input' zone = typing; 'list' zone = choosing a result.
+var add = { results: [], focus: -1, zone: 'input' };
 function openAdd() {
   setMode('add');
+  add.results = []; add.focus = -1; add.zone = 'input';
+  document.getElementById('addresults').innerHTML = '';
   document.getElementById('addmodal').className = '';
   var input = document.getElementById('addinput');
   input.value = '';
@@ -756,26 +792,114 @@ function openAdd() {
 function closeAdd() {
   document.getElementById('addmodal').className = 'hidden';
   document.getElementById('addinput').blur();
+  document.getElementById('addresults').innerHTML = '';
+  add.results = []; add.zone = 'input';
   setMode('player');
   if (state.sidebarOpen) renderSidebar('add'); else openSidebar();
   if (!state.current) showNothing();   // bring back the idle message we hid
 }
+// OK: add the highlighted suggestion if you moved into the list, otherwise add
+// exactly what was typed (the Add button does the same).
 function confirmAdd() {
-  var slug = document.getElementById('addinput').value.trim().toLowerCase()
+  if (add.zone === 'list') { selectAddResult(); return; }
+  var q = document.getElementById('addinput').value.trim();
+  if (q) addChannelBySlug(q); else closeAdd();
+}
+// Search as you type (debounced), showing channel suggestions live.
+var addSearchTimer = null;
+function scheduleLiveSearch() { clearTimeout(addSearchTimer); addSearchTimer = setTimeout(liveSearch, 300); }
+function liveSearch() {
+  var q = document.getElementById('addinput').value.trim();
+  if (q.length < 2) { add.results = []; add.focus = -1; document.getElementById('addresults').innerHTML = ''; return; }
+  serviceGet('/api/search?searched_word=' + encodeURIComponent(q), function (err, data) {
+    if (state.mode !== 'add') return;
+    if (document.getElementById('addinput').value.trim() !== q) return;   // a newer keystroke superseded this
+    var chans = (!err && data && data.channels) ? data.channels : [];
+    add.results = chans.slice(0, 30);
+    if (add.zone === 'input') add.focus = -1;
+    renderAddResults();
+  });
+}
+function enterAddList() {
+  if (!add.results.length) return;
+  add.zone = 'list'; add.focus = 0;
+  document.getElementById('addinput').blur();
+  applyAddFocus();
+}
+function renderAddResults() {
+  var box = document.getElementById('addresults');
+  box.innerHTML = '';
+  add.results.forEach(function (c, i) {
+    var name = (c.user && c.user.username) || c.slug;
+    var row = document.createElement('div');
+    row.className = 'aresult';
+    row.setAttribute('data-idx', i);
+    var av = document.createElement('div');
+    av.className = 'aav';
+    av.textContent = (name || '?').charAt(0).toUpperCase();
+    row.appendChild(av);
+    var mid = document.createElement('div');
+    mid.className = 'amid';
+    mid.innerHTML = '<div class="aname"></div><div class="asub"></div>';
+    mid.children[0].textContent = name;
+    mid.children[1].textContent = fmtViewers(c.followers_count || c.followersCount || 0) + ' followers';
+    row.appendChild(mid);
+    if (c.isLive || c.is_live) {
+      var live = document.createElement('span'); live.className = 'alive'; live.textContent = 'LIVE';
+      row.appendChild(live);
+    }
+    box.appendChild(row);
+  });
+  applyAddFocus();
+}
+function applyAddFocus() {
+  var box = document.getElementById('addresults');
+  for (var i = 0; i < box.children.length; i++) {
+    var row = box.children[i];
+    row.className = 'aresult' + (i === add.focus ? ' focused' : '');
+    if (i === add.focus) {
+      var top = row.offsetTop - box.offsetTop;
+      if (top < box.scrollTop) box.scrollTop = top - 6;
+      else if (top + row.offsetHeight > box.scrollTop + box.clientHeight)
+        box.scrollTop = top + row.offsetHeight - box.clientHeight + 6;
+    }
+  }
+}
+function addNav(delta) {
+  if (!add.results.length) return;
+  var n = add.focus + delta;
+  if (n < 0) { backToInput(); return; }   // up past the top jumps back to the box
+  if (n >= add.results.length) return;
+  add.focus = n; applyAddFocus();
+}
+function backToInput() {
+  add.zone = 'input'; add.focus = -1;
+  applyAddFocus();                 // keep the suggestions, just drop the highlight
+  var input = document.getElementById('addinput');
+  setTimeout(function () { input.focus(); }, 30);
+}
+function selectAddResult() {
+  var c = add.results[add.focus];
+  if (c) addChannelBySlug(c.slug);
+}
+function addChannelBySlug(raw) {
+  var slug = (raw || '').trim().toLowerCase()
     .replace(/^https?:\/\/(www\.)?kick\.com\//, '').replace(/[\/?#].*$/, '');
-  if (!slug) { closeAdd(); return; }
-  toast('Checking ' + slug + '...');
-  apiGet(slug, function (err, raw) {
+  if (!slug) return;
+  toast('Adding ' + slug + '...');
+  apiGet(slug, function (err, data) {
     if (err) { toast(err === 404 ? 'No channel named "' + slug + '"' : 'Kick API unreachable'); return; }
-    state.channels[slug] = normalize(slug, raw);
+    state.channels[slug] = normalize(slug, data);
     addFavorite(slug);
     document.getElementById('addmodal').className = 'hidden';
     document.getElementById('addinput').blur();
+    document.getElementById('addresults').innerHTML = '';
+    add.results = []; add.zone = 'input';
     setMode('player');
     toast('Added ' + state.channels[slug].name);
     fetchFavorites(function () {
       if (!state.sidebarOpen) openSidebar(); else renderSidebar(slug);
-      if (!state.current) showState(idleModeForNothing());
+      if (!state.current && !state.vod) showState(idleModeForNothing());
     });
   });
 }
@@ -1262,6 +1386,7 @@ function playVod(v) {
   setBanner('');
   showState('hidden');
   updateGear();
+  drawVodBar(0, 0);                 // reset the bar to the start; the new source has no time yet
   attachVod(v.source);
   showVodOverlay();
 }
@@ -1320,8 +1445,54 @@ function showVodOverlay() {
   document.getElementById('ov-title').textContent = state.vod.title;
   ov.style.left = '0'; ov.style.width = '1920px';
   ov.className = '';
+  showVodBar();
+  showVodPlay();
   clearTimeout(overlayTimer);
-  overlayTimer = setTimeout(function () { ov.className = 'hidden'; }, 4000);
+  overlayTimer = setTimeout(function () { ov.className = 'hidden'; hideVodBar(); hideVodPlay(); }, 4000);
+}
+// The seek bar: a wavy line for the played part, a flat line for the rest, and a
+// vertical handle at the play head. Redrawn a couple of times a second while up.
+var vodbarTimer = null;
+var vodDragging = false;
+function fmtClock(sec) { return fmtDuration((sec || 0) * 1000); }
+function drawVodBar(cur, dur) {
+  var W = 1500, mid = 20;
+  var prog = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
+  var px = prog * W;
+  document.getElementById('vodbar-played').setAttribute('d', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
+  document.getElementById('vodbar-remain').setAttribute('x1', px.toFixed(1));
+  document.getElementById('vodbar-handle').setAttribute('x', (px - 4).toFixed(1));
+  document.getElementById('vodbar-cur').textContent = fmtClock(cur);
+  document.getElementById('vodbar-dur').textContent = fmtClock(dur);
+}
+// Keep the bar clear of the sidebar when it is open.
+function placeVodBar() {
+  document.getElementById('vodbar').style.left = state.sidebarOpen ? '500px' : '210px';
+}
+function drawVodBarNow() {
+  var v = document.getElementById('video');
+  if (!state.vod || vodDragging || !isFinite(v.duration) || !v.duration) return;
+  placeVodBar();
+  drawVodBar(v.currentTime || 0, v.duration);
+}
+function showVodBar() {
+  if (!state.vod) return;                // seek bar is for past videos only, never live
+  document.getElementById('vodbar').className = '';
+  placeVodBar();
+  drawVodBarNow();
+  if (!vodbarTimer) vodbarTimer = setInterval(drawVodBarNow, 500);
+}
+// Jump to a fraction (0..1) of the video, used by pointer clicks on the bar.
+function seekVodFrac(frac) {
+  var v = document.getElementById('video');
+  if (!state.vod || !isFinite(v.duration) || !v.duration) return;
+  frac = Math.max(0, Math.min(1, frac));
+  try { v.currentTime = frac * v.duration; } catch (e) {}
+  showVodOverlay();
+}
+function hideVodBar() {
+  document.getElementById('vodbar').className = 'hidden';
+  if (vodbarTimer) { clearInterval(vodbarTimer); vodbarTimer = null; }
 }
 
 /* Quality preference (used by the Settings menu below) */
@@ -1415,20 +1586,33 @@ function nextLiveAfter(slug) {
 
 /* Settings menu (opened by the gear, or the Yellow button, while the list is open) */
 var settings = { open: false, focus: 0, items: [],
-                 chat: false, lowlatency: false, autoadvance: false };
+                 chat: false, lowlatency: false, autoadvance: false,
+                 dim: false, dimStrength: 0.8, dimScope: 'video' };
 function loadSettings() {
   var s = {};
   try { s = JSON.parse(localStorage.getItem('kicktv.settings')) || {}; } catch (e) {}
   settings.chat = !!s.chat;
   settings.lowlatency = !!s.lowlatency;
   settings.autoadvance = !!s.autoadvance;
+  settings.dim = false;                     // dim is never remembered: always off at startup
+  var st = parseFloat(s.dimStrength);
+  settings.dimStrength = (st >= 0.1 && st <= 0.98) ? st : 0.8;
+  settings.dimScope = (s.dimScope === 'all') ? 'all' : 'video';
 }
 function saveSettings() {
   try {
     localStorage.setItem('kicktv.settings', JSON.stringify({
-      chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance
+      chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
+      dimStrength: settings.dimStrength, dimScope: settings.dimScope
     }));
   } catch (e) {}
+}
+function applyDim() {
+  var el = document.getElementById('dimscreen');
+  if (!settings.dim) { el.className = 'hidden'; return; }
+  el.style.background = 'rgba(0,0,0,' + settings.dimStrength + ')';
+  el.style.zIndex = (settings.dimScope === 'all') ? '68' : '';   // 'all' rides above the UI; 'video' below it
+  el.className = '';
 }
 // The rows: three toggles, a Quality header, then the stream's quality rungs.
 function settingsBuild() {
@@ -1436,6 +1620,7 @@ function settingsBuild() {
     { kind: 'toggle', key: 'chat', label: 'Live chat' },
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
+    { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'header', label: 'Quality' }
   ];
   qualityRows().forEach(function (r) {
@@ -1475,12 +1660,18 @@ function renderSettings() {
       list.appendChild(el);
       return;
     }
-    if (it.kind === 'toggle') {
-      var on = !!settings[it.key];
+    if (it.kind === 'toggle' || it.kind === 'dimopt') {
       el.setAttribute('data-focusable', '1');
       var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = it.label;
+      el.appendChild(lab);
+      if (it.kind === 'dimopt') {   // gear sits just left of the On/Off switch
+        var gear = document.createElement('span'); gear.className = 'sgear';
+        gear.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:22px;height:22px;vertical-align:middle"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>';
+        el.appendChild(gear);
+      }
+      var on = it.kind === 'dimopt' ? settings.dim : !!settings[it.key];
       var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = on ? 'On' : 'Off';
-      el.appendChild(lab); el.appendChild(pill);
+      el.appendChild(pill);
     } else { // quality
       var sel = !qmarked && qualityIsSel(it);
       if (sel) qmarked = true;
@@ -1499,7 +1690,7 @@ function applySettingsFocus() {
   for (var i = 0; i < list.children.length; i++) {
     var el = list.children[i], it = settings.items[i];
     if (!it || it.kind === 'header') continue;
-    var cls = it.kind === 'toggle' ? 'srow' : ('srow' + (el.getAttribute('data-sel') === '1' ? ' sel' : ''));
+    var cls = it.kind === 'quality' ? ('srow' + (el.getAttribute('data-sel') === '1' ? ' sel' : '')) : 'srow';
     el.className = cls + (i === settings.focus ? ' focused' : '');
     if (i === settings.focus) {
       var top = el.offsetTop - list.offsetTop;
@@ -1531,6 +1722,11 @@ function settingsActivate() {
     pickQuality(it);
     toast('Quality: ' + it.label);
     renderSettings();
+  } else if (it.kind === 'dimopt') {
+    settings.dim = !settings.dim;              // the row itself just toggles dim on/off
+    applyDim();
+    toast('Dim ' + (settings.dim ? 'on' : 'off'));
+    renderSettings();
   }
 }
 // Make a toggle take effect right away.
@@ -1546,6 +1742,84 @@ function applyToggle(key) {
   }
 }
 
+/* Dim (night) options popup, opened from the Settings "Dim" row. Dim on/off is
+   not remembered (starts off); strength and scope are. */
+var dimopt = { open: false, focus: 0 };
+var DIM_LEVELS = [ { label: 'Light', v: 0.4 }, { label: 'Medium', v: 0.6 }, { label: 'Strong', v: 0.8 }, { label: 'Max', v: 0.94 } ];
+function dimStrengthLabel() {
+  for (var i = 0; i < DIM_LEVELS.length; i++) if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) return DIM_LEVELS[i].label;
+  return Math.round(settings.dimStrength * 100) + '%';
+}
+function openDimOpt() { dimopt.open = true; dimopt.focus = 0; document.getElementById('dimoptmodal').className = ''; renderDimOpt(); }
+function closeDimOpt() {
+  dimopt.open = false;
+  document.getElementById('dimoptmodal').className = 'hidden';
+  if (settings.open) renderSettings();     // refresh the On/Off shown on the Dim row
+}
+function renderDimOpt() {
+  var rows = [
+    { label: 'Dim', value: settings.dim ? 'On' : 'Off', on: settings.dim },
+    { label: 'Strength', value: dimStrengthLabel() },
+    { label: 'Apply to', value: settings.dimScope === 'all' ? 'Everything' : 'Video only' }
+  ];
+  var list = document.getElementById('dimopt-list');
+  list.innerHTML = '';
+  rows.forEach(function (r, i) {
+    var el = document.createElement('div');
+    el.className = 'srow' + (i === dimopt.focus ? ' focused' : '');
+    el.setAttribute('data-idx', i);
+    var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = r.label;
+    var pill = document.createElement('span'); pill.className = 'spill' + (r.on ? ' on' : ''); pill.textContent = r.value;
+    el.appendChild(lab); el.appendChild(pill);
+    list.appendChild(el);
+  });
+}
+function dimoptMove(delta) { var n = dimopt.focus + delta; if (n < 0 || n > 2) return; dimopt.focus = n; renderDimOpt(); }
+function dimoptActivate() {
+  if (dimopt.focus === 0) settings.dim = !settings.dim;
+  else if (dimopt.focus === 1) {
+    var idx = 0;
+    for (var i = 0; i < DIM_LEVELS.length; i++) if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) { idx = i; break; }
+    settings.dimStrength = DIM_LEVELS[(idx + 1) % DIM_LEVELS.length].v;
+  } else settings.dimScope = settings.dimScope === 'all' ? 'video' : 'all';
+  saveSettings();
+  applyDim();
+  renderDimOpt();
+}
+
+/* Buffering spinner (live and VOD) and the centre play/pause button (VOD) */
+var spinnerOn = false;
+function showSpinner() {
+  if (spinnerOn) return;
+  if (document.getElementById('pbstatus').className.indexOf('hidden') === -1) return;  // reconnecting banner already up
+  spinnerOn = true;
+  document.getElementById('spinner').className = '';
+  hideVodPlay();
+}
+function hideSpinner() {
+  if (!spinnerOn) return;
+  spinnerOn = false;
+  document.getElementById('spinner').className = 'hidden';
+  if (state.vod && document.getElementById('overlay').className.indexOf('hidden') === -1) showVodPlay();
+}
+function vodPlayIcon() {
+  var paused = document.getElementById('video').paused;
+  document.getElementById('vodplay-icon').setAttribute('d', paused ? 'M8 5v14l11-7z' : 'M6 5h4v14H6zM14 5h4v14h-4z');
+}
+function showVodPlay() {
+  if (!state.vod || spinnerOn) return;
+  vodPlayIcon();
+  document.getElementById('vodplay').className = '';
+}
+function hideVodPlay() { document.getElementById('vodplay').className = 'hidden'; }
+function toggleVodPlay() {
+  if (!state.vod) return;
+  var v = document.getElementById('video');
+  if (v.paused) playVideo(v); else { try { v.pause(); } catch (e) {} }
+  vodPlayIcon();
+  showVodOverlay();
+}
+
 /* Read-only live chat overlay.
    Kick's chat is delivered over a public Pusher WebSocket, so we can read it
    without any login. We connect straight to Pusher (no Cloudflare in the way,
@@ -1554,6 +1828,7 @@ function applyToggle(key) {
 var CHAT_KEY = '32cbd69e4b950bf97679';   // Kick's public Pusher app key (us2)
 var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=js&version=8.4.0&flash=false';
 var CHAT_MAX = 80;                        // keep at most this many messages on screen
+var CHAT_FADE_MS = 40000;                 // a message fades out this long after it arrives
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null };
 function chatEl() { return document.getElementById('chat'); }
 function showChatOverlay() { chatEl().className = 'on'; }
@@ -1679,6 +1954,12 @@ function addChatMessage(d) {
   appendChatContent(row, d.content);
   box.appendChild(row);
   while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
+  // let each message fade out and drop off after a while, so the overlay does
+  // not build up into a static wall of text
+  setTimeout(function () {
+    row.className = 'cmsg cfade';
+    setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 800);
+  }, CHAT_FADE_MS);
 }
 
 /* OLED burn-in guard.
@@ -1702,6 +1983,87 @@ function checkSaver() {
 }
 function showSaver() { saver.on = true; document.getElementById('saver').className = 'on'; }
 function wakeSaver() { saver.on = false; document.getElementById('saver').className = ''; }
+
+/* Live-channels popup (Channel Up/Down): a quick surf list of the channels that
+   are live right now. It never appears when nothing is live. OK plays the
+   highlighted one; it auto-hides after a few seconds. */
+var chpop = { open: false, list: [], idx: 0, timer: null };
+function liveList() {
+  var out = [];
+  state.order.forEach(function (s) { if (state.channels[s] && state.channels[s].live) out.push(s); });
+  return out;
+}
+function chpopMove(dir) {
+  var live = liveList();
+  if (!live.length) return;                 // nothing live: do not show
+  if (!chpop.open) {
+    chpop.open = true;
+    showCursor();
+    document.getElementById('chpop').className = '';
+    chpop.list = live;
+    var ci = state.current ? live.indexOf(state.current) : -1;
+    chpop.idx = ci >= 0 ? ci : 0;
+  } else {
+    chpop.list = live;
+    if (chpop.idx >= live.length) chpop.idx = live.length - 1;
+  }
+  var n = chpop.idx + dir;
+  if (n < 0) n = live.length - 1;
+  else if (n >= live.length) n = 0;
+  chpop.idx = n;
+  renderChpop();
+  resetChpopTimer();
+}
+function renderChpop() {
+  var box = document.getElementById('chpop-list');
+  box.innerHTML = '';
+  chpop.list.forEach(function (slug, i) {
+    var c = state.channels[slug] || {};
+    var row = document.createElement('div');
+    row.className = 'chrow' + (i === chpop.idx ? ' focused' : '');
+    row.setAttribute('data-idx', i);
+    var av = document.createElement('div');
+    av.className = 'chav';
+    if (c.avatar) av.style.backgroundImage = 'url(' + c.avatar + ')';
+    else av.textContent = (c.name || slug).charAt(0).toUpperCase();
+    row.appendChild(av);
+    var mid = document.createElement('div');
+    mid.className = 'chmid';
+    mid.innerHTML = '<div class="chname"></div><div class="chgame"></div>';
+    mid.children[0].textContent = c.name || slug;
+    mid.children[1].textContent = c.category || 'Live';
+    row.appendChild(mid);
+    var vw = document.createElement('span');
+    vw.className = 'chview';
+    vw.innerHTML = '<span class="chdot"></span>';
+    vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0)));
+    row.appendChild(vw);
+    box.appendChild(row);
+  });
+  var el = box.children[chpop.idx];
+  if (el) {
+    var top = el.offsetTop - box.offsetTop;
+    if (top < box.scrollTop) box.scrollTop = top - 6;
+    else if (top + el.offsetHeight > box.scrollTop + box.clientHeight)
+      box.scrollTop = top + el.offsetHeight - box.clientHeight + 6;
+  }
+}
+function chpopActivate() {
+  var slug = chpop.list[chpop.idx];
+  closeChpop();
+  if (slug) { closeSidebar(); play(slug); }
+}
+function closeChpop() {
+  chpop.open = false;
+  clearTimeout(chpop.timer);
+  document.getElementById('chpop').className = 'hidden';
+}
+function resetChpopTimer() {
+  clearTimeout(chpop.timer);
+  chpop.timer = setTimeout(closeChpop, 4500);
+}
+function isChUp(k) { return k === 33 || k === 427; }
+function isChDown(k) { return k === 34 || k === 428; }
 
 /* Small helpers */
 function toast(msg) {
@@ -1758,18 +2120,41 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.OK) vodActivate();
     return;
   }
+  if (dimopt.open) {
+    e.preventDefault();
+    if (k === KEY.BACK || k === KEY.LEFT) closeDimOpt();
+    else if (k === KEY.UP) dimoptMove(-1);
+    else if (k === KEY.DOWN) dimoptMove(1);
+    else if (k === KEY.OK || k === KEY.RIGHT) dimoptActivate();
+    return;
+  }
   if (settings.open) {
     e.preventDefault();
     if (k === KEY.BACK || k === KEY.RED || k === KEY.LEFT) closeSettings();   // red toggles it shut
     else if (k === KEY.UP) settingsMove(-1);
     else if (k === KEY.DOWN) settingsMove(1);
-    else if (k === KEY.OK || k === KEY.RIGHT) settingsActivate();
+    else if (k === KEY.OK) settingsActivate();
+    else if (k === KEY.RIGHT) {                 // right on the Dim row opens its options
+      var sit = settings.items[settings.focus];
+      if (sit && sit.kind === 'dimopt') openDimOpt(); else settingsActivate();
+    }
+    return;
+  }
+  if (chpop.open) {
+    e.preventDefault();
+    if (isChUp(k) || k === KEY.UP) chpopMove(-1);
+    else if (isChDown(k) || k === KEY.DOWN) chpopMove(1);
+    else if (k === KEY.OK) chpopActivate();
+    else if (k === KEY.BACK || k === KEY.LEFT || k === KEY.RIGHT) closeChpop();
     return;
   }
   if (state.mode === 'add') {
-    if (k === KEY.BACK) { e.preventDefault(); closeAdd(); }
+    if (k === KEY.BACK) { e.preventDefault(); if (add.zone === 'list') backToInput(); else closeAdd(); }
     else if (k === KEY.OK) { e.preventDefault(); confirmAdd(); }
-    return; // let the on-screen keyboard do the typing
+    else if (add.zone === 'input' && k === KEY.DOWN && add.results.length) { e.preventDefault(); enterAddList(); }
+    else if (add.zone === 'list' && k === KEY.UP) { e.preventDefault(); addNav(-1); }
+    else if (add.zone === 'list' && k === KEY.DOWN) { e.preventDefault(); addNav(1); }
+    return; // otherwise let the on-screen keyboard do the typing
   }
   if (state.mode === 'confirm') {
     e.preventDefault();
@@ -1783,6 +2168,8 @@ document.addEventListener('keydown', function (e) {
   if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
   if (k === KEY.RED) { openSettings(); return; }       // red opens settings
   if (k === KEY.YELLOW) { openVodsForContext(); return; } // yellow opens past videos
+  if (isChUp(k)) { chpopMove(-1); return; }            // channel up/down surf the live list
+  if (isChDown(k)) { chpopMove(1); return; }
   if (state.sidebarOpen) {
     resetIdle();
     if (k === KEY.UP) moveSide(-1);
@@ -1796,6 +2183,8 @@ document.addEventListener('keydown', function (e) {
   if (state.vod) {                                       // watching a past video
     if (k === KEY.BACK || k === KEY.STOP) { exitVod(); return; }
     if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
+    if (k === KEY.UP) { chpopMove(-1); return; }         // up/down surf live channels
+    if (k === KEY.DOWN) { chpopMove(1); return; }
     if (k === KEY.FF) { seekVod(60); return; }
     if (k === KEY.REW) { seekVod(-60); return; }
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
@@ -1805,6 +2194,8 @@ document.addEventListener('keydown', function (e) {
   }
   if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
   if (k === KEY.LEFT || k === KEY.RIGHT) openSidebar();  // left or right brings the list up
+  else if (k === KEY.UP) chpopMove(-1);                 // up/down surf the live channels
+  else if (k === KEY.DOWN) chpopMove(1);
   else if (k === KEY.GREEN) refreshSide();              // green button refreshes even while watching
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
   else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
@@ -1847,7 +2238,8 @@ function browseCardFromEvent(e) {
     if (!state.ready || state.mode !== 'player') return;
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
     lastX = e.clientX; lastY = e.clientY;
-    showCursor();      // a real move brings the pointer back and opens the sidebar
+    showCursor();      // a real move brings the pointer back
+    if (state.vod) { showVodOverlay(); return; }   // in a VOD, reveal the seek bar instead
     nudgeSidebar();
   });
   document.getElementById('side-refresh').addEventListener('click', function (e) {
@@ -1877,13 +2269,34 @@ function browseCardFromEvent(e) {
     favList.scrollTop += (e.deltaY > 0 ? 1 : -1) * 88;
   });
   document.getElementById('addok').addEventListener('click', function () {
-    if (state.mode === 'add') confirmAdd();
+    if (state.mode !== 'add') return;
+    var q = document.getElementById('addinput').value.trim();
+    if (q) addChannelBySlug(q);          // the Add button adds exactly what was typed
   });
   document.getElementById('addcancel').addEventListener('click', function () {
     if (state.mode === 'add') closeAdd();
   });
   document.getElementById('addmodal').addEventListener('click', function (e) {
     if (state.mode === 'add' && e.target === this) closeAdd();
+  });
+  document.getElementById('addinput').addEventListener('input', function () {
+    if (state.mode === 'add') scheduleLiveSearch();
+  });
+  var aresults = document.getElementById('addresults');
+  function aResultIdx(e) {
+    var el = e.target;
+    while (el && el !== aresults && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === aresults) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return (isNaN(i) || i < 0 || i >= add.results.length) ? -1 : i;
+  }
+  aresults.addEventListener('mouseover', function (e) {
+    var i = aResultIdx(e);
+    if (i >= 0 && i !== add.focus) { add.zone = 'list'; add.focus = i; applyAddFocus(); }
+  });
+  aresults.addEventListener('click', function (e) {
+    var i = aResultIdx(e);
+    if (i >= 0) { add.focus = i; selectAddResult(); }
   });
   document.getElementById('confirm-yes').addEventListener('click', function () {
     if (state.mode === 'confirm') confirmYes();
@@ -1980,6 +2393,33 @@ function browseCardFromEvent(e) {
     vodsGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
   });
   document.getElementById('vods-close').addEventListener('click', function () { closeVods(); });
+  // Drag (or click) the VOD seek track to scrub. While dragging we preview the
+  // position on the bar and only seek the video on release, so it stays smooth.
+  var vodTrack = document.getElementById('vodbar-track');
+  function vodTrackFrac(e) {
+    var r = vodTrack.getBoundingClientRect();
+    return r.width > 0 ? Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) : 0;
+  }
+  function vodPreview(e) {
+    var v = document.getElementById('video');
+    if (isFinite(v.duration) && v.duration) drawVodBar(vodTrackFrac(e) * v.duration, v.duration);
+  }
+  vodTrack.addEventListener('mousedown', function (e) {
+    if (!state.vod) return;
+    vodDragging = true;
+    clearTimeout(overlayTimer);                 // keep the bar visible while dragging
+    document.getElementById('vodbar').className = '';
+    vodPreview(e);
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (vodDragging) vodPreview(e);
+  });
+  document.addEventListener('mouseup', function (e) {
+    if (!vodDragging) return;
+    vodDragging = false;
+    seekVodFrac(vodTrackFrac(e));               // commit the seek on release
+  });
   // Settings gear and its menu
   var gear = document.getElementById('quality-gear');
   if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openSettings(); });
@@ -1997,10 +2437,65 @@ function browseCardFromEvent(e) {
   });
   slist.addEventListener('click', function (e) {
     var i = sRowIdx(e);
-    if (i >= 0) { settings.focus = i; applySettingsFocus(); settingsActivate(); }
+    if (i < 0) return;
+    settings.focus = i; applySettingsFocus();
+    var g = e.target, onGear = false;      // clicking the Dim gear opens its options
+    while (g && g !== this) {
+      var cl = g.getAttribute && g.getAttribute('class');
+      if (cl && cl.indexOf('sgear') !== -1) { onGear = true; break; }
+      g = g.parentNode;
+    }
+    if (onGear) openDimOpt(); else settingsActivate();
   });
   document.getElementById('settingsmodal').addEventListener('click', function (e) {
     if (e.target === this) closeSettings();
+  });
+  // The bottom colour-button legend is clickable too.
+  document.getElementById('cbguide').addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-act'))) el = el.parentNode;
+    if (!el || el === this) return;
+    var act = el.getAttribute('data-act');
+    if (act === 'settings') openSettings();
+    else if (act === 'refresh') refreshSide();
+    else if (act === 'vods') openVodsForContext();
+    else if (act === 'browse') openBrowse();
+  });
+  // VOD centre play/pause button
+  document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
+  // Dim options popup pointer
+  var dimoptList = document.getElementById('dimopt-list');
+  function dimoptIdx(e) {
+    var el = e.target;
+    while (el && el !== dimoptList && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === dimoptList) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return isNaN(i) ? -1 : i;
+  }
+  dimoptList.addEventListener('mouseover', function (e) { var i = dimoptIdx(e); if (i >= 0 && i !== dimopt.focus) { dimopt.focus = i; renderDimOpt(); } });
+  dimoptList.addEventListener('click', function (e) { var i = dimoptIdx(e); if (i >= 0) { dimopt.focus = i; dimoptActivate(); } });
+  document.getElementById('dimoptmodal').addEventListener('click', function (e) { if (e.target === this) closeDimOpt(); });
+  // Live-channels surf popup pointer
+  var chpopList = document.getElementById('chpop-list');
+  function chRowIdx(e) {
+    var el = e.target;
+    while (el && el !== chpopList && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === chpopList) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return (isNaN(i) || i < 0 || i >= chpop.list.length) ? -1 : i;
+  }
+  chpopList.addEventListener('mouseover', function (e) {
+    var i = chRowIdx(e);
+    if (i >= 0 && i !== chpop.idx) { chpop.idx = i; renderChpop(); resetChpopTimer(); }
+  });
+  chpopList.addEventListener('click', function (e) {
+    var i = chRowIdx(e);
+    if (i >= 0) { chpop.idx = i; chpopActivate(); }
+  });
+  // Clicking the dimmed area outside the panel closes the surf popup, so a click
+  // never falls through to the sidebar and leaves the popup stuck open.
+  document.getElementById('chpop').addEventListener('click', function (e) {
+    if (e.target === this) closeChpop();
   });
   // A pointer move anywhere counts as activity for the burn-in guard.
   document.addEventListener('mousemove', function () { markInput(); });
@@ -2015,11 +2510,20 @@ function browseCardFromEvent(e) {
   });
   video.addEventListener('ended', function () {
     if (state.vod) { toast('Video ended'); exitVod(); return; }
-    if (PB.active && state.current) recoverPlayback(state.current); // a live stream should not just end
+    if (PB.active && state.current) handleEnded(state.current);   // detect a finished live stream
   });
   video.addEventListener('playing', function () {
     PB.stallCount = 0; PB.netRetries = 0; PB.mediaRetries = 0; setBanner('');
+    hideSpinner();
   });
+  // Buffering spinner for both live and VOD.
+  video.addEventListener('waiting', function () { if (!video.paused) showSpinner(); });
+  video.addEventListener('seeking', function () { showSpinner(); });
+  video.addEventListener('canplay', function () { hideSpinner(); });
+  video.addEventListener('seeked', function () { hideSpinner(); });
+  // Keep the VOD play/pause icon in sync with the actual state.
+  video.addEventListener('play', function () { if (state.vod) vodPlayIcon(); });
+  video.addEventListener('pause', function () { if (state.vod) { vodPlayIcon(); hideSpinner(); } });
 })();
 
 // While we are idle and cannot reach Kick, retry a little quicker than the
@@ -2062,6 +2566,7 @@ window.addEventListener('offline', function () {
   setMode('player');
   loadQualityPref();
   loadSettings();
+  applyDim();
   state.lastInput = Date.now();
   setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
   showState('splash');
