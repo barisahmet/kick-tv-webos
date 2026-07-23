@@ -386,7 +386,7 @@ function onNetworkError(slug, hls) {
   if (state.current !== slug) return;
   PB.netRetries++;
   if (PB.netRetries <= MAX_NET_RETRY) {
-    setBanner('Reconnecting…');
+    setBanner('Reconnecting...');
     try { hls.startLoad(); } catch (e) { recoverPlayback(slug); }
   } else {
     recoverPlayback(slug);                        // retried enough, the link probably expired, get a new one
@@ -396,7 +396,7 @@ function onMediaError(slug, hls) {
   if (state.current !== slug) return;
   PB.mediaRetries++;
   if (PB.mediaRetries <= MAX_MEDIA_RETRY) {
-    setBanner('Recovering…');
+    setBanner('Recovering...');
     try { hls.recoverMediaError(); } catch (e) { recoverPlayback(slug); }
   } else {
     recoverPlayback(slug);
@@ -407,13 +407,13 @@ function onMediaError(slug, hls) {
 function recoverPlayback(slug) {
   if (state.current !== slug || PB.reloading) return;
   PB.reloading = true;
-  setBanner('Reconnecting…');
+  setBanner('Reconnecting...');
   stopWatchdog();
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   loadChannel(slug, true);
 }
 function scheduleReconnect(slug) {
-  setBanner('Reconnecting…');
+  setBanner('Reconnecting...');
   if (PB.reconnectTimer) return;
   PB.reconnectTimer = setTimeout(function () {
     PB.reconnectTimer = null;
@@ -753,7 +753,7 @@ function confirmAdd() {
   var slug = document.getElementById('addinput').value.trim().toLowerCase()
     .replace(/^https?:\/\/(www\.)?kick\.com\//, '').replace(/[\/?#].*$/, '');
   if (!slug) { closeAdd(); return; }
-  toast('Checking ' + slug + '…');
+  toast('Checking ' + slug + '...');
   apiGet(slug, function (err, raw) {
     if (err) { toast(err === 404 ? 'No channel named "' + slug + '"' : 'Kick API unreachable'); return; }
     state.channels[slug] = normalize(slug, raw);
