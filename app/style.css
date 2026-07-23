@@ -508,8 +508,6 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 
 /* Update-available note in the Settings menu + the release-notes popup */
-.srow .supd { color: #53fc18; font-weight: 800; }
-.srow .updot { margin-left: auto; width: 14px; height: 14px; border-radius: 7px; background: #e91916; }
 #updatemodal {
   position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 82;
   background: rgba(0,0,0,0.6);
@@ -523,9 +521,13 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #update-head { font-size: 34px; font-weight: 800; color: #fff; }
 #update-ver { font-size: 26px; color: #53fc18; margin: 6px 0 20px; }
 #update-notes {
-  max-height: 520px; overflow: hidden; font-size: 24px; line-height: 1.42;
-  color: #d6d7d8; white-space: pre-wrap;
+  max-height: 520px; overflow-y: auto; overflow-x: hidden; font-size: 24px; line-height: 1.42;
+  color: #d6d7d8; white-space: pre-wrap; padding-right: 12px;
+  -webkit-overflow-scrolling: touch;
 }
+#update-notes::-webkit-scrollbar { width: 8px; }
+#update-notes::-webkit-scrollbar-thumb { background: #3a4046; border-radius: 4px; }
+#update-notes::-webkit-scrollbar-track { background: transparent; }
 #update-hint {
   font-size: 22px; color: #9a9a9d; margin-top: 22px; padding-top: 18px; border-top: 1px solid #2f3438;
 }
@@ -545,8 +547,24 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
 }
 #settings-head {
+  display: flex; align-items: baseline; justify-content: space-between;
   font-size: 26px; font-weight: 800; color: #fff;
   padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
+}
+/* Version chip at the right of the title: muted when current, a yellow "New" pill when an update is out */
+#settings-ver {
+  position: relative; font-size: 18px; font-weight: 700; letter-spacing: 0.3px;
+  color: #6b7075; padding: 3px 9px; border-radius: 8px; border: 1px solid transparent;
+}
+#settings-ver.hasnew {
+  color: #ffd21e; border-color: rgba(255,210,30,0.45); cursor: pointer;
+}
+#settings-ver.hasnew:hover { background: rgba(255,210,30,0.14); border-color: #ffd21e; }
+#settings-ver.hasnew::after {
+  content: 'New'; position: absolute; top: -12px; right: -12px;
+  font-size: 13px; font-weight: 800; letter-spacing: 0.4px; line-height: 1;
+  padding: 3px 6px; border-radius: 6px; background: #ffd21e; color: #0b0e0f;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
 }
 #settings-list { max-height: 700px; overflow: hidden; }
 .srow {

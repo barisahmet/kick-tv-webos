@@ -1633,7 +1633,7 @@ function settingsBuild() {
     { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'header', label: 'Quality' }
   ];
-  if (updateInfo) items.unshift({ kind: 'update', label: 'Update to v' + updateInfo.version });
+  // (The update entry lives as a chip in the Settings header, not a list row.)
   qualityRows().forEach(function (r) {
     items.push({ kind: 'quality', label: r.label, auto: r.auto, h: r.h, idx: r.idx });
   });
@@ -1650,6 +1650,7 @@ function openSettings() {
   settings.items = settingsBuild();
   settings.focus = firstFocusableSetting();
   document.getElementById('settingsmodal').className = '';
+  renderSettingsVer();
   renderSettings();
 }
 function closeSettings() {
@@ -1668,14 +1669,6 @@ function renderSettings() {
     if (it.kind === 'header') {
       el.className = 'shead';
       el.textContent = it.label;
-      list.appendChild(el);
-      return;
-    }
-    if (it.kind === 'update') {
-      el.setAttribute('data-focusable', '1');
-      var ul = document.createElement('span'); ul.className = 'slabel supd'; ul.textContent = it.label;
-      var ud = document.createElement('span'); ud.className = 'updot';
-      el.appendChild(ul); el.appendChild(ud);
       list.appendChild(el);
       return;
     }
@@ -1746,8 +1739,6 @@ function settingsActivate() {
     applyDim();
     toast('Dim ' + (settings.dim ? 'on' : 'off'));
     renderSettings();
-  } else if (it.kind === 'update') {
-    openUpdateNotes();
   }
 }
 // Make a toggle take effect right away.
@@ -1813,7 +1804,27 @@ function dimoptActivate() {
    dot on the gear and shows the release notes; the user re-sideloads manually. */
 var updateInfo = null;      // { version, notes } once a newer release is found
 var updateopen = false;
+var appVersion = '';        // our own version, shown as a chip in the Settings header
 var GH_LATEST = 'https://api.github.com/repos/barisahmet/kick-tv-webos/releases/latest';
+// The version chip at the right of the Settings title: muted "vX" when current,
+// a clickable yellow "New" chip (opens the release notes) when an update is out.
+function renderSettingsVer() {
+  var el = document.getElementById('settings-ver');
+  if (!el) return;
+  if (!appVersion) { el.className = 'hidden'; return; }
+  el.textContent = 'v' + appVersion;                 // always the installed version
+  el.className = updateInfo ? 'hasnew' : '';          // yellow + "New" badge when a newer release exists
+}
+function loadAppVersion() {
+  var x = new XMLHttpRequest();
+  x.open('GET', 'appinfo.json', true);
+  x.onload = function () {
+    try { appVersion = JSON.parse(x.responseText).version || ''; } catch (e) {}
+    if (settings.open) renderSettingsVer();
+  };
+  x.onerror = function () {};
+  x.send();
+}
 function isNewerVersion(a, b) {
   var pa = String(a).split('.'), pb = String(b).split('.');
   for (var i = 0; i < 3; i++) {
@@ -1827,6 +1838,8 @@ function checkForUpdate() {
   xi.open('GET', 'appinfo.json', true);
   xi.onload = function () {
     var cur; try { cur = JSON.parse(xi.responseText).version; } catch (e) { return; }
+    appVersion = cur;
+    if (settings.open) renderSettingsVer();
     var xg = new XMLHttpRequest();
     xg.open('GET', GH_LATEST, true);
     xg.onload = function () {
@@ -1837,7 +1850,7 @@ function checkForUpdate() {
         updateInfo = { version: latest, notes: rel.body || '' };
         var g = document.getElementById('quality-gear');
         if (g) g.classList.add('hasupdate');
-        if (settings.open) { settings.items = settingsBuild(); renderSettings(); }
+        if (settings.open) { settings.items = settingsBuild(); renderSettings(); renderSettingsVer(); }
       }
     };
     xg.timeout = 12000;
@@ -2203,7 +2216,10 @@ document.addEventListener('keydown', function (e) {
   }
   if (updateopen) {
     e.preventDefault();
-    if (k === KEY.BACK || k === KEY.OK || k === KEY.LEFT) closeUpdateNotes();
+    var notes = document.getElementById('update-notes');
+    if (k === KEY.UP) notes.scrollTop -= 120;
+    else if (k === KEY.DOWN) notes.scrollTop += 120;
+    else if (k === KEY.BACK || k === KEY.OK || k === KEY.LEFT) closeUpdateNotes();
     return;
   }
   if (dimopt.open) {
@@ -2536,6 +2552,11 @@ function browseCardFromEvent(e) {
   document.getElementById('settingsmodal').addEventListener('click', function (e) {
     if (e.target === this) closeSettings();
   });
+  // The version chip opens the release notes when an update is available
+  document.getElementById('settings-ver').addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (updateInfo) openUpdateNotes();
+  });
   // The bottom colour-button legend is clickable too.
   document.getElementById('cbguide').addEventListener('click', function (e) {
     var el = e.target;
@@ -2656,6 +2677,7 @@ window.addEventListener('offline', function () {
   loadQualityPref();
   loadSettings();
   applyDim();
+  loadAppVersion();                           // populate the version chip in Settings promptly
   setTimeout(checkForUpdate, 3000);           // check GitHub for a newer release, once the app has settled
   state.lastInput = Date.now();
   setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s

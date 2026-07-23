@@ -11,3 +11,6 @@ npm-debug.log*
 # Private notes / rules (device IPs, personal channel data, etc.)
 CLAUDE.md
 
+# Local dev / deploy tooling (CDP scripts, Node shim) — not for the public repo
+tools/
+
