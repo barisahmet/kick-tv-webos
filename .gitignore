@@ -7,3 +7,7 @@
 # Node
 node_modules/
 npm-debug.log*
+
+# Private notes / rules (device IPs, personal channel data, etc.)
+CLAUDE.md
+

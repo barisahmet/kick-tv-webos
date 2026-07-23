@@ -302,7 +302,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   font-size: 28px; color: #9a9a9d; pointer-events: none;
 }
 
-/* Quality gear, shown at the bottom-right while the sidebar is open */
+/* Settings gear, shown at the bottom-right while the sidebar is open */
 #quality-gear {
   position: absolute; right: 40px; bottom: 36px;
   width: 66px; height: 66px; border-radius: 33px;
@@ -313,28 +313,62 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #quality-gear:hover { border-color: #53fc18; color: #53fc18; }
 #quality-gear svg { width: 38px; height: 38px; }
 
-/* Quality menu, popping up from the gear */
-#qualitymodal {
+/* Settings menu, popping up from the gear */
+#settingsmodal {
   position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
   background: rgba(0,0,0,0.35);
 }
-#qualitybox {
-  position: absolute; right: 40px; bottom: 118px; width: 340px;
+#settingsbox {
+  position: absolute; right: 40px; bottom: 118px; width: 380px;
   background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
   padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
 }
-#quality-head {
+#settings-head {
   font-size: 26px; font-weight: 800; color: #fff;
-  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 8px;
+  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
 }
-#quality-list { max-height: 640px; overflow: hidden; }
-.qrow {
+#settings-list { max-height: 700px; overflow: hidden; }
+.srow {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 26px; font-size: 28px; color: #d6d7d8; cursor: pointer;
+  padding: 12px 26px; font-size: 27px; color: #d6d7d8; cursor: pointer;
 }
-.qrow.focused { background: #2a2f33; }
-.qrow.sel { color: #53fc18; }
-.qrow .qcheck { color: #53fc18; font-size: 26px; width: 24px; text-align: right; }
+.srow.focused { background: #2a2f33; }
+.srow.sel { color: #53fc18; }
+.srow .qopt { padding-left: 14px; }              /* indent the quality rungs under the header */
+.srow .scheck { color: #53fc18; font-size: 25px; width: 24px; text-align: right; }
+.spill {
+  min-width: 58px; text-align: center; font-size: 22px; font-weight: 700;
+  padding: 3px 14px; border-radius: 14px; background: #2a2d30; color: #9a9a9d;
+}
+.spill.on { background: #143206; color: #53fc18; }
+.shead {
+  font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: #7f8386; padding: 14px 26px 6px; margin-top: 4px; border-top: 1px solid #23272a;
+}
+
+/* Read-only chat overlay on the right edge */
+#chat {
+  position: absolute; right: 0; top: 0; width: 452px; height: 1080px;
+  box-sizing: border-box; padding: 0 24px 30px 24px;
+  display: none; flex-direction: column; justify-content: flex-end;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 20%);
+}
+#chat.on { display: flex; }
+.cmsg {
+  font-size: 24px; line-height: 1.32; margin-top: 10px; color: #e9e9ea;
+  word-wrap: break-word; text-shadow: 0 1px 3px rgba(0,0,0,0.95);
+}
+.cmsg .cuser { font-weight: 800; }
+.cmsg .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }
+
+/* OLED burn-in guard: just dims the whole panel, no moving element */
+#saver {
+  position: absolute; inset: 0; z-index: 70; display: none;
+  background: rgba(0,0,0,0.94);
+}
+#saver.on { display: block; }
 
 /* Little pop-up messages at the bottom */
 #toast {

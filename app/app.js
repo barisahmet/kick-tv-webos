@@ -152,12 +152,13 @@ function normalize(slug, raw) {
     viewers: live ? (raw.livestream.viewer_count || 0) : 0,
     title: live ? (raw.livestream.session_title || '') : '',
     category: cats && cats[0] ? (cats[0].name || '') : '',
-    playbackUrl: raw.playback_url || null
+    playbackUrl: raw.playback_url || null,
+    chatroomId: (raw.chatroom && raw.chatroom.id) || null
   };
 }
 function offlineStub(slug) {
   return { slug: slug, name: slug, live: false, viewers: 0, title: '',
-           category: '', avatar: null, playbackUrl: null };
+           category: '', avatar: null, playbackUrl: null, chatroomId: null };
 }
 // Order the list. Pinned channels that are live go first, then the rest of the
 // live ones by viewer count, then everyone offline in alphabetical order. A pin
@@ -286,11 +287,13 @@ function returnToIdle() {
   PB.slug = null;
   setBanner('');
   updateGear();
+  disconnectChat();
   showNothing();
 }
 function play(slug) {
   if (!slug) return;
   teardownVideo();
+  disconnectChat();          // drop the old channel's chat; the new one connects once it loads
   setMode('player');
   state.current = slug;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
@@ -316,6 +319,12 @@ function loadChannel(slug, isRecovery) {
     var c = normalize(slug, raw);
     state.channels[slug] = c;
     if (!c.live || !c.playbackUrl) {
+      // Stream ended or the channel is offline. Hop to the next live favorite
+      // if auto-advance is on, otherwise fall back to the idle screen.
+      if (settings.autoadvance) {
+        var nx = nextLiveAfter(slug);
+        if (nx) { toast('Auto-advancing to ' + (state.channels[nx].name || nx)); play(nx); return; }
+      }
       toast(c.name + ' is offline');
       returnToIdle();
       return;
@@ -324,6 +333,7 @@ function loadChannel(slug, isRecovery) {
     if (isRecovery) setBanner('');
     else { showOverlay(c); if (state.sidebarOpen) renderSidebar(slug); }
     attachStream(slug, c.playbackUrl);
+    syncChat();                                  // connect chat for this channel if it is enabled
   });
 }
 function attachStream(slug, url) {
@@ -331,12 +341,7 @@ function attachStream(slug, url) {
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   PB.netRetries = 0; PB.mediaRetries = 0;
   if (window.Hls && Hls.isSupported()) {
-    var hls = new Hls({
-      enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
-      manifestLoadingMaxRetry: 4, manifestLoadingRetryDelay: 1000,
-      levelLoadingMaxRetry: 4, levelLoadingRetryDelay: 1000,
-      fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 1000
-    });
+    var hls = new Hls(hlsConfig());
     state.hls = hls;
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (state.hls !== hls || !data || !data.fatal) return;   // old stream, or not fatal, so ignore
@@ -507,12 +512,12 @@ function hideCursor() {
 function showCursor() {
   document.documentElement.classList.remove('hidecursor');
 }
-// The quality gear sits at the bottom-right and only makes sense while a stream
-// is playing and the sidebar is open, so show it exactly then.
+// The settings gear sits at the bottom-right and is available whenever the
+// sidebar is open, so show it exactly then.
 function updateGear() {
   var g = document.getElementById('quality-gear');
   if (!g) return;
-  if (state.sidebarOpen && state.current) g.classList.remove('hidden');
+  if (state.sidebarOpen) g.classList.remove('hidden');
   else g.classList.add('hidden');
 }
 function openSidebar() {
@@ -973,8 +978,8 @@ function browseAddFavorite(slug) {
   renderBrowse();          // flip the card's + into a check
 }
 
-/* Quality selector (the gear at the bottom-right of an open sidebar) */
-var quality = { open: false, sel: 'auto', focus: 0, items: [] };
+/* Quality preference (used by the Settings menu below) */
+var quality = { sel: 'auto' };
 function loadQualityPref() {
   var v = null;
   try { v = localStorage.getItem('kicktv.quality'); } catch (e) {}
@@ -1002,7 +1007,7 @@ function applyQualityPref() {
   if (!state.hls) return;
   try { state.hls.currentLevel = levelIndexForPref(); } catch (e) {}
 }
-// Build the menu rows: Auto on top, then the stream's levels high to low.
+// Build the quality rows: Auto on top, then the stream's levels high to low.
 function qualityRows() {
   var rows = [{ label: 'Auto', auto: true, h: -1, idx: -1 }];
   if (state.hls && state.hls.levels && state.hls.levels.length) {
@@ -1021,67 +1026,7 @@ function qualityRows() {
 function qualityIsSel(row) {
   return row.auto ? quality.sel === 'auto' : (quality.sel !== 'auto' && row.h === quality.sel);
 }
-function openQuality() {
-  if (!state.ready || !state.current || quality.open) return;
-  quality.open = true;
-  setMode('quality');
-  quality.items = qualityRows();
-  quality.focus = 0;
-  for (var i = 0; i < quality.items.length; i++) {
-    if (qualityIsSel(quality.items[i])) { quality.focus = i; break; }
-  }
-  document.getElementById('qualitymodal').className = '';
-  renderQuality();
-}
-function closeQuality() {
-  quality.open = false;
-  document.getElementById('qualitymodal').className = 'hidden';
-  setMode('player');
-  if (state.sidebarOpen) resetIdle();
-}
-function renderQuality() {
-  var list = document.getElementById('quality-list');
-  list.innerHTML = '';
-  var marked = false;
-  quality.items.forEach(function (row, i) {
-    var sel = !marked && qualityIsSel(row);
-    if (sel) marked = true;
-    var el = document.createElement('div');
-    el.setAttribute('data-idx', i);
-    el.setAttribute('data-sel', sel ? '1' : '0');
-    var name = document.createElement('span');
-    name.className = 'qlabel'; name.textContent = row.label;
-    var chk = document.createElement('span');
-    chk.className = 'qcheck'; chk.textContent = sel ? '✓' : '';
-    el.appendChild(name); el.appendChild(chk);
-    list.appendChild(el);
-  });
-  applyQualityFocus();
-}
-function applyQualityFocus() {
-  var list = document.getElementById('quality-list');
-  for (var i = 0; i < list.children.length; i++) {
-    var row = list.children[i];
-    row.className = 'qrow' + (row.getAttribute('data-sel') === '1' ? ' sel' : '') +
-                    (i === quality.focus ? ' focused' : '');
-    if (i === quality.focus) {
-      var top = row.offsetTop - list.offsetTop;
-      if (top < list.scrollTop) list.scrollTop = top - 6;
-      else if (top + row.offsetHeight > list.scrollTop + list.clientHeight)
-        list.scrollTop = top + row.offsetHeight - list.clientHeight + 6;
-    }
-  }
-}
-function qualityMove(delta) {
-  if (!quality.items.length) return;
-  var n = quality.focus + delta;
-  if (n < 0 || n >= quality.items.length) return;
-  quality.focus = n;
-  applyQualityFocus();
-}
-function qualityActivate() {
-  var row = quality.items[quality.focus];
-  if (!row) return;
+function pickQuality(row) {
   if (row.auto) {
     quality.sel = 'auto';
     if (state.hls) { try { state.hls.currentLevel = -1; } catch (e) {} }   // -1 hands control back to auto
@@ -1090,9 +1035,297 @@ function qualityActivate() {
     if (state.hls && row.idx >= 0) { try { state.hls.currentLevel = row.idx; } catch (e) {} }
   }
   saveQualityPref();
-  toast('Quality: ' + row.label);
-  closeQuality();
 }
+
+/* Player options that ride on top of hls.js */
+// Low latency trims how far behind the live edge we play. It only takes hold on
+// a fresh hls instance, so toggling it reloads the current stream.
+function hlsConfig() {
+  var cfg = {
+    enableWorker: true, capLevelToPlayerSize: true,
+    manifestLoadingMaxRetry: 4, manifestLoadingRetryDelay: 1000,
+    levelLoadingMaxRetry: 4, levelLoadingRetryDelay: 1000,
+    fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 1000
+  };
+  if (settings.lowlatency) {
+    cfg.lowLatencyMode = true;
+    cfg.liveSyncDurationCount = 2;
+    cfg.maxLiveSyncPlaybackRate = 1.5;
+    cfg.maxBufferLength = 10;
+    cfg.backBufferLength = 0;
+  } else {
+    cfg.maxBufferLength = 30;
+  }
+  return cfg;
+}
+// The next live favorite after `slug`, used by auto-advance when a stream ends.
+function nextLiveAfter(slug) {
+  for (var i = 0; i < state.order.length; i++) {
+    var s = state.order[i];
+    if (s !== slug && state.channels[s] && state.channels[s].live) return s;
+  }
+  return null;
+}
+
+/* Settings menu (opened by the gear, or the Yellow button, while the list is open) */
+var settings = { open: false, focus: 0, items: [],
+                 chat: false, lowlatency: false, autoadvance: false };
+function loadSettings() {
+  var s = {};
+  try { s = JSON.parse(localStorage.getItem('kicktv.settings')) || {}; } catch (e) {}
+  settings.chat = !!s.chat;
+  settings.lowlatency = !!s.lowlatency;
+  settings.autoadvance = !!s.autoadvance;
+}
+function saveSettings() {
+  try {
+    localStorage.setItem('kicktv.settings', JSON.stringify({
+      chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance
+    }));
+  } catch (e) {}
+}
+// The rows: three toggles, a Quality header, then the stream's quality rungs.
+function settingsBuild() {
+  var items = [
+    { kind: 'toggle', key: 'chat', label: 'Live chat' },
+    { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
+    { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
+    { kind: 'header', label: 'Quality' }
+  ];
+  qualityRows().forEach(function (r) {
+    items.push({ kind: 'quality', label: r.label, auto: r.auto, h: r.h, idx: r.idx });
+  });
+  return items;
+}
+function firstFocusableSetting() {
+  for (var i = 0; i < settings.items.length; i++) if (settings.items[i].kind !== 'header') return i;
+  return 0;
+}
+function openSettings() {
+  if (!state.ready || settings.open) return;
+  settings.open = true;
+  setMode('settings');
+  settings.items = settingsBuild();
+  settings.focus = firstFocusableSetting();
+  document.getElementById('settingsmodal').className = '';
+  renderSettings();
+}
+function closeSettings() {
+  settings.open = false;
+  document.getElementById('settingsmodal').className = 'hidden';
+  setMode('player');
+  if (state.sidebarOpen) resetIdle();
+}
+function renderSettings() {
+  var list = document.getElementById('settings-list');
+  list.innerHTML = '';
+  var qmarked = false;
+  settings.items.forEach(function (it, i) {
+    var el = document.createElement('div');
+    el.setAttribute('data-idx', i);
+    if (it.kind === 'header') {
+      el.className = 'shead';
+      el.textContent = it.label;
+      list.appendChild(el);
+      return;
+    }
+    if (it.kind === 'toggle') {
+      var on = !!settings[it.key];
+      el.setAttribute('data-focusable', '1');
+      var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = it.label;
+      var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = on ? 'On' : 'Off';
+      el.appendChild(lab); el.appendChild(pill);
+    } else { // quality
+      var sel = !qmarked && qualityIsSel(it);
+      if (sel) qmarked = true;
+      el.setAttribute('data-focusable', '1');
+      el.setAttribute('data-sel', sel ? '1' : '0');
+      var qlab = document.createElement('span'); qlab.className = 'slabel qopt'; qlab.textContent = it.label;
+      var chk = document.createElement('span'); chk.className = 'scheck'; chk.textContent = sel ? '✓' : '';
+      el.appendChild(qlab); el.appendChild(chk);
+    }
+    list.appendChild(el);
+  });
+  applySettingsFocus();
+}
+function applySettingsFocus() {
+  var list = document.getElementById('settings-list');
+  for (var i = 0; i < list.children.length; i++) {
+    var el = list.children[i], it = settings.items[i];
+    if (!it || it.kind === 'header') continue;
+    var cls = it.kind === 'toggle' ? 'srow' : ('srow' + (el.getAttribute('data-sel') === '1' ? ' sel' : ''));
+    el.className = cls + (i === settings.focus ? ' focused' : '');
+    if (i === settings.focus) {
+      var top = el.offsetTop - list.offsetTop;
+      if (top < list.scrollTop) list.scrollTop = top - 6;
+      else if (top + el.offsetHeight > list.scrollTop + list.clientHeight)
+        list.scrollTop = top + el.offsetHeight - list.clientHeight + 6;
+    }
+  }
+}
+function settingsMove(delta) {
+  var n = settings.focus;
+  while (true) {
+    n += delta;
+    if (n < 0 || n >= settings.items.length) return;
+    if (settings.items[n].kind !== 'header') break;
+  }
+  settings.focus = n;
+  applySettingsFocus();
+}
+function settingsActivate() {
+  var it = settings.items[settings.focus];
+  if (!it) return;
+  if (it.kind === 'toggle') {
+    settings[it.key] = !settings[it.key];
+    saveSettings();
+    applyToggle(it.key);
+    renderSettings();
+  } else if (it.kind === 'quality') {
+    pickQuality(it);
+    toast('Quality: ' + it.label);
+    renderSettings();
+  }
+}
+// Make a toggle take effect right away.
+function applyToggle(key) {
+  if (key === 'chat') {
+    syncChat();
+    toast('Live chat ' + (settings.chat ? 'on' : 'off'));
+  } else if (key === 'lowlatency') {
+    toast('Low latency ' + (settings.lowlatency ? 'on' : 'off'));
+    if (state.current) recoverPlayback(state.current);   // reload so the new buffering takes hold
+  } else if (key === 'autoadvance') {
+    toast('Auto-advance ' + (settings.autoadvance ? 'on' : 'off'));
+  }
+}
+
+/* Read-only live chat overlay.
+   Kick's chat is delivered over a public Pusher WebSocket, so we can read it
+   without any login. We connect straight to Pusher (no Cloudflare in the way,
+   unlike the API), subscribe to the channel's chatroom, and print messages.
+   Sending would need an account, which this app deliberately does not do. */
+var CHAT_KEY = '32cbd69e4b950bf97679';   // Kick's public Pusher app key (us2)
+var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=js&version=8.4.0&flash=false';
+var CHAT_MAX = 80;                        // keep at most this many messages on screen
+var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null };
+function chatEl() { return document.getElementById('chat'); }
+function showChatOverlay() { chatEl().className = 'on'; }
+function hideChatOverlay() { chatEl().className = ''; }
+function clearChat() { chatEl().innerHTML = ''; }
+function currentRoomId() {
+  var c = state.current && state.channels[state.current];
+  return (c && c.chatroomId) ? c.chatroomId : null;
+}
+// Bring chat into line with the current setting and channel.
+function syncChat() {
+  if (!settings.chat || !state.current) { disconnectChat(); return; }
+  var room = currentRoomId();
+  if (!room) { disconnectChat(); return; }
+  if (chat.room === room && chat.ws && chat.ws.readyState <= 1) { showChatOverlay(); return; }
+  connectChat(room);
+}
+function connectChat(room) {
+  disconnectChat();
+  chat.want = true; chat.room = room; chat.retry = 0;
+  clearChat(); showChatOverlay();
+  openChatSocket(room);
+}
+function openChatSocket(room) {
+  var ws;
+  try { ws = new WebSocket(CHAT_URL); } catch (e) { return; }
+  chat.ws = ws;
+  ws.onmessage = function (ev) {
+    var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.event === 'pusher:ping') { try { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); } catch (e) {} return; }
+    if (m.event === 'pusher:connection_established') {
+      try { ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel: 'chatrooms.' + room + '.v2' } })); } catch (e) {}
+      return;
+    }
+    if (m.event && m.event.indexOf('ChatMessageEvent') !== -1) {
+      var d; try { d = JSON.parse(m.data); } catch (e) { return; }
+      addChatMessage(d);
+    }
+  };
+  ws.onclose = function () {
+    if (chat.ws !== ws) return;
+    chat.ws = null;
+    if (chat.want && settings.chat && currentRoomId() === room) {
+      chat.retry++;
+      var delay = Math.min(15000, 1500 * chat.retry);
+      chat.retryTimer = setTimeout(function () {
+        if (chat.want && settings.chat && currentRoomId() === room) openChatSocket(room);
+      }, delay);
+    }
+  };
+  ws.onerror = function () { try { ws.close(); } catch (e) {} };
+}
+function disconnectChat() {
+  chat.want = false; chat.room = null;
+  if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
+  if (chat.ws) { try { chat.ws.onclose = null; chat.ws.close(); } catch (e) {} chat.ws = null; }
+  hideChatOverlay(); clearChat();
+}
+// Kick puts emotes inline as [emote:12345:Name]. Render the real emote image so
+// chat looks like Kick, not "KEKW" text. Built node by node (never innerHTML) so
+// message text can never inject markup. If an image fails, fall back to its name.
+function appendChatContent(row, content) {
+  content = String(content || '');
+  var re = /\[emote:(\d+):([^\]]+)\]/g, last = 0, m;
+  while ((m = re.exec(content)) !== null) {
+    if (m.index > last) row.appendChild(document.createTextNode(content.slice(last, m.index)));
+    var img = document.createElement('img');
+    img.className = 'cemote';
+    img.src = 'https://files.kick.com/emotes/' + m[1] + '/fullsize';
+    img.alt = m[2];
+    (function (name) {
+      img.onerror = function () {
+        if (this.parentNode) this.parentNode.replaceChild(document.createTextNode(name), this);
+      };
+    })(m[2]);
+    row.appendChild(img);
+    last = re.lastIndex;
+  }
+  if (last < content.length) row.appendChild(document.createTextNode(content.slice(last)));
+}
+function addChatMessage(d) {
+  if (!d || !d.sender) return;
+  var box = chatEl();
+  var row = document.createElement('div');
+  row.className = 'cmsg';
+  var u = document.createElement('span');
+  u.className = 'cuser';
+  var color = d.sender.identity && d.sender.identity.color;
+  u.style.color = color || '#53fc18';
+  u.textContent = d.sender.username || '';
+  row.appendChild(u);
+  row.appendChild(document.createTextNode(' '));
+  appendChatContent(row, d.content);
+  box.appendChild(row);
+  while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
+}
+
+/* OLED burn-in guard.
+   Static bright pixels can burn into an OLED over time. When nothing has moved
+   for a while and the screen is showing something static (an idle message or a
+   paused frame), we heavily dim the whole panel so nothing stays lit and bright.
+   Any remote or pointer activity wakes it back up. */
+var SAVER_MS = 240000;      // four minutes of stillness on a static screen
+var saver = { on: false, timer: null };
+function markInput() {
+  state.lastInput = Date.now();
+  if (saver.on) wakeSaver();
+}
+function isStaticScreen() {
+  var v = document.getElementById('video');
+  return !state.current || (v && v.paused);   // idle message, or a frozen paused frame
+}
+function checkSaver() {
+  if (!state.ready || saver.on) return;
+  if (Date.now() - state.lastInput > SAVER_MS && isStaticScreen()) showSaver();
+}
+function showSaver() { saver.on = true; document.getElementById('saver').className = 'on'; }
+function wakeSaver() { saver.on = false; document.getElementById('saver').className = ''; }
 
 /* Small helpers */
 function toast(msg) {
@@ -1113,6 +1346,9 @@ function setMode(mode) {
 /* Remote and keyboard input */
 document.addEventListener('keydown', function (e) {
   var k = e.keyCode;
+  var wasSaver = saver.on;
+  markInput();                                      // any key counts as activity for the burn-in guard
+  if (wasSaver) { e.preventDefault(); return; }     // the first press just dismisses the screensaver
   if (!state.ready) { e.preventDefault(); return; } // still on the splash, ignore input until data is ready
   if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
   if (browse.open) {
@@ -1125,12 +1361,12 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.OK) browseActivate();
     return;
   }
-  if (quality.open) {
+  if (settings.open) {
     e.preventDefault();
-    if (k === KEY.BACK || k === KEY.YELLOW || k === KEY.LEFT) closeQuality();
-    else if (k === KEY.UP) qualityMove(-1);
-    else if (k === KEY.DOWN) qualityMove(1);
-    else if (k === KEY.OK) qualityActivate();
+    if (k === KEY.BACK || k === KEY.YELLOW || k === KEY.LEFT) closeSettings();
+    else if (k === KEY.UP) settingsMove(-1);
+    else if (k === KEY.DOWN) settingsMove(1);
+    else if (k === KEY.OK || k === KEY.RIGHT) settingsActivate();
     return;
   }
   if (state.mode === 'add') {
@@ -1154,7 +1390,7 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
-    else if (k === KEY.YELLOW) openQuality();            // yellow opens the quality menu
+    else if (k === KEY.YELLOW) openSettings();           // yellow opens the settings menu
     else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar(); // left or right tucks the list away
     else if (k === KEY.BACK) { closeSidebar(); hideCursor(); } // close the list and hide the pointer
     return;
@@ -1286,26 +1522,30 @@ function browseCardFromEvent(e) {
     if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) loadBrowseMore(false);
   });
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
-  // Quality gear and its menu
+  // Settings gear and its menu
   var gear = document.getElementById('quality-gear');
-  if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openQuality(); });
-  var qlist = document.getElementById('quality-list');
-  function qRowIdx(e) {
+  if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openSettings(); });
+  var slist = document.getElementById('settings-list');
+  function sRowIdx(e) {
     var el = e.target;
-    while (el && el !== qlist && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
-    return (el && el !== qlist) ? parseInt(el.getAttribute('data-idx'), 10) : -1;
+    while (el && el !== slist && !(el.getAttribute && el.getAttribute('data-focusable'))) el = el.parentNode;
+    if (!el || el === slist) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return isNaN(i) ? -1 : i;
   }
-  qlist.addEventListener('mouseover', function (e) {
-    var i = qRowIdx(e);
-    if (i >= 0 && i !== quality.focus) { quality.focus = i; applyQualityFocus(); }
+  slist.addEventListener('mouseover', function (e) {
+    var i = sRowIdx(e);
+    if (i >= 0 && i !== settings.focus) { settings.focus = i; applySettingsFocus(); }
   });
-  qlist.addEventListener('click', function (e) {
-    var i = qRowIdx(e);
-    if (i >= 0) { quality.focus = i; qualityActivate(); }
+  slist.addEventListener('click', function (e) {
+    var i = sRowIdx(e);
+    if (i >= 0) { settings.focus = i; applySettingsFocus(); settingsActivate(); }
   });
-  document.getElementById('qualitymodal').addEventListener('click', function (e) {
-    if (e.target === this) closeQuality();
+  document.getElementById('settingsmodal').addEventListener('click', function (e) {
+    if (e.target === this) closeSettings();
   });
+  // A pointer move anywhere counts as activity for the burn-in guard.
+  document.addEventListener('mousemove', function () { markInput(); });
 })();
 
 /* Watching the video element for trouble */
@@ -1361,6 +1601,9 @@ window.addEventListener('offline', function () {
 (function boot() {
   setMode('player');
   loadQualityPref();
+  loadSettings();
+  state.lastInput = Date.now();
+  setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
   showState('splash');
   startPlayerPoll();
   fetchFavorites(function () {
@@ -1368,7 +1611,14 @@ window.addEventListener('offline', function () {
     var last = loadLast();
     var target = (last && state.channels[last] && state.channels[last].live) ? last : firstLive();
     if (target) { play(target); return; }
-    showNothing();
-    if (state.netDown) scheduleDownRetry();
+    // Nothing to play. On a fresh, empty setup, open the live browser so there
+    // is something to pick from right away; otherwise show the idle screen.
+    if (!getFavorites().length && !state.netDown) {
+      showState('empty');
+      openBrowse();
+    } else {
+      showNothing();
+      if (state.netDown) scheduleDownRetry();
+    }
   });
 })();
