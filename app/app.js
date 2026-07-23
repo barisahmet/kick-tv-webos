@@ -38,9 +38,11 @@ var state = {
   tempChannel: null,     // a browsed channel that is playing but not in the follow list
   lastFetch: 0,          // when favorites were last refreshed (to avoid redundant fetches)
   vod: null,             // set to a past-video descriptor while a VOD is playing
-  vodReturn: null        // the live channel to go back to when the VOD ends or you exit
+  vodReturn: null,       // the live channel to go back to when the VOD ends or you exit
+  suppressNudgeUntil: 0  // after a click hides the UI, pointer moves won't reopen it until this time
 };
 var IDLE_MS = 5000;
+var NUDGE_SUPPRESS_MS = 10000;   // how long a click-to-hide keeps the sidebar from popping back on movement
 
 // Playback state and the numbers that control how we recover from drops.
 var PB = { slug: null, active: false, reloading: false,
@@ -178,20 +180,32 @@ function sortOrder(favs) {
     return cb2.viewers - ca.viewers;                                               // live: by viewers
   });
 }
+// Cap how many channel lookups are in flight at once. Firing all of them together
+// (24+ concurrent PalmServiceBridge calls -> that many simultaneous TLS handshakes to
+// Cloudflare in the service) overwhelmed the bus and stalled some requests all the way
+// to their timeouts, so boot could sit on the splash for 30s+. A small pool keeps every
+// request fast and reliable while still finishing the whole list in a second or two.
+var FETCH_CONCURRENCY = 5;
 function fetchFavorites(done) {
-  var favs = getFavorites(), pending = favs.length, ok = 0;
-  if (!pending) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
-  favs.forEach(function (slug) {
-    apiGet(slug, function (err, raw) {
-      if (!err) { state.channels[slug] = normalize(slug, raw); ok++; }
-      else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
-      if (--pending === 0) {
-        state.lastFetch = Date.now();
-        setNetDown(ok === 0);           // if nothing at all got through, treat it as offline
-        sortOrder(favs); detectOnline(favs); done();
-      }
-    });
-  });
+  var favs = getFavorites(), total = favs.length, ok = 0, started = 0, finished = 0;
+  if (!total) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
+  function onOne(slug, err, raw) {
+    if (!err) { state.channels[slug] = normalize(slug, raw); ok++; }
+    else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
+    if (++finished === total) {
+      state.lastFetch = Date.now();
+      setNetDown(ok === 0);             // if nothing at all got through, treat it as offline
+      sortOrder(favs); detectOnline(favs); done();
+    } else {
+      pump();                          // a slot freed up — start the next one
+    }
+  }
+  function pump() {
+    while (started < total && (started - finished) < FETCH_CONCURRENCY) {
+      (function (slug) { apiGet(slug, function (err, raw) { onOne(slug, err, raw); }); })(favs[started++]);
+    }
+  }
+  pump();
 }
 function setNetDown(down) { state.netDown = down; }
 // Watch for a channel going from offline to live and show a small alert. The
@@ -601,6 +615,9 @@ function resetIdle() {
 // Called when the pointer moves or Left is pressed. Open the sidebar and keep it up.
 function nudgeSidebar() {
   if (!state.ready || state.mode !== 'player' || browse.open || vods.open || cats.open || chpop.open) return;
+  // If the user just clicked to hide the UI, don't let a stray pointer move pop it
+  // straight back open. They can always click again to bring it up (which clears this).
+  if (!state.sidebarOpen && Date.now() < state.suppressNudgeUntil) return;
   if (!state.sidebarOpen) openSidebar(); else resetIdle();
 }
 function focusKeyOf(item) { return item ? (item.type === 'add' ? 'add' : item.slug) : null; }
@@ -797,7 +814,11 @@ function closeAdd() {
   document.getElementById('addresults').innerHTML = '';
   add.results = []; add.zone = 'input';
   setMode('player');
-  if (state.sidebarOpen) renderSidebar('add'); else openSidebar();
+  // Focus the playing channel (or the top of the list) — NOT the Add row, which would
+  // yank the list all the way to the bottom every time the dialog is dismissed.
+  var back = (state.current && state.order.indexOf(state.current) !== -1) ? state.current
+           : (state.tempChannel || state.order[0] || 'add');
+  if (state.sidebarOpen) renderSidebar(back); else openSidebar();
   if (!state.current) showNothing();   // bring back the idle message we hid
 }
 // OK: add the highlighted suggestion if you moved into the list, otherwise add
@@ -835,8 +856,10 @@ function renderAddResults() {
   box.innerHTML = '';
   add.results.forEach(function (c, i) {
     var name = (c.user && c.user.username) || c.slug;
+    var already = getFavorites().indexOf(c.slug) !== -1;
     var row = document.createElement('div');
-    row.className = 'aresult';
+    row.setAttribute('data-base', 'aresult' + (already ? ' added' : ''));
+    row.className = 'aresult' + (already ? ' added' : '');
     row.setAttribute('data-idx', i);
     var av = document.createElement('div');
     av.className = 'aav';
@@ -852,6 +875,10 @@ function renderAddResults() {
       var live = document.createElement('span'); live.className = 'alive'; live.textContent = 'LIVE';
       row.appendChild(live);
     }
+    if (already) {
+      var ab = document.createElement('span'); ab.className = 'aadded'; ab.textContent = '✓ Added';
+      row.appendChild(ab);
+    }
     box.appendChild(row);
   });
   applyAddFocus();
@@ -860,7 +887,7 @@ function applyAddFocus() {
   var box = document.getElementById('addresults');
   for (var i = 0; i < box.children.length; i++) {
     var row = box.children[i];
-    row.className = 'aresult' + (i === add.focus ? ' focused' : '');
+    row.className = (row.getAttribute('data-base') || 'aresult') + (i === add.focus ? ' focused' : '');
     if (i === add.focus) {
       var top = row.offsetTop - box.offsetTop;
       if (top < box.scrollTop) box.scrollTop = top - 6;
@@ -890,6 +917,10 @@ function addChannelBySlug(raw) {
   var slug = (raw || '').trim().toLowerCase()
     .replace(/^https?:\/\/(www\.)?kick\.com\//, '').replace(/[\/?#].*$/, '');
   if (!slug) return;
+  if (getFavorites().indexOf(slug) !== -1) {          // already following — don't add it again
+    toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' is already in your channels');
+    return;
+  }
   toast('Adding ' + slug + '...');
   apiGet(slug, function (err, data) {
     if (err) { toast(err === 404 ? 'No channel named "' + slug + '"' : 'Kick API unreachable'); return; }
@@ -2331,7 +2362,14 @@ function browseCardFromEvent(e) {
   playerEl.addEventListener('click', function (e) {
     if (!state.ready || state.mode !== 'player') return;
     if (e.target.id === 'video' || e.target === playerEl || e.target.id === 'idle') {
-      if (state.sidebarOpen) closeSidebar(); else openSidebar();
+      if (state.sidebarOpen) {
+        closeSidebar();
+        state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;  // don't reopen on the next stray move
+        hideCursor();
+      } else {
+        state.suppressNudgeUntil = 0;                               // an explicit click always brings it back
+        openSidebar();
+      }
     }
   });
   // Moving the pointer opens the sidebar, which then hides itself after a few idle seconds.
