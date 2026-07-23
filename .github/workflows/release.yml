@@ -34,10 +34,18 @@ jobs:
       - name: Build the .ipk
         run: ares-package ./app ./services/com.barisahmet.kicktv.service -o .
 
+      - name: Write the webosbrew manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IPK="com.barisahmet.kicktv_${VERSION}_all.ipk"
+          SHA=$(sha256sum "$IPK" | cut -d' ' -f1)
+          node -e "const fs=require('fs');fs.writeFileSync('org.webosbrew.manifest.json', JSON.stringify({id:'com.barisahmet.kicktv',version:'${VERSION}',type:'web',title:'Kick TV',appDescription:'Watch Kick livestreams on your LG webOS TV. Unofficial.',iconUri:'https://raw.githubusercontent.com/barisahmet/kick-tv-webos/main/app/largeIcon.png',sourceUrl:'https://github.com/barisahmet/kick-tv-webos',rootRequired:false,ipkUrl:'${IPK}',ipkHash:{sha256:'${SHA}'}}, null, 2));"
+          cat org.webosbrew.manifest.json
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" com.barisahmet.kicktv_*.ipk \
+          gh release create "${GITHUB_REF_NAME}" com.barisahmet.kicktv_*.ipk org.webosbrew.manifest.json \
             --title "Kick TV ${GITHUB_REF_NAME}" \
             --notes "Download the .ipk below and sideload it onto your LG webOS TV in Developer Mode. See the README for the steps."

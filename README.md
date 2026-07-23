@@ -2,9 +2,9 @@
 
 Watch Kick livestreams on an LG webOS TV. It opens on your last stream and keeps
 your channels in a sidebar. No sign-in. You get live status, viewer counts,
-pinning, a live channel browser, an optional read-only chat overlay with real
-Kick emotes, quality options, low latency, and auto-advance to the next live
-channel.
+pinning, a live channel browser with categories, past videos (VODs), an optional
+read-only chat overlay with real Kick emotes and badges, quality options, low
+latency, and auto-advance to the next live channel.
 
 This is an unofficial personal project. It is not affiliated with or endorsed by
 Kick, and it reads Kick's public web endpoints, so it can break if Kick changes
@@ -96,11 +96,14 @@ NODE_OPTIONS="--require ./shim.js" ares-install --device tv com.barisahmet.kickt
 - After that it opens on your last channel if it is live.
 - Move the pointer or press left or right to open the channel list. It hides
   again after a few seconds.
-- Click a channel to watch. Hover one for the pin and remove buttons. Pinned
-  channels sit at the top while they are live.
-- The gear at the bottom right, or the yellow button, opens Settings: chat, low
+- Click a live channel to watch. Hover one for the pin and remove buttons.
+  Pinned channels sit at the top while they are live.
+- Click an offline channel, or press the yellow button while watching, to see
+  that channel's past videos (VODs).
+- The blue button opens the live channel browser. Inside it, the yellow button
+  (or the Categories button) lets you browse by category.
+- The gear at the bottom right, or the red button, opens Settings: chat, low
   latency, auto-advance, and quality.
-- The blue button opens the live channel browser.
 - Press Back once for an exit prompt, Back again to close.
 
 Your channels are saved on the TV only. The public build ships with none.

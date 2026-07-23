@@ -13,7 +13,7 @@ var PLAYER_REFRESH_MS = 30000; // how often we refresh the list while a stream p
 
 var KEY = { LEFT: 37, UP: 38, RIGHT: 39, DOWN: 40, OK: 13, BACK: 461,
             RED: 403, GREEN: 404, YELLOW: 405, BLUE: 406,
-            PLAY: 415, PAUSE: 19, STOP: 413 };
+            PLAY: 415, PAUSE: 19, STOP: 413, REW: 412, FF: 417 };
 
 var state = {
   mode: 'player',        // which screen is showing: player, add, or confirm
@@ -36,7 +36,9 @@ var state = {
   quitArmed: false,      // set after the first Back press, so the next Back exits
   quitTimer: null,
   tempChannel: null,     // a browsed channel that is playing but not in the follow list
-  lastFetch: 0           // when favorites were last refreshed (to avoid redundant fetches)
+  lastFetch: 0,          // when favorites were last refreshed (to avoid redundant fetches)
+  vod: null,             // set to a past-video descriptor while a VOD is playing
+  vodReturn: null        // the live channel to go back to when the VOD ends or you exit
 };
 var IDLE_MS = 5000;
 
@@ -446,9 +448,16 @@ function stopWatchdog() {
 function switchTo(slug) {
   if (!slug) return;
   var c = state.channels[slug];
-  if (c && !c.live) { toast(c.name + ' is offline'); return; }
+  if (c && !c.live) { openVods(slug); return; }   // offline: show the channel's past videos
   closeSidebar();
   if (slug !== state.current) play(slug);
+}
+function openVodsForContext() {
+  if (state.sidebarOpen) {
+    var item = state.sideItems[state.sideFocus];
+    if (item && (item.type === 'chan' || item.type === 'temp')) openVods(item.slug);
+  } else if (state.current) openVods(state.current);
+  else if (state.vod) openVods(state.vod.slug);
 }
 function exitApp() { try { window.close(); } catch (e) {} }
 function armOrExit() {
@@ -487,6 +496,7 @@ function fillOverlay(c) {
 }
 function showOverlay(c) {
   fillOverlay(c);
+  document.getElementById('ov-live').style.display = '';   // restore the LIVE badge (VOD hides it)
   var ov = document.getElementById('overlay');
   ov.style.left = state.sidebarOpen ? '470px' : '0';
   ov.style.width = state.sidebarOpen ? '1450px' : '1920px';
@@ -512,13 +522,14 @@ function hideCursor() {
 function showCursor() {
   document.documentElement.classList.remove('hidecursor');
 }
-// The settings gear sits at the bottom-right and is available whenever the
-// sidebar is open, so show it exactly then.
+// The settings gear and the colour-button legend both belong to the open
+// sidebar, so show them exactly when it is open.
 function updateGear() {
+  var open = state.sidebarOpen;
   var g = document.getElementById('quality-gear');
-  if (!g) return;
-  if (state.sidebarOpen) g.classList.remove('hidden');
-  else g.classList.add('hidden');
+  if (g) { if (open) g.classList.remove('hidden'); else g.classList.add('hidden'); }
+  var guide = document.getElementById('cbguide');
+  if (guide) { if (open) guide.classList.remove('hidden'); else guide.classList.add('hidden'); }
 }
 function openSidebar() {
   if (!state.ready || browse.open) return;
@@ -786,7 +797,8 @@ var BROWSE_LANGS = [
 ];
 var BROWSE_COLS = 4;
 var browse = { open: false, lang: 'all', langIdx: 0, zone: 'grid', gridIdx: 0,
-               raw: [], streams: [], page: 1, hasMore: true, fetching: false };
+               raw: [], streams: [], page: 1, hasMore: true, fetching: false,
+               category: null, categoryName: '' };
 
 function loadBrowseLangPref() {
   var v = null;
@@ -814,9 +826,18 @@ function openBrowse() {
   loadBrowseLangPref();
   renderBrowseLangs();
   browse.zone = 'grid'; browse.gridIdx = 0;
+  browse.category = null; browse.categoryName = '';
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   document.getElementById('browse-grid').innerHTML = '';
+  updateBrowseTitle();
   loadBrowseMore(true);
+}
+// Show the active category (if any) in the browse header.
+function updateBrowseTitle() {
+  document.getElementById('browse-title').textContent =
+    browse.category ? ('Live: ' + browse.categoryName) : 'Live now';
+  var btn = document.getElementById('browse-cats-btn');
+  if (btn) btn.className = browse.category ? 'on' : '';
 }
 function closeBrowse() {
   browse.open = false;
@@ -842,7 +863,8 @@ function loadBrowseMore(initial) {
     browse.raw = browse.raw.concat(arr);
     browse.page = pg + 1;
     renderBrowse();
-    if (initial && browse.page <= 3) loadBrowseMore(true);
+    // chain more pages while filling; go deeper when a category filter is active
+    if (initial && browse.page <= (browse.category ? 8 : 3)) loadBrowseMore(true);
   });
 }
 function renderBrowseLangs() {
@@ -859,6 +881,9 @@ function renderBrowseLangs() {
 function renderBrowse() {
   var list = (browse.raw || []).slice();
   if (browse.lang !== 'all') list = list.filter(function (s) { return s.language === browse.lang; });
+  if (browse.category) list = list.filter(function (s) {
+    return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
+  });
   list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
   browse.streams = list;
 
@@ -902,7 +927,8 @@ function renderBrowse() {
 
   if (!browse.streams.length) {
     setBrowseStatus(browse.fetching ? 'Loading...' :
-      (browse.lang === 'all' ? 'Nothing live right now' : 'No live channels in this language yet'));
+      (browse.category ? 'No ' + browse.categoryName + ' streams in the top live list' :
+       (browse.lang === 'all' ? 'Nothing live right now' : 'No live channels in this language yet')));
   } else setBrowseStatus('');
 
   if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
@@ -976,6 +1002,312 @@ function browseAddFavorite(slug) {
   apiGet(slug, function (err, raw) { if (!err) state.channels[slug] = normalize(slug, raw); });
   toast('Added ' + slug);
   renderBrowse();          // flip the card's + into a check
+}
+
+/* Categories popup. Browse Kick's categories (sorted by viewers) and filter the
+   live grid to one. Kick has no per-category live-streams endpoint, so the filter
+   is applied over the streams already pulled into Browse: great for popular
+   categories, thinner for niche ones. Opened from the Browse header. */
+var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false };
+var CATS_COLS = 4;
+function setCatsStatus(msg) { document.getElementById('cats-status').textContent = msg || ''; }
+function catBanner(c) {
+  var b = c && c.banner;
+  if (!b) return null;
+  return b.url || b.src || b.responsive || (typeof b === 'string' ? b : null);
+}
+function openCats() {
+  if (!browse.open) return;
+  cats.open = true; cats.gridIdx = 0; cats.list = []; cats.page = 1; cats.hasMore = true; cats.fetching = false;
+  showCursor();
+  document.getElementById('cats').className = '';
+  document.getElementById('cats-grid').innerHTML = '';
+  setCatsStatus('Loading...');
+  loadCatsMore(true);
+}
+function closeCats() {
+  cats.open = false;
+  document.getElementById('cats').className = 'hidden';
+}
+function loadCatsMore(initial) {
+  if (cats.fetching || !cats.hasMore || cats.page > 6) return;
+  cats.fetching = true;
+  var pg = cats.page;
+  serviceGet('/api/v1/subcategories?page=' + pg + '&limit=32', function (err, data) {
+    cats.fetching = false;
+    if (!cats.open) return;
+    var arr = (!err && data && data.data) ? data.data : [];
+    if (!arr.length) { cats.hasMore = false; if (!cats.list.length) setCatsStatus('Could not load categories'); return; }
+    cats.list = cats.list.concat(arr);
+    cats.page = pg + 1;
+    renderCats();
+    setCatsStatus('');
+    if (initial && cats.page <= 2) loadCatsMore(true);
+  });
+}
+function renderCats() {
+  var grid = document.getElementById('cats-grid');
+  var saved = grid.scrollTop;
+  grid.innerHTML = '';
+  var allTile = document.createElement('div');   // index 0 clears the filter
+  allTile.className = 'ccard'; allTile.setAttribute('data-idx', '-1');
+  allTile.innerHTML = '<div class="cbanner"></div><div class="cname">All categories</div>';
+  grid.appendChild(allTile);
+  cats.list.forEach(function (c, i) {
+    var card = document.createElement('div');
+    card.className = 'ccard';
+    card.setAttribute('data-idx', i);
+    var banner = document.createElement('div');
+    banner.className = 'cbanner';
+    var url = catBanner(c);
+    if (url) banner.style.backgroundImage = 'url(' + url + ')';
+    var vw = document.createElement('span');
+    vw.className = 'cviewers';
+    vw.innerHTML = '<span class="bdot"></span>';
+    vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0)));
+    banner.appendChild(vw);
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = c.name || c.slug;
+    card.appendChild(banner); card.appendChild(name);
+    grid.appendChild(card);
+  });
+  grid.scrollTop = saved;
+  if (cats.gridIdx >= grid.children.length) cats.gridIdx = grid.children.length - 1;
+  applyCatsFocus();
+}
+function applyCatsFocus() {
+  var grid = document.getElementById('cats-grid');
+  for (var j = 0; j < grid.children.length; j++) {
+    grid.children[j].className = 'ccard' + (j === cats.gridIdx ? ' focused' : '');
+  }
+  var el = grid.children[cats.gridIdx];
+  if (el) {
+    var top = el.offsetTop - grid.offsetTop;
+    if (top < grid.scrollTop) grid.scrollTop = top - 12;
+    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
+      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
+  }
+}
+function catsMove(dx, dy) {
+  var n = document.getElementById('cats-grid').children.length;
+  if (!n) return;
+  var idx = cats.gridIdx;
+  if (dx === 1 && idx < n - 1) idx++;
+  else if (dx === -1 && idx > 0) idx--;
+  else if (dy === 1 && idx + CATS_COLS < n) idx += CATS_COLS;
+  else if (dy === -1 && idx - CATS_COLS >= 0) idx -= CATS_COLS;
+  cats.gridIdx = idx;
+  applyCatsFocus();
+  if (cats.gridIdx >= (cats.list.length + 1) - 2 * CATS_COLS) loadCatsMore(false);
+}
+function catsActivate() {
+  if (cats.gridIdx === 0) { selectCategory(null, ''); return; }   // the All tile
+  var c = cats.list[cats.gridIdx - 1];
+  if (c) selectCategory(c.slug, c.name || c.slug);
+}
+function selectCategory(slug, name) {
+  browse.category = slug || null;
+  browse.categoryName = name || '';
+  browse.gridIdx = 0;
+  closeCats();
+  updateBrowseTitle();
+  renderBrowse();
+  if (slug) loadBrowseMore(true);   // pull more pages to better fill the filtered grid
+}
+
+/* Past videos (VOD) popup and playback.
+   Opens from clicking an offline channel or the Yellow button. Lists a channel's
+   past videos; picking one plays it. VOD playback is kept separate from live
+   playback: no channel refetch, no live-token recovery, and no stall watchdog,
+   because a video on demand can pause to buffer without anything being wrong. */
+var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false };
+var VOD_COLS = 4;
+function setVodStatus(msg) { document.getElementById('vods-status').textContent = msg || ''; }
+function fmtDuration(ms) {
+  var s = Math.floor((ms || 0) / 1000);
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  return h > 0 ? (h + ':' + pad(m) + ':' + pad(ss)) : (m + ':' + pad(ss));
+}
+function fmtVodDate(str) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str || '');
+  if (!m) return '';
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[parseInt(m[2], 10) - 1] + ' ' + parseInt(m[3], 10);
+}
+function vodThumb(v) {
+  var t = v && v.thumbnail;
+  if (t && t.src) return t.src;
+  if (v && v.video && v.video.thumb && v.video.thumb.src) return v.video.thumb.src;
+  return null;
+}
+function openVods(slug) {
+  if (!state.ready || !slug) return;
+  if (browse.open) closeBrowse();
+  if (settings.open) closeSettings();
+  vods.open = true; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true;
+  state.vodReturn = state.current || state.vodReturn;   // where to go back to afterwards
+  showCursor();
+  closeSidebar();
+  pausePlaybackForBrowse();
+  document.getElementById('vods').className = '';
+  var name = (state.channels[slug] && state.channels[slug].name) || slug;
+  document.getElementById('vods-title').textContent = 'Past videos - ' + name;
+  document.getElementById('vods-grid').innerHTML = '';
+  setVodStatus('Loading...');
+  serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
+    vods.loading = false;
+    if (!vods.open || vods.slug !== slug) return;
+    vods.list = Array.isArray(data) ? data : [];
+    renderVods();
+    if (!vods.list.length) setVodStatus(err ? 'Could not load videos' : 'No past videos');
+    else setVodStatus('');
+  });
+}
+function closeVods() {
+  vods.open = false;
+  document.getElementById('vods').className = 'hidden';
+  if (state.current) resumePlaybackAfterBrowse();   // a live stream was underneath
+}
+function renderVods() {
+  var grid = document.getElementById('vods-grid');
+  grid.innerHTML = '';
+  vods.list.forEach(function (v, i) {
+    var card = document.createElement('div');
+    card.className = 'bcard';
+    card.setAttribute('data-idx', i);
+    var thumb = document.createElement('div');
+    thumb.className = 'bthumb';
+    var url = vodThumb(v);
+    if (url) thumb.style.backgroundImage = 'url(' + url + ')';
+    var dur = document.createElement('span');
+    dur.className = 'bdur';
+    dur.textContent = fmtDuration(v.duration);
+    thumb.appendChild(dur);
+    var views = document.createElement('span');
+    views.className = 'bviewers';
+    views.textContent = fmtViewers(v.views || 0) + ' views';
+    thumb.appendChild(views);
+    card.appendChild(thumb);
+    var meta = document.createElement('div');
+    meta.className = 'bmeta';
+    meta.innerHTML = '<div class="bname"></div><div class="btitle"></div><div class="bsub"></div>';
+    meta.children[0].textContent = v.session_title || 'Untitled';
+    meta.children[1].textContent = (v.categories && v.categories[0] && v.categories[0].name) || '';
+    meta.children[2].textContent = fmtVodDate(v.created_at);
+    card.appendChild(meta);
+    grid.appendChild(card);
+  });
+  if (vods.gridIdx >= vods.list.length) vods.gridIdx = Math.max(0, vods.list.length - 1);
+  applyVodFocus();
+}
+function applyVodFocus() {
+  var grid = document.getElementById('vods-grid');
+  for (var j = 0; j < grid.children.length; j++) {
+    grid.children[j].className = 'bcard' + (j === vods.gridIdx ? ' focused' : '');
+  }
+  var el = grid.children[vods.gridIdx];
+  if (el) {
+    var top = el.offsetTop - grid.offsetTop;
+    if (top < grid.scrollTop) grid.scrollTop = top - 12;
+    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
+      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
+  }
+}
+function vodMove(dx, dy) {
+  var n = vods.list.length;
+  if (!n) return;
+  var idx = vods.gridIdx;
+  if (dx === 1 && idx < n - 1) idx++;
+  else if (dx === -1 && idx > 0) idx--;
+  else if (dy === 1 && idx + VOD_COLS < n) idx += VOD_COLS;
+  else if (dy === -1 && idx - VOD_COLS >= 0) idx -= VOD_COLS;
+  vods.gridIdx = idx;
+  applyVodFocus();
+}
+function vodActivate() {
+  var v = vods.list[vods.gridIdx];
+  if (v && v.source) {
+    vods.open = false;
+    document.getElementById('vods').className = 'hidden';
+    playVod(v);
+  }
+}
+function playVod(v) {
+  teardownVideo();
+  disconnectChat();
+  setMode('player');
+  state.current = null;
+  state.tempChannel = null;
+  state.vod = { slug: vods.slug, source: v.source,
+                title: v.session_title || 'Past video',
+                name: (state.channels[vods.slug] && state.channels[vods.slug].name) || vods.slug,
+                retries: 0 };
+  PB.slug = null; PB.reloading = false;
+  setBanner('');
+  showState('hidden');
+  updateGear();
+  attachVod(v.source);
+  showVodOverlay();
+}
+function attachVod(source) {
+  var video = document.getElementById('video');
+  if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
+  if (window.Hls && Hls.isSupported()) {
+    var hls = new Hls({
+      enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
+      manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6
+    });
+    state.hls = hls;
+    hls.on(Hls.Events.ERROR, function (ev, data) {
+      if (state.hls !== hls || !data || !data.fatal) return;
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
+      else reloadVod();
+    });
+    try { hls.loadSource(source); hls.attachMedia(video); }
+    catch (e) { reloadVod(); return; }
+  } else {
+    try { video.src = source; } catch (e) { toast('Cannot play this video'); exitVod(); return; }
+  }
+  PB.active = true;
+  playVideo(video);
+}
+function reloadVod() {
+  if (!state.vod) return;
+  state.vod.retries = (state.vod.retries || 0) + 1;
+  if (state.vod.retries > 4) { toast('Playback error'); exitVod(); return; }
+  setBanner('Reconnecting...');
+  attachVod(state.vod.source);
+}
+function exitVod() {
+  var back = state.vodReturn;
+  teardownVideo();
+  state.vod = null;
+  state.vodReturn = null;
+  setBanner('');
+  if (back && state.channels[back] && state.channels[back].live) play(back);
+  else { state.current = null; updateGear(); showNothing(); }
+}
+function seekVod(delta) {
+  var video = document.getElementById('video');
+  var d = video.duration;
+  if (!d || isNaN(d)) return;
+  var t = Math.max(0, Math.min(d - 1, (video.currentTime || 0) + delta));
+  try { video.currentTime = t; } catch (e) {}
+  showVodOverlay();
+}
+function showVodOverlay() {
+  if (!state.vod) return;
+  var ov = document.getElementById('overlay');
+  document.getElementById('ov-name').textContent = state.vod.name;
+  document.getElementById('ov-live').style.display = 'none';
+  document.getElementById('ov-viewers').textContent = 'Past video';
+  document.getElementById('ov-title').textContent = state.vod.title;
+  ov.style.left = '0'; ov.style.width = '1920px';
+  ov.className = '';
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(function () { ov.className = 'hidden'; }, 4000);
 }
 
 /* Quality preference (used by the Settings menu below) */
@@ -1288,11 +1620,41 @@ function appendChatContent(row, content) {
   }
   if (last < content.length) row.appendChild(document.createTextNode(content.slice(last)));
 }
+// Kick tags chatters with badges (broadcaster, mod, sub, VIP, OG...). We show the
+// top one or two as small coloured tags before the name, drawn as plain text so
+// they render on the TV font (icon glyphs come out as tofu boxes here).
+var BADGE_MAP = {
+  broadcaster: { label: 'HOST', cls: 'host' },
+  moderator:   { label: 'MOD',  cls: 'mod' },
+  vip:         { label: 'VIP',  cls: 'vip' },
+  og:          { label: 'OG',   cls: 'og' },
+  founder:     { label: 'FDR',  cls: 'sub' },
+  subscriber:  { label: 'SUB',  cls: 'sub' },
+  sub_gifter:  { label: 'GIFT', cls: 'sub' }
+};
+var BADGE_ORDER = ['broadcaster', 'moderator', 'vip', 'og', 'founder', 'subscriber', 'sub_gifter'];
+function badgeChipsFor(sender) {
+  var badges = sender && sender.identity && sender.identity.badges;
+  if (!badges || !badges.length) return [];
+  var have = {};
+  badges.forEach(function (b) { if (b && b.type) have[b.type] = true; });
+  var out = [];
+  for (var i = 0; i < BADGE_ORDER.length && out.length < 2; i++) {
+    if (have[BADGE_ORDER[i]]) out.push(BADGE_MAP[BADGE_ORDER[i]]);
+  }
+  return out;
+}
 function addChatMessage(d) {
   if (!d || !d.sender) return;
   var box = chatEl();
   var row = document.createElement('div');
   row.className = 'cmsg';
+  badgeChipsFor(d.sender).forEach(function (c) {
+    var b = document.createElement('span');
+    b.className = 'cbadge ' + c.cls;
+    b.textContent = c.label;
+    row.appendChild(b);
+  });
   var u = document.createElement('span');
   u.className = 'cuser';
   var color = d.sender.identity && d.sender.identity.color;
@@ -1351,14 +1713,35 @@ document.addEventListener('keydown', function (e) {
   if (wasSaver) { e.preventDefault(); return; }     // the first press just dismisses the screensaver
   if (!state.ready) { e.preventDefault(); return; } // still on the splash, ignore input until data is ready
   if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
+  if (cats.open) {
+    e.preventDefault();
+    if (k === KEY.BACK || k === KEY.YELLOW) closeCats();
+    else if (k === KEY.LEFT) catsMove(-1, 0);
+    else if (k === KEY.RIGHT) catsMove(1, 0);
+    else if (k === KEY.UP) catsMove(0, -1);
+    else if (k === KEY.DOWN) catsMove(0, 1);
+    else if (k === KEY.OK) catsActivate();
+    return;
+  }
   if (browse.open) {
     e.preventDefault();
     if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
+    else if (k === KEY.YELLOW) openCats();               // yellow opens the categories picker
     else if (k === KEY.LEFT) browseMove(-1, 0);
     else if (k === KEY.RIGHT) browseMove(1, 0);
     else if (k === KEY.UP) browseMove(0, -1);
     else if (k === KEY.DOWN) browseMove(0, 1);
     else if (k === KEY.OK) browseActivate();
+    return;
+  }
+  if (vods.open) {
+    e.preventDefault();
+    if (k === KEY.YELLOW || k === KEY.BACK) closeVods();
+    else if (k === KEY.LEFT) vodMove(-1, 0);
+    else if (k === KEY.RIGHT) vodMove(1, 0);
+    else if (k === KEY.UP) vodMove(0, -1);
+    else if (k === KEY.DOWN) vodMove(0, 1);
+    else if (k === KEY.OK) vodActivate();
     return;
   }
   if (settings.open) {
@@ -1384,15 +1767,26 @@ document.addEventListener('keydown', function (e) {
   e.preventDefault();
   var video = document.getElementById('video');
   if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
+  if (k === KEY.RED) { openSettings(); return; }       // red opens settings
+  if (k === KEY.YELLOW) { openVodsForContext(); return; } // yellow opens past videos
   if (state.sidebarOpen) {
     resetIdle();
     if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
-    else if (k === KEY.YELLOW) openSettings();           // yellow opens the settings menu
     else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar(); // left or right tucks the list away
     else if (k === KEY.BACK) { closeSidebar(); hideCursor(); } // close the list and hide the pointer
+    return;
+  }
+  if (state.vod) {                                       // watching a past video
+    if (k === KEY.BACK || k === KEY.STOP) { exitVod(); return; }
+    if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
+    if (k === KEY.FF) { seekVod(60); return; }
+    if (k === KEY.REW) { seekVod(-60); return; }
+    if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
+    if (k === KEY.PLAY) { playVideo(video); return; }
+    if (k === KEY.OK) { showVodOverlay(); return; }
     return;
   }
   if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
@@ -1522,6 +1916,56 @@ function browseCardFromEvent(e) {
     if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) loadBrowseMore(false);
   });
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
+  var catsBtn = document.getElementById('browse-cats-btn');
+  if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
+  // Categories popup pointer
+  var catsGrid = document.getElementById('cats-grid');
+  function catCardIdx(e) {
+    var el = e.target;
+    while (el && el !== catsGrid && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === catsGrid) return -2;
+    var list = catsGrid.children;
+    for (var i = 0; i < list.length; i++) if (list[i] === el) return i;
+    return -2;
+  }
+  catsGrid.addEventListener('mouseover', function (e) {
+    var i = catCardIdx(e);
+    if (i >= 0 && i !== cats.gridIdx) { cats.gridIdx = i; applyCatsFocus(); }
+  });
+  catsGrid.addEventListener('click', function (e) {
+    var i = catCardIdx(e);
+    if (i >= 0) { cats.gridIdx = i; catsActivate(); }
+  });
+  catsGrid.addEventListener('wheel', function (e) {
+    if (!cats.open) return;
+    e.preventDefault();
+    catsGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
+    if (catsGrid.scrollTop + catsGrid.clientHeight >= catsGrid.scrollHeight - 400) loadCatsMore(false);
+  });
+  document.getElementById('cats-close').addEventListener('click', function () { closeCats(); });
+  // Past videos popup pointer
+  var vodsGrid = document.getElementById('vods-grid');
+  function vodCardIdx(e) {
+    var el = e.target;
+    while (el && el !== vodsGrid && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === vodsGrid) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return (isNaN(i) || i < 0 || i >= vods.list.length) ? -1 : i;
+  }
+  vodsGrid.addEventListener('mouseover', function (e) {
+    var i = vodCardIdx(e);
+    if (i >= 0 && i !== vods.gridIdx) { vods.gridIdx = i; applyVodFocus(); }
+  });
+  vodsGrid.addEventListener('click', function (e) {
+    var i = vodCardIdx(e);
+    if (i >= 0) { vods.gridIdx = i; vodActivate(); }
+  });
+  vodsGrid.addEventListener('wheel', function (e) {
+    if (!vods.open) return;
+    e.preventDefault();
+    vodsGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
+  });
+  document.getElementById('vods-close').addEventListener('click', function () { closeVods(); });
   // Settings gear and its menu
   var gear = document.getElementById('quality-gear');
   if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openSettings(); });
@@ -1552,9 +1996,11 @@ function browseCardFromEvent(e) {
 (function wireVideo() {
   var video = document.getElementById('video');
   video.addEventListener('error', function () {
+    if (state.vod) { reloadVod(); return; }
     if (PB.active && state.current) recoverPlayback(state.current);
   });
   video.addEventListener('ended', function () {
+    if (state.vod) { toast('Video ended'); exitVod(); return; }
     if (PB.active && state.current) recoverPlayback(state.current); // a live stream should not just end
   });
   video.addEventListener('playing', function () {

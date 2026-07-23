@@ -302,6 +302,108 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   font-size: 28px; color: #9a9a9d; pointer-events: none;
 }
 
+/* Past videos (VOD) popup: same frame and cards as Browse */
+#vods {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 60;
+  background: rgba(0,0,0,0.72);
+}
+#vods-panel {
+  position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
+  background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
+  overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+}
+#vods-head {
+  display: flex; align-items: center;
+  padding: 20px 26px; border-bottom: 1px solid #26302a;
+}
+#vods-title { font-size: 32px; font-weight: 800; color: #fff; flex: 1; }
+#vods-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
+#vods-close:hover { color: #fff; }
+#vods-grid {
+  height: 858px; overflow: hidden; padding: 16px 18px;
+  display: flex; flex-wrap: wrap; align-content: flex-start;
+}
+#vods-status {
+  position: absolute; top: 56%; left: 0; width: 100%; text-align: center;
+  font-size: 28px; color: #9a9a9d; pointer-events: none;
+}
+/* Duration badge on a VOD thumbnail (bottom-left, opposite the views badge) */
+.bdur {
+  position: absolute; bottom: 8px; left: 8px;
+  background: rgba(0,0,0,0.8); color: #fff; font-size: 19px; padding: 2px 10px; border-radius: 6px;
+}
+
+/* The "Categories" button in the Browse header */
+#browse-cats-btn {
+  font-size: 22px; padding: 7px 18px; margin: 0 16px 0 4px; border-radius: 18px;
+  background: #143206; color: #53fc18; cursor: pointer; border: 2px solid transparent; white-space: nowrap;
+}
+#browse-cats-btn:hover { border-color: #53fc18; color: #fff; }
+#browse-cats-btn.on { background: #53fc18; color: #0b0e0f; }
+
+/* Categories popup: same frame as Browse, opens on top of it */
+#cats {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 62;
+  background: rgba(0,0,0,0.72);
+}
+#cats-panel {
+  position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
+  background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
+  overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+}
+#cats-head { display: flex; align-items: center; padding: 20px 26px; border-bottom: 1px solid #26302a; }
+#cats-title { font-size: 32px; font-weight: 800; color: #fff; flex: 1; }
+#cats-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
+#cats-close:hover { color: #fff; }
+#cats-grid {
+  height: 858px; overflow: hidden; padding: 16px 18px;
+  display: flex; flex-wrap: wrap; align-content: flex-start;
+}
+#cats-status {
+  position: absolute; top: 56%; left: 0; width: 100%; text-align: center;
+  font-size: 28px; color: #9a9a9d; pointer-events: none;
+}
+.ccard {
+  box-sizing: border-box; width: 384px; height: 220px; margin: 8px; border-radius: 12px;
+  overflow: hidden; position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
+}
+.ccard.focused { border-color: #53fc18; }
+.cbanner { width: 100%; height: 100%; background: #101213 center/cover no-repeat; }
+.cname {
+  position: absolute; left: 0; bottom: 0; width: 100%; box-sizing: border-box; padding: 22px 14px 12px;
+  font-size: 25px; font-weight: 800; color: #fff;
+  background: linear-gradient(transparent, rgba(0,0,0,0.9));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cviewers {
+  position: absolute; top: 8px; right: 8px;
+  background: rgba(0,0,0,0.8); color: #fff; font-size: 19px; padding: 2px 10px; border-radius: 6px;
+}
+.cviewers .bdot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 5px;
+  background: #e91916; margin-right: 7px; vertical-align: 1px;
+}
+
+/* Colour-button legend at the bottom, to the right of the sidebar (never over it) */
+#cbguide {
+  position: absolute; left: 500px; bottom: 44px;
+  display: flex; align-items: center;
+  padding: 10px 22px; border-radius: 12px;
+  background: rgba(11,14,15,0.82); border: 1px solid #2f3438;
+}
+.cbitem {
+  display: flex; align-items: center; font-size: 22px; color: #d6d7d8;
+  margin-right: 30px; white-space: nowrap;
+}
+.cbitem:last-child { margin-right: 0; }
+.cbdot {
+  display: inline-block; width: 16px; height: 16px; border-radius: 8px; margin-right: 10px;
+}
+.cbdot.red { background: #e91916; }
+.cbdot.green { background: #00c853; }
+.cbdot.yellow { background: #ffd21e; }
+.cbdot.blue { background: #1f8fff; }
+
 /* Settings gear, shown at the bottom-right while the sidebar is open */
 #quality-gear {
   position: absolute; right: 40px; bottom: 36px;
@@ -362,6 +464,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 .cmsg .cuser { font-weight: 800; }
 .cmsg .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }
+.cmsg .cbadge {
+  display: inline-block; font-size: 15px; font-weight: 800; line-height: 1;
+  padding: 3px 6px; border-radius: 5px; margin-right: 6px; vertical-align: 2px; color: #fff;
+}
+.cmsg .cbadge.host { background: #e91916; }
+.cmsg .cbadge.mod  { background: #00b843; color: #05210f; }
+.cmsg .cbadge.vip  { background: #e91e9b; }
+.cmsg .cbadge.og   { background: #8e5cff; }
+.cmsg .cbadge.sub  { background: #1f8fff; }
 
 /* OLED burn-in guard: just dims the whole panel, no moving element */
 #saver {
