@@ -380,10 +380,10 @@ function pausePlaybackForBrowse() {
   stopWatchdog();
 }
 function resumePlaybackAfterBrowse() {
-  if (!state.current) return;
+  if (!state.current && !state.vod) return;
   if (state.hls) { try { state.hls.startLoad(); } catch (e) {} }
   playVideo(document.getElementById('video'));
-  startWatchdog(state.current);
+  if (state.current) startWatchdog(state.current);   // VODs run without the live watchdog
 }
 function onNetworkError(slug, hls) {
   if (state.current !== slug) return;
@@ -463,9 +463,11 @@ function startWatchdog(slug) {
       if (++PB.stallCount >= STALL_TICKS) { PB.stallCount = 0; recoverPlayback(slug); }
     } else {
       PB.stallCount = 0;
-      PB.netRetries = 0; PB.mediaRetries = 0;
-      PB.recoverCount = 0; PB.endedCount = 0;          // healthy playback: clear the give-up counters
-      setBanner('');                                   // it is moving again, clear the message
+      if (PB.lastTime >= 0) {                          // real progress, not just the first tick
+        PB.netRetries = 0; PB.mediaRetries = 0;
+        PB.recoverCount = 0; PB.endedCount = 0;        // healthy playback: clear the give-up counters
+        setBanner('');                                 // it is moving again, clear the message
+      }
     }
     PB.lastTime = t;
   }, WATCHDOG_MS);
@@ -561,7 +563,7 @@ function updateGear() {
   if (guide) { if (open) guide.classList.remove('hidden'); else guide.classList.add('hidden'); }
 }
 function openSidebar() {
-  if (!state.ready || browse.open) return;
+  if (!state.ready || browse.open || vods.open || cats.open || chpop.open) return;
   showCursor();
   if (!state.sidebarOpen) {
     state.sidebarOpen = true;
@@ -598,7 +600,7 @@ function resetIdle() {
 }
 // Called when the pointer moves or Left is pressed. Open the sidebar and keep it up.
 function nudgeSidebar() {
-  if (!state.ready || state.mode !== 'player' || browse.open) return;
+  if (!state.ready || state.mode !== 'player' || browse.open || vods.open || cats.open || chpop.open) return;
   if (!state.sidebarOpen) openSidebar(); else resetIdle();
 }
 function focusKeyOf(item) { return item ? (item.type === 'add' ? 'add' : item.slug) : null; }
@@ -817,6 +819,8 @@ function liveSearch() {
     var chans = (!err && data && data.channels) ? data.channels : [];
     add.results = chans.slice(0, 30);
     if (add.zone === 'input') add.focus = -1;
+    else if (!add.results.length) { backToInput(); return; }        // list emptied under us
+    else if (add.focus >= add.results.length) add.focus = add.results.length - 1;
     renderAddResults();
   });
 }
@@ -891,15 +895,18 @@ function addChannelBySlug(raw) {
     if (err) { toast(err === 404 ? 'No channel named "' + slug + '"' : 'Kick API unreachable'); return; }
     state.channels[slug] = normalize(slug, data);
     addFavorite(slug);
-    document.getElementById('addmodal').className = 'hidden';
-    document.getElementById('addinput').blur();
-    document.getElementById('addresults').innerHTML = '';
-    add.results = []; add.zone = 'input';
-    setMode('player');
     toast('Added ' + state.channels[slug].name);
+    var wasAdd = state.mode === 'add';
+    if (wasAdd) {                         // only touch the dialog if it is still the one on screen
+      document.getElementById('addmodal').className = 'hidden';
+      document.getElementById('addinput').blur();
+      document.getElementById('addresults').innerHTML = '';
+      add.results = []; add.zone = 'input';
+      setMode('player');
+    }
     fetchFavorites(function () {
-      if (!state.sidebarOpen) openSidebar(); else renderSidebar(slug);
-      if (!state.current && !state.vod) showState(idleModeForNothing());
+      if (wasAdd && !state.sidebarOpen) openSidebar(); else if (state.sidebarOpen) renderSidebar(slug);
+      if (!state.current && !state.vod && state.mode === 'player') showState(idleModeForNothing());
     });
   });
 }
@@ -1101,6 +1108,7 @@ function browseMove(dx, dy) {
   if (dx === 1 && idx < count - 1) idx++;
   else if (dx === -1 && idx > 0) idx--;
   else if (dy === 1 && idx + BROWSE_COLS < count) idx += BROWSE_COLS;
+  else if (dy === 1 && Math.floor(idx / BROWSE_COLS) < Math.floor((count - 1) / BROWSE_COLS)) idx = count - 1;  // partial last row
   else if (dy === -1 && idx - BROWSE_COLS >= 0) idx -= BROWSE_COLS;
   else if (dy === 1 || dx === 1) loadBrowseMore(false);
   browse.gridIdx = idx;
@@ -1220,6 +1228,7 @@ function catsMove(dx, dy) {
   if (dx === 1 && idx < n - 1) idx++;
   else if (dx === -1 && idx > 0) idx--;
   else if (dy === 1 && idx + CATS_COLS < n) idx += CATS_COLS;
+  else if (dy === 1 && Math.floor(idx / CATS_COLS) < Math.floor((n - 1) / CATS_COLS)) idx = n - 1;  // partial last row
   else if (dy === -1 && idx - CATS_COLS >= 0) idx -= CATS_COLS;
   cats.gridIdx = idx;
   applyCatsFocus();
@@ -1306,7 +1315,7 @@ function openVods(slug) {
 function closeVods() {
   vods.open = false;
   document.getElementById('vods').className = 'hidden';
-  if (state.current) resumePlaybackAfterBrowse();   // a live stream was underneath
+  if (state.current || state.vod) resumePlaybackAfterBrowse();   // a live stream or VOD was underneath
 }
 function renderVods() {
   var grid = document.getElementById('vods-grid');
@@ -1360,6 +1369,7 @@ function vodMove(dx, dy) {
   if (dx === 1 && idx < n - 1) idx++;
   else if (dx === -1 && idx > 0) idx--;
   else if (dy === 1 && idx + VOD_COLS < n) idx += VOD_COLS;
+  else if (dy === 1 && Math.floor(idx / VOD_COLS) < Math.floor((n - 1) / VOD_COLS)) idx = n - 1;  // partial last row
   else if (dy === -1 && idx - VOD_COLS >= 0) idx -= VOD_COLS;
   vods.gridIdx = idx;
   applyVodFocus();
@@ -1975,7 +1985,8 @@ function markInput() {
 }
 function isStaticScreen() {
   var v = document.getElementById('video');
-  return !state.current || (v && v.paused);   // idle message, or a frozen paused frame
+  // a VOD is moving video too, so only an idle screen or a paused frame counts
+  return (!state.current && !state.vod) || (v && v.paused);
 }
 function checkSaver() {
   if (!state.ready || saver.on) return;
