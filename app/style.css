@@ -65,6 +65,19 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .favrow.current { border-left-color: #53fc18; }
 .favrow.offline { opacity: 0.5; }            /* dim offline channels, and keep them dim on hover */
 .favrow.offline .pinmark { opacity: 0.45; }  /* fade the pin marker a bit more when offline */
+.favrow.offlinegroup {
+  height: 58px; color: #b9bdc0; border-left: 0; display: flex;
+  align-items: center; padding: 0 24px; box-sizing: border-box;
+}
+.offline-chevron {
+  width: 30px; height: 28px; color: #53fc18; display: flex;
+  align-items: center; flex: 0 0 30px;
+}
+.offline-chevron svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 3; }
+.offline-label { font-size: 24px; font-weight: 700; }
+.offline-count {
+  margin-left: auto; color: #7f8589; font-size: 21px; font-weight: 700;
+}
 .favav {
   position: absolute; left: 20px; top: 12px;
   width: 52px; height: 52px; border-radius: 26px;
@@ -141,11 +154,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   padding: 16px 26px; border-radius: 10px;
   transform: translateX(130%); opacity: 0;
   transition: transform 240ms ease-out, opacity 240ms;
+  cursor: pointer;
 }
 #notify.show { transform: translateX(0); opacity: 1; }
 #notify .ndot {
   display: inline-block; width: 13px; height: 13px; border-radius: 7px;
   background: #53fc18; margin-right: 12px; vertical-align: 2px;
+}
+#notify .nhint {
+  display: block; margin: 5px 0 0 25px;
+  color: #aeb3b6; font-size: 20px; font-weight: 600;
 }
 
 /* The "Reconnecting" message shown while a stream is recovering. */
@@ -153,6 +171,18 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
   background: rgba(11,14,15,0.85); border: 2px solid #53fc18;
   color: #fff; font-size: 30px; padding: 18px 40px; border-radius: 12px; z-index: 40;
+}
+
+/* Optional playback diagnostics. Kept compact and non-interactive so it never
+   steals focus from the player or remote-driven panels. */
+#diagnostics {
+  position: absolute; left: 30px; bottom: 30px; z-index: 46;
+  min-width: 430px; box-sizing: border-box; pointer-events: none;
+  background: rgba(9,12,13,0.9); border: 1px solid rgba(83,252,24,0.72);
+  border-radius: 10px; padding: 14px 18px;
+  color: #dfe3e4; font-family: Menlo, Consolas, monospace;
+  font-size: 18px; line-height: 1.42; white-space: pre-line;
+  text-shadow: 0 1px 2px #000;
 }
 
 /* Idle screen, done up like an old CRT. */
@@ -183,6 +213,14 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   animation: crt-flicker 4.5s steps(1) infinite;
 }
 #idle-wm span { color: #efeff1; margin-left: 18px; }
+#idle-load {
+  position: absolute; left: 50%; top: 68%; z-index: 4;
+  transform: translate(-50%, -50%);
+  padding: 14px 28px; border: 2px solid rgba(83,252,24,0.78);
+  border-radius: 12px; background: rgba(16,19,18,0.94);
+  color: #efeff1; font-size: 25px; font-weight: 700; letter-spacing: 0.2px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.42);
+}
 @keyframes crt-flicker {
   0%, 91%, 95% { opacity: 1; }
   93%, 97% { opacity: 0.8; }
@@ -437,6 +475,12 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .cbdot.green { background: #00c853; }
 .cbdot.yellow { background: #ffd21e; }
 .cbdot.blue { background: #1f8fff; }
+.cbkey {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; box-sizing: border-box; margin-right: 10px;
+  border: 2px solid #aeb3b6; border-radius: 6px;
+  color: #fff; font-size: 20px; font-weight: 800; line-height: 1;
+}
 
 /* Live-channels surf popup (channel up/down) */
 #chpop {
@@ -509,24 +553,102 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodbar-played { stroke: #53fc18; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 #vodbar-handle { fill: #fff; }
 
-/* Settings gear, shown at the bottom-right while the sidebar is open */
-#quality-gear {
+/* Player tools, shown at the bottom-right while the sidebar is open. Quality is
+   a first-class control; Settings remains a separate themed gear. */
+#player-tools {
   position: absolute; right: 40px; bottom: 36px;
-  width: 66px; height: 66px; border-radius: 33px;
-  background: rgba(11,14,15,0.82); border: 2px solid #2f3438;
-  display: flex; align-items: center; justify-content: center;
-  color: #cfcfd2; cursor: pointer;
+  display: flex; align-items: center; z-index: 48;
 }
-#quality-gear:hover { border-color: #53fc18; color: #53fc18; }
-#quality-gear svg { width: 38px; height: 38px; }
-#quality-gear.hasupdate::after {   /* red dot when a newer release exists */
-  content: ''; position: absolute; top: 6px; right: 6px;
+.player-tool {
+  height: 66px; box-sizing: border-box;
+  display: flex; align-items: center;
+  background: linear-gradient(145deg, rgba(27,31,33,0.97), rgba(12,15,16,0.97));
+  border: 2px solid #343a3e; color: #d6d9da;
+  box-shadow: 0 8px 26px rgba(0,0,0,0.42);
+  cursor: pointer;
+}
+.player-tool.focused {
+  border-color: #53fc18; color: #fff;
+  box-shadow: 0 8px 26px rgba(0,0,0,0.42), 0 0 0 1px rgba(83,252,24,0.16);
+}
+#quality-button {
+  min-width: 174px; padding: 0 20px 0 16px;
+  border-radius: 16px 6px 6px 16px;
+}
+#settings-button {
+  position: relative; width: 66px; justify-content: center;
+  margin-left: 8px; border-radius: 6px 16px 16px 6px;
+}
+.player-tool-icon {
+  width: 42px; height: 42px; margin-right: 13px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 11px; background: rgba(83,252,24,0.12); color: #53fc18;
+}
+.player-tool-icon svg { width: 28px; height: 28px; }
+.quality-mark .quality-bar { fill: #46504b; }
+.quality-mark.qmax .quality-bar { fill: #53fc18; }
+.quality-mark.qlimited {
+  color: #ffd21e; background: rgba(255,210,30,0.12);
+}
+.quality-mark.qlimited .quality-bar { fill: rgba(255,210,30,0.22); }
+.quality-mark.qlimited.qlevel-1 .bar-1,
+.quality-mark.qlimited.qlevel-2 .bar-1,
+.quality-mark.qlimited.qlevel-2 .bar-2 { fill: #ffd21e; }
+.quality-mark.qlow {
+  color: #ff4d45; background: rgba(255,77,69,0.12);
+}
+.quality-mark.qlow .quality-bar { fill: rgba(255,77,69,0.22); }
+.quality-mark.qlow .bar-1 { fill: #ff4d45; }
+.player-tool-copy { display: flex; flex-direction: column; line-height: 1.05; }
+.player-tool-name {
+  color: #8f9598; font-size: 15px; font-weight: 800;
+  letter-spacing: 1px; text-transform: uppercase;
+}
+#quality-button-value {
+  color: #fff; font-size: 25px; font-weight: 800; margin-top: 4px;
+}
+#quality-button.focused #quality-button-value { color: #53fc18; }
+#quality-button.quality-limited #quality-button-value { color: #ffd21e; }
+#quality-button.quality-low #quality-button-value { color: #ff4d45; }
+.settings-cog { width: 38px; height: 38px; color: #d7dadb; }
+.settings-cog-core { fill: #53fc18; stroke: none; }
+#settings-button.focused .settings-cog { color: #fff; }
+#settings-button.hasupdate::after {   /* red dot when a newer release exists */
+  content: ''; position: absolute; top: 5px; right: 5px;
   width: 18px; height: 18px; border-radius: 9px; background: #e91916; border: 3px solid #0b0e0f;
 }
 
+/* Hover explanation for the live quality bars. It shares the Settings balloon
+   language but points down to the dedicated Quality button. */
+#quality-hint {
+  position: absolute; z-index: 80; width: 390px; box-sizing: border-box;
+  padding: 17px 21px; border-radius: 12px; pointer-events: none;
+  background: rgba(18,21,23,0.98); border: 2px solid #53fc18;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+  color: #d1d4d5; font-size: 21px; font-weight: 600; line-height: 1.35;
+}
+#quality-hint::before, #quality-hint::after {
+  content: ''; position: absolute; left: var(--quality-arrow-left, 75%);
+  width: 0; height: 0; transform: translateX(-50%);
+}
+#quality-hint::before {
+  bottom: -18px; border-left: 15px solid transparent; border-right: 15px solid transparent;
+  border-top: 18px solid #53fc18;
+}
+#quality-hint::after {
+  bottom: -14px; border-left: 12px solid transparent; border-right: 12px solid transparent;
+  border-top: 14px solid #17191b;
+}
+#quality-hint.limited { border-color: #ffd21e; }
+#quality-hint.limited::before { border-top-color: #ffd21e; }
+#quality-hint.low { border-color: #ff4d45; }
+#quality-hint.low::before { border-top-color: #ff4d45; }
+#quality-hint.unknown { border-color: #667077; }
+#quality-hint.unknown::before { border-top-color: #667077; }
+
 /* Update-available note in the Settings menu + the release-notes popup */
 #updatemodal {
-  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 82;
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 92;
   background: rgba(0,0,0,0.6);
 }
 #updatebox {
@@ -590,18 +712,44 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   transition: background-color 140ms ease;
 }
 .srow.focused { background: #2a2f33; }
-.srow.sel { color: #53fc18; }
-.srow .qopt { padding-left: 14px; }              /* indent the quality rungs under the header */
-.srow .scheck { color: #53fc18; font-size: 25px; width: 24px; text-align: right; }
 .spill {
   min-width: 58px; text-align: center; font-size: 22px; font-weight: 700;
   padding: 3px 14px; border-radius: 14px; background: #2a2d30; color: #9a9a9d;
 }
 .spill.on { background: #143206; color: #53fc18; }
-.shead {
-  font-size: 20px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
-  color: #7f8386; padding: 14px 26px 6px; margin-top: 4px; border-top: 1px solid #23272a;
+
+/* Stream quality stays separate from Settings, but uses the original compact
+   Settings panel and row treatment. Every available preset fits without scroll. */
+#qualityoptmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 78;
+  background: rgba(0,0,0,0.35);
 }
+#qualityoptbox {
+  position: absolute; right: 40px; bottom: 118px; width: 380px;
+  box-sizing: border-box; background: #17191b;
+  border: 2px solid #53fc18; border-radius: 14px;
+  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+}
+#qualityopt-head {
+  display: flex; align-items: baseline;
+  padding: 4px 26px 14px; margin-bottom: 6px; border-bottom: 1px solid #2f3438;
+}
+#qualityopt-title { color: #fff; font-size: 26px; font-weight: 800; white-space: nowrap; }
+#qualityopt-list { overflow: hidden; }
+.qpick {
+  min-height: 56px; box-sizing: border-box;
+  display: flex; align-items: center; padding: 11px 26px;
+  color: #d6d7d8; font-size: 27px; cursor: pointer;
+}
+.qpick.focused { background: #2a2f33; }
+.qpick.selected { color: #53fc18; }
+.qpick-label { font-size: 27px; font-weight: 700; }
+.qpick-check {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin-left: auto; color: #53fc18;
+}
+.qpick-check svg { width: 23px; height: 23px; }
+.qpick:not(.selected) .qpick-check { visibility: hidden; }
 
 /* Dim (night) options popup, opened from the Settings menu */
 #dimoptmodal {
@@ -620,6 +768,53 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .srow .sgear { color: #9a9a9d; margin-left: auto; margin-right: 14px; cursor: pointer; display: inline-flex; align-items: center; }
 .srow .sgear:hover { color: #53fc18; }
 
+/* Live chat options popup, opened from the gear on the Settings "Live chat" row */
+#chatoptmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 78;
+  background: rgba(0,0,0,0.35);
+}
+#chatoptbox {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 460px;
+  background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
+  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+}
+#chatopt-head {
+  font-size: 26px; font-weight: 800; color: #fff;
+  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
+}
+#chatopt-list { max-height: 610px; overflow: hidden; }
+
+/* Detached callout balloon. JS places it beside the focused row and aligns the
+   arrow with that row. The update dialog remains above it at z-index 92. */
+#settings-desc {
+  position: absolute; z-index: 80;
+  width: 520px; box-sizing: border-box; pointer-events: none;
+  padding: 20px 24px; border-radius: 12px;
+  background: rgba(18,21,23,0.97); border: 2px solid #53fc18;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+  color: #c5c8ca; font-size: 22px; line-height: 1.4;
+}
+#settings-desc::before, #settings-desc::after {
+  content: ''; position: absolute; top: var(--arrow-top, 50%);
+  width: 0; height: 0; transform: translateY(-50%);
+}
+#settings-desc.point-right::before {
+  right: -18px; border-top: 15px solid transparent; border-bottom: 15px solid transparent;
+  border-left: 18px solid #53fc18;
+}
+#settings-desc.point-right::after {
+  right: -14px; border-top: 12px solid transparent; border-bottom: 12px solid transparent;
+  border-left: 14px solid #17191b;
+}
+#settings-desc.point-left::before {
+  left: -18px; border-top: 15px solid transparent; border-bottom: 15px solid transparent;
+  border-right: 18px solid #53fc18;
+}
+#settings-desc.point-left::after {
+  left: -14px; border-top: 12px solid transparent; border-bottom: 12px solid transparent;
+  border-right: 14px solid #17191b;
+}
+
 /* Read-only chat overlay on the right edge */
 #chat {
   position: absolute; right: 0; top: 0; width: 452px; height: 1080px;
@@ -630,11 +825,39 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 20%);
 }
 #chat.on { display: flex; }
+/* Chat overlay options (side / width / opacity / text size) set from Settings */
+#chat.side-left {
+  right: auto; left: 0;
+  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
+}
+#chat.cbg-off, #chat.side-left.cbg-off { background: none; }
+#chat.cbg-light {
+  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 42%, rgba(0,0,0,0.34) 100%);
+}
+#chat.side-left.cbg-light {
+  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 42%, rgba(0,0,0,0.34) 100%);
+}
+#chat.cbg-dark {
+  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
+}
+#chat.side-left.cbg-dark {
+  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
+}
+#chat.cwidth-narrow { width: 360px; }
+#chat.cwidth-medium { width: 452px; }
+#chat.cwidth-wide   { width: 580px; }
+#chat.copacity-low    { opacity: 0.5; }
+#chat.copacity-medium { opacity: 0.75; }
+#chat.copacity-high   { opacity: 1; }
 .cmsg {
   font-size: 24px; line-height: 1.32; margin-top: 10px; color: #e9e9ea;
   word-wrap: break-word; text-shadow: 0 1px 3px rgba(0,0,0,0.95);
   transition: opacity 0.8s ease-out;
 }
+#chat.csize-small  .cmsg { font-size: 20px; }
+#chat.csize-medium .cmsg { font-size: 24px; }
+#chat.csize-large  .cmsg { font-size: 30px; }
+.cmsg .ctime { color: #8a8d90; font-weight: 600; font-size: 0.82em; margin-right: 4px; }
 .cmsg.cfade { opacity: 0; }
 .cmsg .cuser { font-weight: 800; }
 .cmsg .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }

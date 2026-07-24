@@ -12,11 +12,13 @@
     <div id="dimscreen" class="hidden"></div>
     <div id="idle" class="hidden">
       <div id="idle-wm">KICK<span>TV</span></div>
+      <div id="idle-load" class="hidden">Loading last VOD...</div>
       <div id="idle-msg"></div>
     </div>
     <div id="chat"></div>
     <div id="notify"></div>
     <div id="pbstatus" class="hidden"></div>
+    <div id="diagnostics" class="hidden"></div>
     <div id="overlay" class="hidden">
       <span id="ov-name"></span>
       <span id="ov-live">LIVE</span>
@@ -90,10 +92,31 @@
       <span class="cbitem" data-act="refresh"><span class="cbdot green"></span>Refresh</span>
       <span class="cbitem" data-act="vods"><span class="cbdot yellow"></span>Past videos</span>
       <span class="cbitem" data-act="browse"><span class="cbdot blue"></span>Browse</span>
+      <span class="cbitem" data-act="dim"><span class="cbkey">0</span>Dim</span>
     </div>
-    <div id="quality-gear" class="hidden" title="Settings">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>
+    <div id="player-tools" class="hidden">
+      <div id="quality-button" class="player-tool" title="Stream quality">
+        <span class="player-tool-icon quality-mark">
+          <svg viewBox="0 0 24 24" fill="none">
+            <rect class="quality-bar bar-1" x="4" y="14" width="3" height="4"/>
+            <rect class="quality-bar bar-2" x="10.5" y="10" width="3" height="8"/>
+            <rect class="quality-bar bar-3" x="17" y="6" width="3" height="12"/>
+          </svg>
+        </span>
+        <span class="player-tool-copy">
+          <span class="player-tool-name">Quality</span>
+          <span id="quality-button-value">Auto</span>
+        </span>
+      </div>
+      <div id="settings-button" class="player-tool" title="Settings">
+        <svg class="settings-cog" viewBox="0 0 24 24" fill="none">
+          <path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"
+                stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
+          <circle class="settings-cog-core" cx="12" cy="12" r="2.1"/>
+        </svg>
+      </div>
     </div>
+    <div id="quality-hint" class="hidden"></div>
     <div id="saver"></div>
   </div>
 
@@ -126,12 +149,30 @@
     </div>
   </div>
 
+  <div id="qualityoptmodal" class="hidden">
+    <div id="qualityoptbox">
+      <div id="qualityopt-head">
+        <span id="qualityopt-title">Quality</span>
+      </div>
+      <div id="qualityopt-list"></div>
+    </div>
+  </div>
+
   <div id="dimoptmodal" class="hidden">
     <div id="dimoptbox">
       <div id="dimopt-head">Dim (night)</div>
       <div id="dimopt-list"></div>
     </div>
   </div>
+
+  <div id="chatoptmodal" class="hidden">
+    <div id="chatoptbox">
+      <div id="chatopt-head">Live chat</div>
+      <div id="chatopt-list"></div>
+    </div>
+  </div>
+
+  <div id="settings-desc" class="hidden"></div>
 
   <div id="updatemodal" class="hidden">
     <div id="updatebox">

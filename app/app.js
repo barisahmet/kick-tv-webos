@@ -13,7 +13,7 @@ var PLAYER_REFRESH_MS = 30000; // how often we refresh the list while a stream p
 
 var KEY = { LEFT: 37, UP: 38, RIGHT: 39, DOWN: 40, OK: 13, BACK: 461,
             RED: 403, GREEN: 404, YELLOW: 405, BLUE: 406,
-            PLAY: 415, PAUSE: 19, STOP: 413, REW: 412, FF: 417 };
+            PLAY: 415, PAUSE: 19, STOP: 413, REW: 412, FF: 417, N0: 48 };
 
 var state = {
   mode: 'player',        // which screen is showing: player, add, or confirm
@@ -24,10 +24,14 @@ var state = {
   sidebarOpen: false,
   sideItems: [],         // the rows in the sidebar, with the Add row at the end
   sideFocus: 0,          // which sidebar row is highlighted
+  playerToolFocus: -1,   // -1 = channel list, 0 = Quality, 1 = Settings
   playerTimer: null,
   toastTimer: null,
   idleTimer: null,       // closes the sidebar again once you stop touching it
   notifyTimer: null,
+  notifyWaitTimer: null,
+  notifyQueue: [],
+  notifyCurrent: null,
   wasLive: {},           // who was live last time, so we can tell when someone comes online
   baselineSet: false,    // the first load only records live status, so we do not alert for everyone
   netDown: false,        // true when the last refresh could not reach Kick at all
@@ -39,15 +43,21 @@ var state = {
   lastFetch: 0,          // when favorites were last refreshed (to avoid redundant fetches)
   vod: null,             // set to a past-video descriptor while a VOD is playing
   vodReturn: null,       // the live channel to go back to when the VOD ends or you exit
-  suppressNudgeUntil: 0  // after a click hides the UI, pointer moves won't reopen it until this time
+  preserveLastVodDuringLive: false,
+  vodRecoveryInFlight: false,
+  vodRecoveryRetryTimer: null,
+  offlineExpanded: false,
+  suppressNudgeUntil: 0  // after a deliberate hide, pointer moves will not reopen the UI until this time
 };
 var IDLE_MS = 5000;
-var NUDGE_SUPPRESS_MS = 10000;   // how long a click-to-hide keeps the sidebar from popping back on movement
+var NUDGE_SUPPRESS_MS = 10000;   // grace after click/Back hides the sidebar
 
 // Playback state and the numbers that control how we recover from drops.
 var PB = { slug: null, active: false, reloading: false,
            netRetries: 0, mediaRetries: 0,
-           watchdog: null, reconnectTimer: null, lastTime: -1, stallCount: 0 };
+           recoverCount: 0, reconnects: 0, lastError: '',
+           watchdog: null, reconnectTimer: null, lastTime: -1, stallCount: 0,
+           userSeekUntil: 0, rewound: false };
 var MAX_NET_RETRY = 6;     // quiet reload tries before we go fetch a brand new stream link
 var MAX_MEDIA_RETRY = 3;   // decode recovery tries before we reload the whole stream
 var WATCHDOG_MS = 5000;    // how often the freeze checker runs
@@ -216,20 +226,105 @@ function detectOnline(favs) {
   favs.forEach(function (slug) {
     var c = state.channels[slug];
     if (!c) return;
-    if (state.baselineSet && c.live && state.wasLive[slug] === false) newly.push(c.name);
+    if (state.baselineSet && c.live && state.wasLive[slug] === false) {
+      // respect the Live alerts setting: All, Pinned only, or Off
+      if (settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(slug))) {
+        newly.push({ slug: slug, name: c.name });
+      }
+    }
     state.wasLive[slug] = c.live;
   });
   state.baselineSet = true;
   if (newly.length) notifyOnline(newly);
 }
-function notifyOnline(names) {
-  var text = names.length === 1 ? names[0] + ' is online' : names.join(', ') + ' online';
+function alertAllowed(item) {
+  if (!item || settings.alerts === 'off' || getFavorites().indexOf(item.slug) === -1) return false;
+  var c = state.channels[item.slug];
+  if (!c || !c.live) return false;
+  return settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(item.slug));
+}
+function notifyUiBusy() {
+  return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||
+    browse.open || vods.open || cats.open || settings.open || dimopt.open ||
+    chatopt.open || (qualityopt && qualityopt.open) || updateopen || chpop.open;
+}
+function notifyOnline(items) {
+  items.forEach(function (item) {
+    if (!alertAllowed(item)) return;
+    if (state.notifyCurrent && state.notifyCurrent.slug === item.slug) return;
+    for (var i = 0; i < state.notifyQueue.length; i++) {
+      if (state.notifyQueue[i].slug === item.slug) return;
+    }
+    state.notifyQueue.push(item);
+  });
+  pumpNotify();
+}
+function pumpNotify() {
+  if (state.notifyCurrent || !state.notifyQueue.length) return;
+  if (notifyUiBusy()) {
+    clearTimeout(state.notifyWaitTimer);
+    state.notifyWaitTimer = setTimeout(pumpNotify, 500);
+    return;
+  }
+  var item = null;
+  while (state.notifyQueue.length && !item) {
+    var candidate = state.notifyQueue.shift();
+    if (alertAllowed(candidate)) item = candidate;
+  }
+  if (!item) return;
+  state.notifyCurrent = item;
   var el = document.getElementById('notify');
   el.innerHTML = '<span class="ndot"></span>';
-  el.appendChild(document.createTextNode(text));
+  el.appendChild(document.createTextNode(item.name + ' is online'));
+  var hint = document.createElement('span');
+  hint.className = 'nhint';
+  hint.textContent = 'Press OK to watch';
+  el.appendChild(hint);
+  el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
   el.className = 'show';
   clearTimeout(state.notifyTimer);
-  state.notifyTimer = setTimeout(function () { el.className = ''; }, 6000);
+  state.notifyTimer = setTimeout(finishNotify, 5000);
+}
+function finishNotify() {
+  clearTimeout(state.notifyTimer);
+  state.notifyTimer = null;
+  state.notifyCurrent = null;
+  document.getElementById('notify').className = '';
+  clearTimeout(state.notifyWaitTimer);
+  state.notifyWaitTimer = setTimeout(pumpNotify, 260);
+}
+function pauseNotify() {
+  clearTimeout(state.notifyTimer);
+  clearTimeout(state.notifyWaitTimer);
+  state.notifyTimer = null;
+  state.notifyWaitTimer = null;
+  if (state.notifyCurrent) {
+    state.notifyQueue.unshift(state.notifyCurrent);
+    state.notifyCurrent = null;
+  }
+  document.getElementById('notify').className = '';
+}
+function activateNotify() {
+  var item = state.notifyCurrent;
+  if (!item) return false;
+  finishNotify();
+  if (!alertAllowed(item)) { toast('Channel is no longer live'); return true; }
+  if (state.current === item.slug) {
+    if (state.channels[item.slug]) showOverlay(state.channels[item.slug]);
+    return true;
+  }
+  closeSidebar();
+  play(item.slug);
+  return true;
+}
+function pruneNotifications() {
+  var kept = [];
+  for (var i = 0; i < state.notifyQueue.length; i++) {
+    if (alertAllowed(state.notifyQueue[i])) kept.push(state.notifyQueue[i]);
+  }
+  state.notifyQueue = kept;
+  if (state.notifyCurrent && !alertAllowed(state.notifyCurrent)) finishNotify();
+  else pumpNotify();
 }
 function fmtViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
@@ -294,6 +389,7 @@ function setBanner(msg) {
   hideSpinner();                 // the reconnecting banner replaces the plain buffering spinner
 }
 function teardownVideo() {
+  saveVodProgress(true);          // capture the old VOD before its media/state is replaced
   PB.active = false;
   hideVodBar();
   hideSpinner();
@@ -315,17 +411,19 @@ function returnToIdle() {
   disconnectChat();
   showNothing();
 }
-function play(slug) {
+function play(slug, preserveLastVod) {
   if (!slug) return;
   teardownVideo();
   disconnectChat();          // drop the old channel's chat; the new one connects once it loads
   state.vod = null; state.vodReturn = null;   // leaving any past-video playback
   setMode('player');
   state.current = slug;
+  state.preserveLastVodDuringLive = !!preserveLastVod;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
   state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
   PB.slug = slug; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
-  PB.recoverCount = 0; PB.endedCount = 0;
+  PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = '';
+  PB.userSeekUntil = 0; PB.rewound = false;
   setBanner('');
   showState('hidden');
   updateGear();
@@ -347,6 +445,10 @@ function loadChannel(slug, isRecovery) {
     state.channels[slug] = c;
     if (!c.live || !c.playbackUrl) { advanceOrIdle(slug); return; }   // stream ended / offline
     saveLast(slug);
+    // An automatic live fallback after a transient VOD lookup failure must not
+    // erase Continue Watching. A deliberate live choice calls play() without
+    // this flag and becomes the next startup choice once it really starts.
+    if (!state.preserveLastVodDuringLive) clearLastVod();
     if (isRecovery) setBanner('');
     else { showOverlay(c); if (state.sidebarOpen) renderSidebar(slug); }
     attachStream(slug, c.playbackUrl);
@@ -357,10 +459,13 @@ function attachStream(slug, url) {
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   PB.netRetries = 0; PB.mediaRetries = 0;
+  PB.userSeekUntil = 0; PB.rewound = false;
+  try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
     state.hls = hls;
     hls.on(Hls.Events.ERROR, function (ev, data) {
+      if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;   // old stream, or not fatal, so ignore
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) onNetworkError(slug, hls);
       else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) onMediaError(slug, hls);
@@ -369,7 +474,13 @@ function attachStream(slug, url) {
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
       if (state.hls !== hls) return;                           // a newer stream took over
       applyQualityPref();                                      // honour the saved quality choice
+      if (qualityopt && qualityopt.open) refreshQualityOpt();
     });
+    if (Hls.Events.LEVEL_SWITCHED) {
+      hls.on(Hls.Events.LEVEL_SWITCHED, function () {
+        if (state.hls === hls) updateQualityButton();
+      });
+    }
     try { hls.loadSource(url); hls.attachMedia(video); }
     catch (e) { recoverPlayback(slug); return; }
   } else {
@@ -424,6 +535,7 @@ function onMediaError(slug, hls) {
 function recoverPlayback(slug) {
   if (state.current !== slug || PB.reloading) return;
   PB.recoverCount = (PB.recoverCount || 0) + 1;
+  PB.reconnects++;
   if (PB.recoverCount > 3) { advanceOrIdle(slug); return; }   // it keeps failing: treat as ended
   PB.reloading = true;
   setBanner('Reconnecting...');
@@ -435,8 +547,13 @@ function recoverPlayback(slug) {
 // is on, otherwise show the idle screen.
 function advanceOrIdle(slug) {
   if (settings.autoadvance) {
-    var nx = nextLiveAfter(slug);
-    if (nx) { toast('Auto-advancing to ' + (state.channels[nx].name || nx)); play(nx); return; }
+    // prefer a live pinned channel, then fall back to the next live one
+    var nx = firstLivePinned(slug) || nextLiveAfter(slug);
+    if (nx) {
+      toast('Auto-advancing to ' + (state.channels[nx].name || nx));
+      play(nx, state.preserveLastVodDuringLive);
+      return;
+    }
   }
   toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' ended');
   returnToIdle();
@@ -472,6 +589,11 @@ function startWatchdog(slug) {
     if (state.current !== slug || !PB.active) { stopWatchdog(); return; }
     var video = document.getElementById('video');
     if (video.paused) { PB.stallCount = 0; return; }   // they paused it, so this is not a freeze
+    if (video.seeking || Date.now() < PB.userSeekUntil) {
+      PB.lastTime = video.currentTime;
+      PB.stallCount = 0;
+      return;
+    }
     var t = video.currentTime;
     if (PB.lastTime >= 0 && Math.abs(t - PB.lastTime) < 0.05) {
       if (++PB.stallCount >= STALL_TICKS) { PB.stallCount = 0; recoverPlayback(slug); }
@@ -567,17 +689,39 @@ function hideCursor() {
 function showCursor() {
   document.documentElement.classList.remove('hidecursor');
 }
-// The settings gear and the colour-button legend both belong to the open
-// sidebar, so show them exactly when it is open.
+function applyPlayerToolFocus() {
+  var qualityButton = document.getElementById('quality-button');
+  var settingsButton = document.getElementById('settings-button');
+  if (qualityButton) qualityButton.classList.toggle('focused', state.playerToolFocus === 0);
+  if (settingsButton) settingsButton.classList.toggle('focused', state.playerToolFocus === 1);
+}
+function setPlayerToolFocus(idx) {
+  state.playerToolFocus = idx;
+  applyPlayerToolFocus();
+  if (state.sidebarOpen) applySideFocus();
+}
+function activatePlayerTool() {
+  if (state.playerToolFocus === 0) openQualityOpt();
+  else if (state.playerToolFocus === 1) openSettings();
+}
+// The bottom player tools and colour-button legend belong to the open sidebar,
+// so show them exactly when it is open.
 function updateGear() {
   var open = state.sidebarOpen;
-  var g = document.getElementById('quality-gear');
-  if (g) { if (open) g.classList.remove('hidden'); else g.classList.add('hidden'); }
+  var tools = document.getElementById('player-tools');
+  if (tools) { if (open) tools.classList.remove('hidden'); else tools.classList.add('hidden'); }
+  if (!open) {
+    state.playerToolFocus = -1;
+    hideQualityHint();
+  }
+  applyPlayerToolFocus();
+  updateQualityButton();
   var guide = document.getElementById('cbguide');
   if (guide) { if (open) guide.classList.remove('hidden'); else guide.classList.add('hidden'); }
 }
 function openSidebar() {
   if (!state.ready || browse.open || vods.open || cats.open || chpop.open) return;
+  state.suppressNudgeUntil = 0;                  // an explicit reopen cancels an older Back/click grace
   showCursor();
   if (!state.sidebarOpen) {
     state.sidebarOpen = true;
@@ -589,6 +733,7 @@ function openSidebar() {
   }
   resetIdle();
   updateGear();
+  placeDiagnostics();
   // only refetch when the data is stale, so opening the list stays snappy
   if (Date.now() - state.lastFetch > 8000) {
     fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
@@ -602,6 +747,12 @@ function closeSidebar() {
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
   updateGear();
+  placeDiagnostics();
+}
+function closeSidebarWithGrace() {
+  closeSidebar();
+  state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;
+  hideCursor();
 }
 // If nothing happens for a few seconds, close the sidebar. Any action restarts the timer.
 function resetIdle() {
@@ -620,7 +771,12 @@ function nudgeSidebar() {
   if (!state.sidebarOpen && Date.now() < state.suppressNudgeUntil) return;
   if (!state.sidebarOpen) openSidebar(); else resetIdle();
 }
-function focusKeyOf(item) { return item ? (item.type === 'add' ? 'add' : item.slug) : null; }
+function focusKeyOf(item) {
+  if (!item) return null;
+  if (item.type === 'add') return 'add';
+  if (item.type === 'offline-group') return 'offline-group';
+  return item.slug;
+}
 function moveSide(delta) {
   if (!state.sideItems.length) return;
   var next = state.sideFocus + delta;
@@ -632,7 +788,8 @@ function applySideFocus() {
   var list = document.getElementById('fav-list');
   for (var i = 0; i < list.children.length; i++) {
     var row = list.children[i];
-    row.className = row.getAttribute('data-base') + (i === state.sideFocus ? ' focused' : '');
+    row.className = row.getAttribute('data-base') +
+      (i === state.sideFocus && state.playerToolFocus < 0 ? ' focused' : '');
     if (i === state.sideFocus) {
       var top = row.offsetTop - list.offsetTop;
       if (top < list.scrollTop) list.scrollTop = top - 8;
@@ -649,7 +806,23 @@ function renderSidebar(focusKey) {
   if (state.tempChannel && state.order.indexOf(state.tempChannel) === -1 && state.channels[state.tempChannel]) {
     state.sideItems.push({ type: 'temp', slug: state.tempChannel });
   }
-  state.order.forEach(function (s) { state.sideItems.push({ type: 'chan', slug: s }); });
+  if (settings.hideOffline) {
+    var offline = [];
+    state.order.forEach(function (s) {
+      if (state.channels[s] && state.channels[s].live) state.sideItems.push({ type: 'chan', slug: s });
+      else offline.push(s);
+    });
+    if (offline.length) {
+      state.sideItems.push({ type: 'offline-group', count: offline.length });
+      if (state.offlineExpanded) {
+        offline.forEach(function (s) { state.sideItems.push({ type: 'chan', slug: s }); });
+      }
+    } else {
+      state.offlineExpanded = false;
+    }
+  } else {
+    state.order.forEach(function (s) { state.sideItems.push({ type: 'chan', slug: s }); });
+  }
   state.sideItems.push({ type: 'add' });
 
   var cc = document.getElementById('side-count');
@@ -662,6 +835,28 @@ function renderSidebar(focusKey) {
   var list = document.getElementById('fav-list');
   list.innerHTML = '';
   state.sideItems.forEach(function (item) {
+    if (item.type === 'offline-group') {
+      var grow = document.createElement('div');
+      grow.setAttribute('data-base', 'favrow offlinegroup');
+      grow.setAttribute('data-type', 'offline-group');
+      grow.className = 'favrow offlinegroup';
+      var chev = document.createElement('span');
+      chev.className = 'offline-chevron';
+      chev.innerHTML = state.offlineExpanded
+        ? '<svg viewBox="0 0 24 24"><path d="M4 8l8 8 8-8"/></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M8 4l8 8-8 8"/></svg>';
+      var glabel = document.createElement('span');
+      glabel.className = 'offline-label';
+      glabel.textContent = 'Offline channels';
+      var count = document.createElement('span');
+      count.className = 'offline-count';
+      count.textContent = String(item.count);
+      grow.appendChild(chev);
+      grow.appendChild(glabel);
+      grow.appendChild(count);
+      list.appendChild(grow);
+      return;
+    }
     if (item.type === 'add') {
       var arow = document.createElement('div');
       arow.setAttribute('data-base', 'favrow addrow');
@@ -719,6 +914,12 @@ function renderSidebar(focusKey) {
   for (var i = 0; i < state.sideItems.length; i++) {
     if (focusKeyOf(state.sideItems[i]) === prevKey) { idx = i; break; }
   }
+  if (idx === -1 && settings.hideOffline && prevKey && state.channels[prevKey] &&
+      !state.channels[prevKey].live) {
+    for (var j = 0; j < state.sideItems.length; j++) {
+      if (state.sideItems[j].type === 'offline-group') { idx = j; break; }
+    }
+  }
   state.sideFocus = idx === -1 ? 0 : idx;
   applySideFocus();
 
@@ -733,7 +934,12 @@ function renderSidebar(focusKey) {
 function activateSide() {
   var item = state.sideItems[state.sideFocus];
   if (!item) return;
-  if (item.type === 'add') openAdd(); else switchTo(item.slug);
+  if (item.type === 'offline-group') {
+    state.offlineExpanded = !state.offlineExpanded;
+    renderSidebar('offline-group');
+    resetIdle();
+  } else if (item.type === 'add') openAdd();
+  else switchTo(item.slug);
 }
 var pendingAction = null;
 function askRemove(slug) {
@@ -1285,9 +1491,148 @@ function selectCategory(slug, name) {
    past videos; picking one plays it. VOD playback is kept separate from live
    playback: no channel refetch, no live-token recovery, and no stall watchdog,
    because a video on demand can pause to buffer without anything being wrong. */
-var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false };
+var LAST_VOD_KEY = 'kicktv.lastvod';
+var VOD_PROGRESS_KEY = 'kicktv.vodprogress';
+var VOD_PROGRESS_LIMIT = 100;
+var vodProgressLastWrite = 0;
+// Keep only a stable recording identity for startup recovery. Playback URLs
+// expire, so boot always resolves this identity against a fresh videos list.
+function vodStableId(v) {
+  var nested = v && v.video;
+  var id = null;
+  if (nested && nested.uuid != null && nested.uuid !== '') id = nested.uuid;
+  else if (nested && nested.id != null && nested.id !== '') id = nested.id;
+  else if (v && v.uuid != null && v.uuid !== '') id = v.uuid;
+  else if (v && v.id != null && v.id !== '') id = v.id;
+  return id == null ? null : String(id);
+}
+function clearLastVod() {
+  try { localStorage.removeItem(LAST_VOD_KEY); } catch (e) {}
+}
+function loadLastVod() {
+  try {
+    var marker = JSON.parse(localStorage.getItem(LAST_VOD_KEY));
+    if (marker && marker.version === 1 && typeof marker.slug === 'string' &&
+        marker.slug && typeof marker.id === 'string' && marker.id) return marker;
+  } catch (e) {}
+  clearLastVod();
+  return null;
+}
+function saveLastVod(slug, v, name) {
+  var id = vodStableId(v);
+  if (!slug || !id) { clearLastVod(); return; }
+  try {
+    localStorage.setItem(LAST_VOD_KEY, JSON.stringify({
+      version: 1,
+      slug: String(slug),
+      id: id,
+      name: name || String(slug),
+      updated: Date.now()
+    }));
+  } catch (e) {}
+}
+function clearLastVodMatch(slug, id) {
+  var marker = loadLastVod();
+  if (marker && marker.slug === slug && (!id || marker.id === String(id))) clearLastVod();
+}
+function loadVodProgress() {
+  try {
+    var data = JSON.parse(localStorage.getItem(VOD_PROGRESS_KEY));
+    if (data && data.version === 1 && data.items && typeof data.items === 'object') return data;
+  } catch (e) {}
+  return { version: 1, items: {} };
+}
+function writeVodProgress(data) {
+  try {
+    var keys = Object.keys(data.items);
+    if (keys.length > VOD_PROGRESS_LIMIT) {
+      keys.sort(function (a, b) {
+        return (data.items[a].updated || 0) - (data.items[b].updated || 0);
+      });
+      while (keys.length > VOD_PROGRESS_LIMIT) delete data.items[keys.shift()];
+    }
+    localStorage.setItem(VOD_PROGRESS_KEY, JSON.stringify(data));
+  } catch (e) {}
+}
+function vodProgressKey(slug, v) {
+  var id = vodStableId(v);
+  if (!id && v && (v.created_at || v.duration)) {
+    id = String(v.created_at || '') + '|' + String(v.duration || '');
+  }
+  return slug + ':' + String(id || (v && v.source) || 'unknown');
+}
+function savedVodPosition(key) {
+  var entry = loadVodProgress().items[key];
+  var pos = entry && parseFloat(entry.position);
+  return isFinite(pos) && pos >= 10 ? pos : 0;
+}
+function clearVodProgress(key) {
+  if (!key) return;
+  var data = loadVodProgress();
+  if (data.items[key]) {
+    delete data.items[key];
+    writeVodProgress(data);
+  }
+}
+function saveVodProgress(force) {
+  if (!state.vod || !state.vod.key) return;
+  // Ignore media events left over from the previous source until this VOD has
+  // its own metadata. Otherwise a queued pause/timeupdate at 0 can erase the
+  // new video's saved resume point during a source switch.
+  if (!state.vod.progressReady ||
+      (state.vod.resumeAt > 0 && !state.vod.resumeApplied)) return;
+  var now = Date.now();
+  if (!force && now - vodProgressLastWrite < 5000) return;
+  vodProgressLastWrite = now;
+  if (state.vod.completed) { clearVodProgress(state.vod.key); return; }
+  var video = document.getElementById('video');
+  var pos = parseFloat(video.currentTime), dur = parseFloat(video.duration);
+  if (!isFinite(pos) || pos < 0) return;
+  var data = loadVodProgress();
+  if (pos < 10) {
+    delete data.items[state.vod.key];
+  } else {
+    data.items[state.vod.key] = {
+      position: Math.floor(pos),
+      duration: isFinite(dur) && dur > 0 ? Math.floor(dur) : 0,
+      updated: now
+    };
+  }
+  writeVodProgress(data);
+}
+function applyVodResume() {
+  if (!state.vod) return;
+  var video = document.getElementById('video');
+  if (video.readyState < 1) return;
+  state.vod.progressReady = true;
+  if (state.vod.resumeApplied) return;
+  if (!(state.vod.resumeAt > 0)) { state.vod.resumeApplied = true; return; }
+  var pos = state.vod.resumeAt;
+  if (isFinite(video.duration) && video.duration > 0) pos = Math.min(pos, Math.max(0, video.duration - 1));
+  if (!(pos >= 10)) { state.vod.resumeApplied = true; return; }
+  try {
+    video.currentTime = pos;
+    state.vod.resumeApplied = true;
+  } catch (e) {}
+}
+function completeVodProgress() {
+  if (!state.vod) return;
+  state.vod.completed = true;
+  clearVodProgress(state.vod.key);
+}
+var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0 };
 var VOD_COLS = 4;
 function setVodStatus(msg) { document.getElementById('vods-status').textContent = msg || ''; }
+// Kick includes subscriber/gated recordings in the public list but with an
+// empty source. They cannot be opened by this unauthenticated TV app, so do not
+// render a card that appears actionable and then does nothing.
+function playableVod(v) {
+  if (!v || typeof v.source !== 'string') return false;
+  var source = v.source.trim();
+  if (!/^https?:\/\//i.test(source)) return false;
+  v.source = source;
+  return true;
+}
 function fmtDuration(ms) {
   var s = Math.floor((ms || 0) / 1000);
   var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
@@ -1324,7 +1669,7 @@ function openVods(slug) {
   if (!state.ready || !slug) return;
   if (browse.open) closeBrowse();
   if (settings.open) closeSettings();
-  vods.open = true; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true;
+  vods.open = true; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true; vods.hidden = 0;
   state.vodReturn = state.current || state.vodReturn;   // where to go back to afterwards
   showCursor();
   closeSidebar();
@@ -1337,9 +1682,14 @@ function openVods(slug) {
   serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
     vods.loading = false;
     if (!vods.open || vods.slug !== slug) return;
-    vods.list = Array.isArray(data) ? data : [];
+    var allVods = Array.isArray(data) ? data : [];
+    vods.list = allVods.filter(playableVod);
+    vods.hidden = allVods.length - vods.list.length;
     renderVods();
-    if (!vods.list.length) setVodStatus(err ? 'Could not load videos' : 'No past videos');
+    if (!vods.list.length) {
+      setVodStatus(err ? 'Could not load videos'
+        : (vods.hidden ? 'No playable past videos' : 'No past videos'));
+    }
     else setVodStatus('');
   });
 }
@@ -1410,20 +1760,37 @@ function vodActivate() {
   if (v && v.source) {
     vods.open = false;
     document.getElementById('vods').className = 'hidden';
-    playVod(v);
+    // Capture this exact list as the auto-advance queue. The global VOD browser
+    // can later be opened for another streamer without changing what comes next.
+    playVod(v, vods.list.slice(), vods.gridIdx, vods.slug);
   }
 }
-function playVod(v) {
+function playVod(v, queue, queueIndex, slug) {
   teardownVideo();
   disconnectChat();
   setMode('player');
   state.current = null;
+  state.preserveLastVodDuringLive = false;
   state.tempChannel = null;
-  state.vod = { slug: vods.slug, source: v.source,
+  var vodSlug = slug || vods.slug;
+  var playQueue = queue && queue.length ? queue : [v];
+  var playIndex = typeof queueIndex === 'number' ? queueIndex : playQueue.indexOf(v);
+  if (playIndex < 0 || playIndex >= playQueue.length) {
+    playQueue = [v];
+    playIndex = 0;
+  }
+  var progressKey = vodProgressKey(vodSlug, v);
+  var resumeAt = savedVodPosition(progressKey);
+  vodProgressLastWrite = 0;
+  state.vod = { slug: vodSlug, source: v.source,
                 title: v.session_title || 'Past video',
-                name: (state.channels[vods.slug] && state.channels[vods.slug].name) || vods.slug,
-                retries: 0 };
-  PB.slug = null; PB.reloading = false;
+                name: (state.channels[vodSlug] && state.channels[vodSlug].name) || vodSlug,
+                queue: playQueue, queueIndex: playIndex,
+                markerId: vodStableId(v),
+                key: progressKey, resumeAt: resumeAt, resumeApplied: false,
+                progressReady: false, completed: false, ending: false, retries: 0 };
+  saveLastVod(vodSlug, v, state.vod.name);
+  PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = '';
   setBanner('');
   showState('hidden');
   updateGear();
@@ -1431,20 +1798,58 @@ function playVod(v) {
   attachVod(v.source);
   showVodOverlay();
 }
+// The API list is rendered newest to oldest, so the next card in that visible
+// order is the next queue item. Source-less entries are skipped defensively even
+// though openVods() already filters them out.
+function nextQueuedVod(vodState) {
+  if (!vodState || !Array.isArray(vodState.queue)) return null;
+  for (var i = (vodState.queueIndex || 0) + 1; i < vodState.queue.length; i++) {
+    if (playableVod(vodState.queue[i])) return { item: vodState.queue[i], index: i };
+  }
+  return null;
+}
+function advanceVodOrExit() {
+  var finished = state.vod;
+  if (!finished) return;
+  clearLastVodMatch(finished.slug, finished.markerId);
+  if (settings.autoadvance) {
+    var next = nextQueuedVod(finished);
+    if (next) {
+      toast('Up next: ' + (next.item.session_title || 'Past video'));
+      playVod(next.item, finished.queue, next.index, finished.slug);
+      return;
+    }
+  }
+  toast('Video ended');
+  exitVod();
+}
 function attachVod(source) {
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
+  if (state.vod) { state.vod.resumeApplied = false; state.vod.progressReady = false; }
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
-      manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6
+      manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6,
+      startPosition: state.vod && state.vod.resumeAt > 0 ? state.vod.resumeAt : -1
     });
     state.hls = hls;
     hls.on(Hls.Events.ERROR, function (ev, data) {
+      if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
       else reloadVod();
     });
+    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+      if (state.hls !== hls) return;
+      applyQualityPref();
+      if (qualityopt && qualityopt.open) refreshQualityOpt();
+    });
+    if (Hls.Events.LEVEL_SWITCHED) {
+      hls.on(Hls.Events.LEVEL_SWITCHED, function () {
+        if (state.hls === hls) updateQualityButton();
+      });
+    }
     try { hls.loadSource(source); hls.attachMedia(video); }
     catch (e) { reloadVod(); return; }
   } else {
@@ -1455,14 +1860,19 @@ function attachVod(source) {
 }
 function reloadVod() {
   if (!state.vod) return;
+  var video = document.getElementById('video');
+  if (isFinite(video.currentTime) && video.currentTime > 0) state.vod.resumeAt = Math.max(0, video.currentTime - 1);
   state.vod.retries = (state.vod.retries || 0) + 1;
+  PB.reconnects++;
   if (state.vod.retries > 4) { toast('Playback error'); exitVod(); return; }
   setBanner('Reconnecting...');
   attachVod(state.vod.source);
 }
 function exitVod() {
   var back = state.vodReturn;
+  var leaving = state.vod;
   teardownVideo();
+  if (leaving) clearLastVodMatch(leaving.slug, leaving.markerId);
   state.vod = null;
   state.vodReturn = null;
   setBanner('');
@@ -1519,6 +1929,7 @@ function drawVodBarNow() {
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
   document.getElementById('vodbar').className = '';
+  placeDiagnostics();
   placeVodBar();
   drawVodBarNow();
   if (!vodbarTimer) vodbarTimer = setInterval(drawVodBarNow, 500);
@@ -1533,6 +1944,7 @@ function seekVodFrac(frac) {
 }
 function hideVodBar() {
   document.getElementById('vodbar').className = 'hidden';
+  placeDiagnostics();
   if (vodbarTimer) { clearInterval(vodbarTimer); vodbarTimer = null; }
 }
 
@@ -1553,36 +1965,58 @@ function saveQualityPref() {
 // or below it, or failing that the highest the stream offers.
 function levelIndexForPref() {
   if (quality.sel === 'auto' || !state.hls || !state.hls.levels || !state.hls.levels.length) return -1;
-  var levels = state.hls.levels, best = -1, bestH = -1, maxIdx = 0, maxH = -1;
+  var levels = state.hls.levels, best = -1, bestH = -1, bestRate = -1;
+  var maxIdx = 0, maxH = -1, maxRate = -1;
   for (var i = 0; i < levels.length; i++) {
     var h = levels[i].height || 0;
-    if (h > maxH) { maxH = h; maxIdx = i; }
-    if (h <= quality.sel && h > bestH) { bestH = h; best = i; }
+    var rate = levels[i].bitrate || 0;
+    if (h > maxH || (h === maxH && rate > maxRate)) {
+      maxH = h; maxRate = rate; maxIdx = i;
+    }
+    if (h <= quality.sel && (h > bestH || (h === bestH && rate > bestRate))) {
+      bestH = h; bestRate = rate; best = i;
+    }
   }
   return best !== -1 ? best : maxIdx;
 }
 function applyQualityPref() {
-  if (!state.hls) return;
-  try { state.hls.currentLevel = levelIndexForPref(); } catch (e) {}
+  if (state.hls) {
+    try { state.hls.currentLevel = levelIndexForPref(); } catch (e) {}
+  }
+  updateQualityButton();
+}
+function qualityLevelLabel(level) {
+  if (!level) return 'Unknown';
+  var fps = (level.attrs && level.attrs['FRAME-RATE'])
+    ? Math.round(parseFloat(level.attrs['FRAME-RATE'])) : 0;
+  var label = level.height
+    ? (level.height + 'p') : (Math.round((level.bitrate || 0) / 1000) + 'k');
+  if (fps >= 50) label += String(fps);
+  return label;
 }
 // Build the quality rows: Auto on top, then the stream's levels high to low.
 function qualityRows() {
   var rows = [{ label: 'Auto', auto: true, h: -1, idx: -1 }];
   if (state.hls && state.hls.levels && state.hls.levels.length) {
-    var lv = [];
+    var lv = [], byHeight = {};
     state.hls.levels.forEach(function (l, i) {
-      var fps = (l.attrs && l.attrs['FRAME-RATE']) ? Math.round(parseFloat(l.attrs['FRAME-RATE'])) : 0;
-      var label = l.height ? (l.height + 'p') : (Math.round((l.bitrate || 0) / 1000) + 'k');
-      if (fps >= 50) label += String(fps);
-      lv.push({ label: label, auto: false, h: l.height || 0, idx: i });
+      var h = l.height || 0, rate = l.bitrate || 0, key = String(h);
+      var candidate = { label: qualityLevelLabel(l), auto: false, h: h, idx: i, bitrate: rate };
+      // The saved preference is a height, so showing multiple bitrate variants
+      // at that same height would create duplicate selected cards. Keep the best.
+      if (!byHeight[key] || rate > byHeight[key].bitrate) byHeight[key] = candidate;
     });
-    lv.sort(function (a, b) { return b.h - a.h; });
+    for (var key in byHeight) {
+      if (Object.prototype.hasOwnProperty.call(byHeight, key)) lv.push(byHeight[key]);
+    }
+    lv.sort(function (a, b) { return b.h - a.h || b.bitrate - a.bitrate; });
     rows = rows.concat(lv);
   }
   return rows;
 }
 function qualityIsSel(row) {
-  return row.auto ? quality.sel === 'auto' : (quality.sel !== 'auto' && row.h === quality.sel);
+  if (row.auto) return quality.sel === 'auto';
+  return quality.sel !== 'auto' && row.idx === levelIndexForPref();
 }
 function pickQuality(row) {
   if (row.auto) {
@@ -1593,6 +2027,7 @@ function pickQuality(row) {
     if (state.hls && row.idx >= 0) { try { state.hls.currentLevel = row.idx; } catch (e) {} }
   }
   saveQualityPref();
+  updateQualityButton();
 }
 
 /* Player options that ride on top of hls.js */
@@ -1601,6 +2036,8 @@ function pickQuality(row) {
 function hlsConfig() {
   var cfg = {
     enableWorker: true, capLevelToPlayerSize: true,
+    lowLatencyMode: !!settings.lowlatency,
+    backBufferLength: 90, liveBackBufferLength: 90,
     manifestLoadingMaxRetry: 4, manifestLoadingRetryDelay: 1000,
     levelLoadingMaxRetry: 4, levelLoadingRetryDelay: 1000,
     fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 1000
@@ -1610,11 +2047,231 @@ function hlsConfig() {
     cfg.liveSyncDurationCount = 2;
     cfg.maxLiveSyncPlaybackRate = 1.5;
     cfg.maxBufferLength = 10;
-    cfg.backBufferLength = 0;
   } else {
     cfg.maxBufferLength = 30;
+    cfg.maxLiveSyncPlaybackRate = 1;
   }
   return cfg;
+}
+function liveSeekRange(video) {
+  var ranges = video && video.seekable;
+  if (!ranges || !ranges.length) return null;
+  var t = video.currentTime || 0;
+  for (var i = 0; i < ranges.length; i++) {
+    if (t >= ranges.start(i) - 0.25 && t <= ranges.end(i) + 0.25) {
+      return { start: ranges.start(i), end: ranges.end(i) };
+    }
+  }
+  var last = ranges.length - 1;
+  return { start: ranges.start(last), end: ranges.end(last) };
+}
+function liveTarget(video, range) {
+  var target = NaN;
+  if (state.hls) {
+    try { target = state.hls.liveSyncPosition; } catch (e) {}
+  }
+  if (typeof target !== 'number' || !isFinite(target) ||
+      target < range.start || target > range.end) target = range.end - 1;
+  return Math.max(range.start, Math.min(range.end - 0.1, target));
+}
+function rewindLive() {
+  if (!state.current || state.vod) return;
+  var video = document.getElementById('video');
+  var range;
+  try { range = liveSeekRange(video); } catch (e) { range = null; }
+  if (!range || range.end - range.start < 3) { toast('Live rewind is not available yet'); return; }
+  var edge = liveTarget(video, range);
+  var target = Math.max(range.start + 0.25, Math.min(edge, (video.currentTime || edge) - 30));
+  if ((video.currentTime || edge) - target < 2) { toast('Live rewind is not available yet'); return; }
+  var wasRewound = PB.rewound;
+  PB.rewound = true;
+  PB.userSeekUntil = Date.now() + 8000;
+  if (state.hls && state.hls.config) state.hls.config.maxLiveSyncPlaybackRate = 1;
+  try { video.playbackRate = 1; video.currentTime = target; }
+  catch (e) {
+    PB.rewound = wasRewound;
+    PB.userSeekUntil = 0;
+    if (state.hls && state.hls.config) {
+      state.hls.config.maxLiveSyncPlaybackRate = wasRewound ? 1 : (settings.lowlatency ? 1.5 : 1);
+    }
+    toast('Live rewind failed');
+    return;
+  }
+  toast('Live rewind · ' + Math.max(1, Math.round(edge - target)) + 's behind');
+  drawDiagnostics();
+}
+function jumpToLive() {
+  if (!state.current || state.vod) return;
+  var video = document.getElementById('video');
+  var range;
+  try { range = liveSeekRange(video); } catch (e) { range = null; }
+  if (!range) { toast('Live edge is not available'); return; }
+  var target = liveTarget(video, range);
+  var wasRewound = PB.rewound;
+  PB.rewound = false;
+  PB.userSeekUntil = Date.now() + 8000;
+  if (state.hls && state.hls.config) state.hls.config.maxLiveSyncPlaybackRate = settings.lowlatency ? 1.5 : 1;
+  try { video.playbackRate = 1; video.currentTime = target; }
+  catch (e) {
+    PB.rewound = wasRewound;
+    PB.userSeekUntil = 0;
+    if (state.hls && state.hls.config) {
+      state.hls.config.maxLiveSyncPlaybackRate = wasRewound ? 1 : (settings.lowlatency ? 1.5 : 1);
+    }
+    toast('Could not jump to live');
+    return;
+  }
+  toast('Back to live');
+  drawDiagnostics();
+}
+
+/* Optional playback diagnostics. This deliberately reads only public media and
+   hls.js state, so turning it on cannot change playback behavior. */
+var diagnosticsTimer = null;
+var diagnosticsSample = { at: 0, frames: 0, fps: 0 };
+function diagnosticBufferAhead(video) {
+  var t = video.currentTime || 0, ranges = video.buffered;
+  if (!ranges) return 0;
+  try {
+    for (var i = 0; i < ranges.length; i++) {
+      if (t >= ranges.start(i) - 0.1 && t <= ranges.end(i) + 0.1) {
+        return Math.max(0, ranges.end(i) - t);
+      }
+    }
+  } catch (e) {}
+  return 0;
+}
+function diagnosticFrameStats(video, fallbackFps) {
+  var total = 0, dropped = 0;
+  try {
+    if (video.getVideoPlaybackQuality) {
+      var q = video.getVideoPlaybackQuality();
+      total = q.totalVideoFrames || 0;
+      dropped = q.droppedVideoFrames || 0;
+    } else {
+      total = video.webkitDecodedFrameCount || 0;
+      dropped = video.webkitDroppedFrameCount || 0;
+    }
+  } catch (e) {}
+  var now = Date.now();
+  if (total && diagnosticsSample.at && total >= diagnosticsSample.frames) {
+    var elapsed = (now - diagnosticsSample.at) / 1000;
+    if (elapsed >= 0.25) diagnosticsSample.fps = (total - diagnosticsSample.frames) / elapsed;
+  }
+  if (!diagnosticsSample.at || now - diagnosticsSample.at >= 250) {
+    diagnosticsSample.at = now;
+    diagnosticsSample.frames = total;
+  }
+  return {
+    total: total,
+    dropped: dropped,
+    fps: diagnosticsSample.fps > 0 ? diagnosticsSample.fps : (fallbackFps || 0)
+  };
+}
+function diagnosticChatStatus() {
+  if (!settings.chat) return 'off';
+  if (typeof chat === 'undefined' || !chat.want) return 'idle';
+  if (chat.ws && chat.ws.readyState === 1) return 'connected';
+  if (chat.ws && chat.ws.readyState === 0) return 'connecting';
+  return 'retrying';
+}
+function syncDiagnostics() {
+  clearInterval(diagnosticsTimer);
+  diagnosticsTimer = null;
+  diagnosticsSample = { at: 0, frames: 0, fps: 0 };
+  if (!settings.diagnostics) {
+    document.getElementById('diagnostics').className = 'hidden';
+    return;
+  }
+  drawDiagnostics();
+  diagnosticsTimer = setInterval(drawDiagnostics, 1000);
+}
+function placeDiagnostics() {
+  var el = document.getElementById('diagnostics');
+  if (!el) return;
+  var vodbar = document.getElementById('vodbar');
+  var vodControls = state.vod && vodbar.className.indexOf('hidden') === -1;
+  var chatBox = document.getElementById('chat');
+  var chatOnLeft = settings.chatSide === 'left' && chatBox.classList.contains('on');
+  el.style.left = chatOnLeft ? 'auto' : (state.sidebarOpen ? '500px' : '30px');
+  el.style.right = chatOnLeft ? '30px' : 'auto';
+  el.style.bottom = vodControls ? '235px' : (state.sidebarOpen ? '150px' : '30px');
+}
+function drawDiagnostics() {
+  var el = document.getElementById('diagnostics');
+  if (!el) return;
+  if (!settings.diagnostics || (!state.current && !state.vod)) {
+    el.className = 'hidden';
+    return;
+  }
+  var video = document.getElementById('video');
+  var status = video.error ? 'Error' :
+    (video.paused ? 'Paused' : (video.readyState < 3 ? 'Buffering' : 'Playing'));
+  var hls = state.hls, level = null, levelIndex = -1, levelCount = 0;
+  if (hls) {
+    try {
+      levelCount = hls.levels ? hls.levels.length : 0;
+      levelIndex = hls.currentLevel;
+      if (levelIndex < 0) levelIndex = hls.loadLevel;
+      if (levelIndex < 0) levelIndex = hls.nextAutoLevel;
+      if (levelIndex >= 0 && hls.levels) level = hls.levels[levelIndex];
+    } catch (e) {}
+  }
+  var width = video.videoWidth || (level && level.width) || 0;
+  var height = video.videoHeight || (level && level.height) || 0;
+  var declaredFps = 0;
+  if (level) {
+    declaredFps = parseFloat(level.frameRate || (level.attrs && level.attrs['FRAME-RATE'])) || 0;
+  }
+  var frames = diagnosticFrameStats(video, declaredFps);
+  var qualityMode = 'Native';
+  if (hls) {
+    try {
+      qualityMode = hls.autoLevelEnabled ? 'Auto' :
+        (quality.sel === 'auto' ? 'Fixed' : 'Fixed ' + quality.sel + 'p');
+    } catch (e) { qualityMode = quality.sel === 'auto' ? 'Auto' : ('Fixed ' + quality.sel + 'p'); }
+  }
+  var qualityText = qualityMode;
+  if (levelIndex >= 0) {
+    qualityText += ' L' + (levelIndex + 1) + (levelCount ? '/' + levelCount : '');
+  }
+  var bitrate = level && (level.maxBitrate || level.bitrate);
+  if (bitrate) qualityText += ' · ' + (bitrate / 1000000).toFixed(1) + ' Mbps';
+  var bandwidth = NaN;
+  try { bandwidth = hls && hls.bandwidthEstimate; } catch (e) {}
+  var liveDelay = NaN;
+  if (state.current) {
+    try { if (hls) liveDelay = hls.latency; } catch (e) {}
+    if (typeof liveDelay !== 'number' || !isFinite(liveDelay) || liveDelay < 0) {
+      try {
+        var liveRange = liveSeekRange(video);
+        if (liveRange) liveDelay = Math.max(0, liveRange.end - (video.currentTime || 0));
+      } catch (e) {}
+    }
+  }
+  var droppedPct = frames.total ? (frames.dropped * 100 / frames.total) : 0;
+  var firstLine = (state.vod ? 'VOD' : 'LIVE') + ' · ' + status;
+  if (state.current && isFinite(liveDelay)) {
+    firstLine += liveDelay < 2.5 ? ' · Live edge' : ' · ' + Math.round(liveDelay) + 's behind';
+  }
+  var resolution = width && height ? (width + '×' + height) : 'Resolution —';
+  if (frames.fps) resolution += ' @ ' + Math.round(frames.fps) + ' fps';
+  var lines = [
+    firstLine,
+    resolution + ' · ' + qualityText,
+    'Network ' + (isFinite(bandwidth) && bandwidth > 0 ? (bandwidth / 1000000).toFixed(1) + ' Mbps' : '—') +
+      ' · Buffer ' + diagnosticBufferAhead(video).toFixed(1) + 's',
+    'Frames ' + (frames.total || '—') + ' · Dropped ' + frames.dropped +
+      (frames.total ? ' (' + droppedPct.toFixed(2) + '%)' : ''),
+    'Recovery ' + PB.reconnects + ' · Net ' + PB.netRetries + ' · Media ' + PB.mediaRetries +
+      ' · Chat ' + diagnosticChatStatus(),
+    'Service ' + (state.netDown ? 'offline' : 'online') +
+      (PB.lastError ? ' · Last ' + String(PB.lastError).slice(0, 38) : '')
+  ];
+  el.textContent = lines.join('\n');
+  el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
+  placeDiagnostics();
+  el.className = '';
 }
 // The next live favorite after `slug`, used by auto-advance when a stream ends.
 function nextLiveAfter(slug) {
@@ -1624,50 +2281,121 @@ function nextLiveAfter(slug) {
   }
   return null;
 }
+function firstLivePinned(slug) {
+  for (var i = 0; i < state.order.length; i++) {
+    var s = state.order[i];
+    if (s !== slug && state.channels[s] && state.channels[s].live && isPinned(s)) return s;
+  }
+  return null;
+}
 
 /* Settings menu (opened by the gear, or the Yellow button, while the list is open) */
 var settings = { open: false, focus: 0, items: [],
                  chat: false, lowlatency: false, autoadvance: false,
-                 dim: false, dimStrength: 0.8, dimScope: 'video' };
+                 hideOffline: false, diagnostics: false,
+                 dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
+                 chatSide: 'right', chatSize: 'medium', chatWidth: 'medium', chatOpacity: 'high',
+                 chatBackground: 'dark', chatFade: 40000, chatBots: 'show',
+                 chatEmotes: 'images', chatTimestamps: false,
+                 alerts: 'all', saverMin: 5 };
+var SETTINGS_IDLE_MS = 30000;
+var settingsIdleTimer = null;
+function touchSettings() {
+  if (!settings.open && !(qualityopt && qualityopt.open)) return;
+  clearTimeout(settingsIdleTimer);
+  settingsIdleTimer = setTimeout(closeSettingsStack, SETTINGS_IDLE_MS);
+}
+function closeSettingsStack() {
+  updateopen = false;
+  dimopt.open = false;
+  chatopt.open = false;
+  qualityopt.open = false;
+  document.getElementById('updatemodal').className = 'hidden';
+  document.getElementById('dimoptmodal').className = 'hidden';
+  document.getElementById('chatoptmodal').className = 'hidden';
+  document.getElementById('qualityoptmodal').className = 'hidden';
+  closeSettings();
+}
+function pickEnum(v, allowed, def) { for (var i = 0; i < allowed.length; i++) if (v === allowed[i]) return v; return def; }
 function loadSettings() {
   var s = {};
   try { s = JSON.parse(localStorage.getItem('kicktv.settings')) || {}; } catch (e) {}
   settings.chat = !!s.chat;
   settings.lowlatency = !!s.lowlatency;
   settings.autoadvance = !!s.autoadvance;
-  settings.dim = false;                     // dim is never remembered: always off at startup
+  settings.hideOffline = !!s.hideOffline;
+  settings.diagnostics = !!s.diagnostics;
+  settings.rememberDim = s.rememberDim === true;
+  settings.dim = settings.rememberDim && s.dim === true;
   var st = parseFloat(s.dimStrength);
   settings.dimStrength = (st >= 0.1 && st <= 0.98) ? st : 0.8;
   settings.dimScope = (s.dimScope === 'all') ? 'all' : 'video';
+  // Chat overlay look & filters
+  settings.chatSide = pickEnum(s.chatSide, ['right', 'left'], 'right');
+  settings.chatSize = pickEnum(s.chatSize, ['small', 'medium', 'large'], 'medium');
+  settings.chatWidth = pickEnum(s.chatWidth, ['narrow', 'medium', 'wide'], 'medium');
+  settings.chatOpacity = pickEnum(s.chatOpacity, ['low', 'medium', 'high'], 'high');
+  settings.chatBackground = pickEnum(s.chatBackground, ['off', 'light', 'dark'], 'dark');
+  var cf = parseInt(s.chatFade, 10);
+  settings.chatFade = ([0, 10000, 20000, 40000].indexOf(cf) !== -1) ? cf : 40000;
+  settings.chatBots = pickEnum(s.chatBots, ['show', 'hide'], 'show');
+  settings.chatEmotes = pickEnum(s.chatEmotes, ['images', 'text'], 'images');
+  settings.chatTimestamps = !!s.chatTimestamps;
+  // Alerts + burn-in guard
+  settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
+  var sm = parseInt(s.saverMin, 10);
+  settings.saverMin = ([0, 3, 5, 10].indexOf(sm) !== -1) ? sm : 5;
 }
 function saveSettings() {
   try {
     localStorage.setItem('kicktv.settings', JSON.stringify({
       chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
-      dimStrength: settings.dimStrength, dimScope: settings.dimScope
+      hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
+      dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
+      dimStrength: settings.dimStrength, dimScope: settings.dimScope,
+      chatSide: settings.chatSide, chatSize: settings.chatSize, chatWidth: settings.chatWidth,
+      chatOpacity: settings.chatOpacity, chatBackground: settings.chatBackground,
+      chatFade: settings.chatFade, chatBots: settings.chatBots,
+      chatEmotes: settings.chatEmotes, chatTimestamps: settings.chatTimestamps,
+      alerts: settings.alerts, saverMin: settings.saverMin
     }));
   } catch (e) {}
 }
+function popupDimFilter() {
+  if (!settings.dim) return '';
+  return 'brightness(' + Math.max(0.02, 1 - settings.dimStrength) + ')';
+}
+function settingsDimFilter() {
+  if (!settings.dim) return '';
+  // Only Settings stops at Medium even when video strength is Strong or Max.
+  var uiStrength = Math.min(settings.dimStrength, 0.6);
+  return 'brightness(' + (1 - uiStrength) + ')';
+}
 function applyDim() {
   var el = document.getElementById('dimscreen');
-  if (!settings.dim) { el.className = 'hidden'; return; }
-  el.style.background = 'rgba(0,0,0,' + settings.dimStrength + ')';
-  el.style.zIndex = (settings.dimScope === 'all') ? '68' : '';   // 'all' rides above the UI; 'video' below it
-  el.className = '';
+  if (!settings.dim) el.className = 'hidden';
+  else {
+    el.style.background = 'rgba(0,0,0,' + settings.dimStrength + ')';
+    el.style.zIndex = (settings.dimScope === 'all') ? '68' : '';   // 'all' rides above normal player UI
+    el.className = '';
+  }
+  applyDimAwareUi();
 }
-// The rows: three toggles, a Quality header, then the stream's quality rungs.
+// Stream quality is intentionally not a setting; it has its own player control.
 function settingsBuild() {
   var items = [
-    { kind: 'toggle', key: 'chat', label: 'Live chat' },
+    { kind: 'chatopt', label: 'Live chat' },
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
+    { kind: 'toggle', key: 'hideOffline', label: 'Hide offline' },
+    { kind: 'toggle', key: 'diagnostics', label: 'Diagnostics' },
     { kind: 'dimopt', label: 'Dim (night)' },
-    { kind: 'header', label: 'Quality' }
+    { kind: 'choice', key: 'alerts', label: 'Live alerts',
+      values: [{ v: 'all', label: 'All' }, { v: 'pinned', label: 'Pinned only' }, { v: 'off', label: 'Off' }] },
+    { kind: 'choice', key: 'saverMin', label: 'Burn-in guard',
+      values: [{ v: 3, label: '3 min' }, { v: 5, label: '5 min' }, { v: 10, label: '10 min' }, { v: 0, label: 'Off' }] }
   ];
   // (The update entry lives as a chip in the Settings header, not a list row.)
-  qualityRows().forEach(function (r) {
-    items.push({ kind: 'quality', label: r.label, auto: r.auto, h: r.h, idx: r.idx });
-  });
   return items;
 }
 function firstFocusableSetting() {
@@ -1676,6 +2404,7 @@ function firstFocusableSetting() {
 }
 function openSettings() {
   if (!state.ready || settings.open) return;
+  hideQualityHint();
   settings.open = true;
   setMode('settings');
   settings.items = settingsBuild();
@@ -1683,17 +2412,21 @@ function openSettings() {
   document.getElementById('settingsmodal').className = '';
   renderSettingsVer();
   renderSettings();
+  touchSettings();
 }
 function closeSettings() {
+  clearTimeout(settingsIdleTimer);
+  settingsIdleTimer = null;
   settings.open = false;
   document.getElementById('settingsmodal').className = 'hidden';
+  document.getElementById('settings-desc').className = 'hidden';
   setMode('player');
   if (state.sidebarOpen) resetIdle();
+  pumpNotify();
 }
 function renderSettings() {
   var list = document.getElementById('settings-list');
   list.innerHTML = '';
-  var qmarked = false;
   settings.items.forEach(function (it, i) {
     var el = document.createElement('div');
     el.setAttribute('data-idx', i);
@@ -1703,26 +2436,23 @@ function renderSettings() {
       list.appendChild(el);
       return;
     }
-    if (it.kind === 'toggle' || it.kind === 'dimopt') {
+    if (it.kind === 'toggle' || it.kind === 'dimopt' || it.kind === 'chatopt') {
       el.setAttribute('data-focusable', '1');
       var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = it.label;
       el.appendChild(lab);
-      if (it.kind === 'dimopt') {   // gear sits just left of the On/Off switch
+      if (it.kind === 'dimopt' || it.kind === 'chatopt') {   // gear sits just left of the On/Off switch
         var gear = document.createElement('span'); gear.className = 'sgear';
         gear.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:22px;height:22px;vertical-align:middle"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>';
         el.appendChild(gear);
       }
-      var on = it.kind === 'dimopt' ? settings.dim : !!settings[it.key];
+      var on = it.kind === 'dimopt' ? settings.dim : (it.kind === 'chatopt' ? settings.chat : !!settings[it.key]);
       var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = on ? 'On' : 'Off';
       el.appendChild(pill);
-    } else { // quality
-      var sel = !qmarked && qualityIsSel(it);
-      if (sel) qmarked = true;
+    } else if (it.kind === 'choice') {
       el.setAttribute('data-focusable', '1');
-      el.setAttribute('data-sel', sel ? '1' : '0');
-      var qlab = document.createElement('span'); qlab.className = 'slabel qopt'; qlab.textContent = it.label;
-      var chk = document.createElement('span'); chk.className = 'scheck'; chk.textContent = sel ? '✓' : '';
-      el.appendChild(qlab); el.appendChild(chk);
+      var clab = document.createElement('span'); clab.className = 'slabel'; clab.textContent = it.label;
+      var cpill = document.createElement('span'); cpill.className = 'spill'; cpill.textContent = choiceLabel(it);
+      el.appendChild(clab); el.appendChild(cpill);
     }
     list.appendChild(el);
   });
@@ -1730,18 +2460,20 @@ function renderSettings() {
 }
 function applySettingsFocus() {
   var list = document.getElementById('settings-list');
+  var focused = null;
   for (var i = 0; i < list.children.length; i++) {
     var el = list.children[i], it = settings.items[i];
     if (!it || it.kind === 'header') continue;
-    var cls = it.kind === 'quality' ? ('srow' + (el.getAttribute('data-sel') === '1' ? ' sel' : '')) : 'srow';
-    el.className = cls + (i === settings.focus ? ' focused' : '');
+    el.className = 'srow' + (i === settings.focus ? ' focused' : '');
     if (i === settings.focus) {
+      focused = el;
       var top = el.offsetTop - list.offsetTop;
       if (top < list.scrollTop) list.scrollTop = top - 6;
       else if (top + el.offsetHeight > list.scrollTop + list.clientHeight)
         list.scrollTop = top + el.offsetHeight - list.clientHeight + 6;
     }
   }
+  showSettingDesc('settings-desc', descForSettingItem(settings.items[settings.focus]), focused);
 }
 function settingsMove(delta) {
   var n = settings.focus;
@@ -1761,15 +2493,122 @@ function settingsActivate() {
     saveSettings();
     applyToggle(it.key);
     renderSettings();
-  } else if (it.kind === 'quality') {
-    pickQuality(it);
-    toast('Quality: ' + it.label);
-    renderSettings();
   } else if (it.kind === 'dimopt') {
     settings.dim = !settings.dim;              // the row itself just toggles dim on/off
+    saveSettings();
     applyDim();
     toast('Dim ' + (settings.dim ? 'on' : 'off'));
     renderSettings();
+  } else if (it.kind === 'chatopt') {
+    settings.chat = !settings.chat;            // the row itself just toggles chat on/off
+    saveSettings();
+    applyToggle('chat');
+    renderSettings();
+  } else if (it.kind === 'choice') {
+    cycleChoice(it);
+    renderSettings();
+  }
+}
+function settingsOk() {
+  var it = settings.items[settings.focus];
+  if (it && it.kind === 'dimopt') openDimOpt();
+  else if (it && it.kind === 'chatopt') openChatOpt();
+  else settingsActivate();
+}
+// Find the display label for a 'choice' row's current value.
+function choiceLabel(it) {
+  for (var i = 0; i < it.values.length; i++) if (it.values[i].v === settings[it.key]) return it.values[i].label;
+  return '';
+}
+// Step a 'choice' row to its next (dir +1) or previous (dir -1) value and apply it.
+function cycleChoice(it, dir) {
+  dir = dir || 1;
+  var idx = 0, n = it.values.length;
+  for (var i = 0; i < n; i++) if (it.values[i].v === settings[it.key]) { idx = i; break; }
+  var nv = it.values[((idx + dir) % n + n) % n];
+  settings[it.key] = nv.v;
+  saveSettings();
+  if (it.key === 'alerts') pruneNotifications();
+  toast(it.label + ': ' + nv.label);
+}
+/* A short description of the focused setting, shown in the detached context
+   card used by the original Settings layout. */
+var SETTINGS_DESC = {
+  chat: 'Show read-only Kick chat. Press OK or use the gear for layout, background and message options.',
+  lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
+  autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
+  hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
+  diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
+  dim: 'Reduce screen brightness. Press OK or use the gear for strength, scope and startup behavior, or press 0 while watching.',
+  alerts: 'Choose which followed channels may show a five-second live alert.',
+  saverMin: 'Dim a still screen after this much idle time. Any remote or pointer input wakes it.'
+};
+var DIMOPT_DESC = [
+  'Turn night dimming on or off.',
+  'How dark the dimming is.',
+  'Dim only the video, or everything including the menus and sidebar.',
+  'Start the app with dimming in the same on/off state as last time. When off, the app always starts undimmed.'
+];
+function descForSettingItem(it) {
+  if (!it) return '';
+  if (it.kind === 'chatopt') return SETTINGS_DESC.chat;
+  if (it.kind === 'dimopt') return SETTINGS_DESC.dim;
+  if (it.kind === 'toggle' || it.kind === 'choice') return SETTINGS_DESC[it.key] || '';
+  return '';
+}
+function showSettingDesc(id, text, target) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  if (!text || !target || !settings.open || updateopen || (qualityopt && qualityopt.open)) {
+    el.className = 'hidden';
+    return;
+  }
+  el.textContent = text || '';
+  el.style.filter = settingsDimFilter();
+  el.className = 'point-right';
+  var r = target.getBoundingClientRect();
+  var top = r.top + (r.height - el.offsetHeight) / 2;
+  top = Math.max(24, Math.min(1080 - el.offsetHeight - 24, top));
+  var left = r.left - el.offsetWidth - 32;
+  if (left < 24) {
+    left = r.right + 32;
+    el.className = 'point-left';
+  }
+  var arrowTop = r.top + r.height / 2 - top;
+  arrowTop = Math.max(18, Math.min(el.offsetHeight - 18, arrowTop));
+  el.style.left = Math.round(left) + 'px';
+  el.style.top = Math.round(top) + 'px';
+  el.style.setProperty('--arrow-top', Math.round(arrowTop) + 'px');
+}
+function applyDimAwareUi() {
+  var popupFilter = popupDimFilter();
+  var settingsFilter = settingsDimFilter();
+  var desc = document.getElementById('settings-desc');
+  desc.style.filter = settingsFilter;
+  var qualityHint = document.getElementById('quality-hint');
+  qualityHint.style.filter = popupFilter;
+  // Settings remains readable at no darker than Medium. Every other popup uses
+  // the selected strength, including Strong and Max.
+  var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox'];
+  var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'toast'];
+  var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
+                     'pbstatus', 'overlay', 'vodbar', 'vodplay', 'spinner'];
+  // The lower group already sits under the Everything dim layer. Applying a
+  // second filter there would dim it twice.
+  var lowerFilter = settings.dim && settings.dimScope === 'all' ? '' : popupFilter;
+  for (var s = 0; s < settingsPopups.length; s++) {
+    document.getElementById(settingsPopups[s]).style.filter = settingsFilter;
+  }
+  for (var i = 0; i < upperPopups.length; i++) {
+    document.getElementById(upperPopups[i]).style.filter = popupFilter;
+  }
+  for (var j = 0; j < lowerPopups.length; j++) {
+    document.getElementById(lowerPopups[j]).style.filter = lowerFilter;
+  }
+  drawDiagnostics();
+  if (state.notifyCurrent) {
+    document.getElementById('notify').style.filter =
+      settings.dim && settings.dimScope !== 'all' ? popupFilter : '';
   }
 }
 // Make a toggle take effect right away.
@@ -1782,18 +2621,203 @@ function applyToggle(key) {
     if (state.current) recoverPlayback(state.current);   // reload so the new buffering takes hold
   } else if (key === 'autoadvance') {
     toast('Auto-advance ' + (settings.autoadvance ? 'on' : 'off'));
+  } else if (key === 'hideOffline') {
+    state.offlineExpanded = false;
+    if (state.sidebarOpen) renderSidebar(settings.hideOffline ? 'offline-group' : state.current);
+    toast('Hide offline channels ' + (settings.hideOffline ? 'on' : 'off'));
+  } else if (key === 'diagnostics') {
+    syncDiagnostics();
+    toast('Diagnostics overlay ' + (settings.diagnostics ? 'on' : 'off'));
   }
 }
 
-/* Dim (night) options popup, opened from the Settings "Dim" row. Dim on/off is
-   not remembered (starts off); strength and scope are. */
+/* Compact quality picker, opened from the dedicated bottom-right player tool. */
+var qualityopt = { open: false, focus: 0, items: [] };
+function qualityCurrentLabel() {
+  if (quality.sel === 'auto') return 'Auto';
+  var rows = qualityRows();
+  var effective = levelIndexForPref();
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i].auto && rows[i].idx === effective) return rows[i].label;
+  }
+  return quality.sel + 'p';
+}
+function maxQualityLevelIndex() {
+  if (!state.hls || !state.hls.levels || !state.hls.levels.length) return -1;
+  var levels = state.hls.levels, best = 0, bestH = -1, bestRate = -1;
+  for (var i = 0; i < levels.length; i++) {
+    var h = levels[i].height || 0, rate = levels[i].bitrate || 0;
+    if (h > bestH || (h === bestH && rate > bestRate)) {
+      best = i; bestH = h; bestRate = rate;
+    }
+  }
+  return best;
+}
+function playingQualityLevelIndex() {
+  if (!state.hls || !state.hls.levels || !state.hls.levels.length) return -1;
+  var candidates = [];
+  try {
+    // Prefer the level that HLS is really decoding/loading. This matters while
+    // a fixed-quality switch is still pending: the bars must describe what is
+    // on screen, not merely the requested target.
+    candidates = [state.hls.currentLevel, state.hls.loadLevel];
+  } catch (e) {}
+  for (var i = 0; i < candidates.length; i++) {
+    if (typeof candidates[i] === 'number' &&
+        candidates[i] >= 0 && candidates[i] < state.hls.levels.length) return candidates[i];
+  }
+  if (quality.sel !== 'auto') return levelIndexForPref();
+  try {
+    candidates = [state.hls.nextLoadLevel, state.hls.nextAutoLevel];
+  } catch (e2) { candidates = []; }
+  for (var j = 0; j < candidates.length; j++) {
+    if (typeof candidates[j] === 'number' &&
+        candidates[j] >= 0 && candidates[j] < state.hls.levels.length) return candidates[j];
+  }
+  return -1;
+}
+function qualityPlaybackStatus() {
+  var hls = state.hls, levels = hls && hls.levels;
+  if (!levels || !levels.length) {
+    return { known: false, tone: 'unknown', bars: 0,
+             text: 'Source quality is still loading.' };
+  }
+  var maxIdx = maxQualityLevelIndex(), currentIdx = playingQualityLevelIndex();
+  var maxLabel = qualityLevelLabel(levels[maxIdx]);
+  if (currentIdx < 0 || !levels[currentIdx]) {
+    return { known: false, tone: 'unknown', bars: 0,
+             text: 'Quality is loading · Source max ' + maxLabel };
+  }
+  var current = levels[currentIdx], currentLabel = qualityLevelLabel(current);
+  var atMax = currentIdx === maxIdx;
+  var low = !!(current.height && current.height <= 480);
+  var tone = low ? 'low' : (atMax ? 'max' : 'limited');
+  return {
+    known: true,
+    tone: tone,
+    bars: low ? 1 : (atMax ? 3 : 2),
+    currentLabel: currentLabel,
+    maxLabel: maxLabel,
+    text: atMax
+      ? ('Max quality · ' + maxLabel)
+      : ('Playing ' + currentLabel + ' · Source max ' + maxLabel)
+  };
+}
+function hideQualityHint() {
+  var hint = document.getElementById('quality-hint');
+  if (hint) hint.className = 'hidden';
+}
+function showQualityHint() {
+  var hint = document.getElementById('quality-hint');
+  var button = document.getElementById('quality-button');
+  if (!hint || !button || !state.sidebarOpen || qualityopt.open) {
+    hideQualityHint();
+    return;
+  }
+  var status = qualityPlaybackStatus();
+  hint.textContent = status.text;
+  hint.style.filter = popupDimFilter();
+  hint.className = status.tone;
+  var r = button.getBoundingClientRect();
+  var left = r.left + (r.width - hint.offsetWidth) / 2;
+  left = Math.max(24, Math.min(1920 - hint.offsetWidth - 24, left));
+  var top = Math.max(24, r.top - hint.offsetHeight - 20);
+  var arrowLeft = r.left + r.width / 2 - left;
+  arrowLeft = Math.max(24, Math.min(hint.offsetWidth - 24, arrowLeft));
+  hint.style.left = Math.round(left) + 'px';
+  hint.style.top = Math.round(top) + 'px';
+  hint.style.setProperty('--quality-arrow-left', Math.round(arrowLeft) + 'px');
+}
+function updateQualityButton() {
+  var el = document.getElementById('quality-button-value');
+  if (el) el.textContent = qualityCurrentLabel();
+  var button = document.getElementById('quality-button');
+  var mark = button && button.querySelector('.quality-mark');
+  var status = qualityPlaybackStatus();
+  if (button) {
+    button.classList.toggle('quality-limited', status.tone === 'limited');
+    button.classList.toggle('quality-low', status.tone === 'low');
+    button.setAttribute('title', status.text);
+  }
+  if (mark) {
+    mark.className = 'player-tool-icon quality-mark q' + status.tone + ' qlevel-' + status.bars;
+  }
+  var hint = document.getElementById('quality-hint');
+  if (hint && hint.className.indexOf('hidden') === -1) showQualityHint();
+}
+function refreshQualityOpt() {
+  qualityopt.items = qualityRows();
+  qualityopt.focus = 0;
+  for (var i = 0; i < qualityopt.items.length; i++) {
+    if (qualityIsSel(qualityopt.items[i])) { qualityopt.focus = i; break; }
+  }
+  renderQualityOpt();
+}
+function openQualityOpt() {
+  if (!state.ready || qualityopt.open) return;
+  qualityopt.open = true;
+  clearTimeout(state.idleTimer);                 // keep the launch tools behind the modal
+  hideQualityHint();
+  document.getElementById('settings-desc').className = 'hidden';
+  document.getElementById('qualityoptmodal').className = '';
+  refreshQualityOpt();
+  touchSettings();
+}
+function closeQualityOpt() {
+  qualityopt.open = false;
+  document.getElementById('qualityoptmodal').className = 'hidden';
+  updateQualityButton();
+  if (!settings.open) {
+    clearTimeout(settingsIdleTimer);
+    settingsIdleTimer = null;
+    if (state.sidebarOpen) resetIdle();
+    pumpNotify();
+  }
+}
+function renderQualityOpt() {
+  var list = document.getElementById('qualityopt-list');
+  var selectedMarked = false;
+  list.innerHTML = '';
+  qualityopt.items.forEach(function (row, i) {
+    var selected = !selectedMarked && qualityIsSel(row);
+    if (selected) selectedMarked = true;
+    var el = document.createElement('div');
+    el.className = 'qpick' + (selected ? ' selected' : '') + (i === qualityopt.focus ? ' focused' : '');
+    el.setAttribute('data-idx', i);
+    var label = document.createElement('span'); label.className = 'qpick-label'; label.textContent = row.label;
+    var check = document.createElement('span'); check.className = 'qpick-check';
+    check.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    el.appendChild(label); el.appendChild(check);
+    list.appendChild(el);
+  });
+}
+function qualityoptMove(delta) {
+  var cur = qualityopt.focus, next = cur + delta, n = qualityopt.items.length;
+  if (next < 0 || next >= n) return;
+  if (next !== cur) { qualityopt.focus = next; renderQualityOpt(); }
+}
+function qualityoptActivate() {
+  var row = qualityopt.items[qualityopt.focus];
+  if (!row) return;
+  pickQuality(row);
+  toast('Quality: ' + row.label);
+  closeQualityOpt();
+}
+
+/* Dim (night) options popup, opened from the Settings "Dim" row. Strength and
+   scope are always saved; remembering the on/off state is explicitly opt-in. */
 var dimopt = { open: false, focus: 0 };
 var DIM_LEVELS = [ { label: 'Light', v: 0.4 }, { label: 'Medium', v: 0.6 }, { label: 'Strong', v: 0.8 }, { label: 'Max', v: 0.94 } ];
 function dimStrengthLabel() {
   for (var i = 0; i < DIM_LEVELS.length; i++) if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) return DIM_LEVELS[i].label;
   return Math.round(settings.dimStrength * 100) + '%';
 }
-function openDimOpt() { dimopt.open = true; dimopt.focus = 0; document.getElementById('dimoptmodal').className = ''; renderDimOpt(); }
+function openDimOpt() {
+  dimopt.open = true; dimopt.focus = 0;
+  document.getElementById('dimoptmodal').className = '';
+  renderDimOpt();
+  touchSettings();
+}
 function closeDimOpt() {
   dimopt.open = false;
   document.getElementById('dimoptmodal').className = 'hidden';
@@ -1803,7 +2827,8 @@ function renderDimOpt() {
   var rows = [
     { label: 'Dim', value: settings.dim ? 'On' : 'Off', on: settings.dim },
     { label: 'Strength', value: dimStrengthLabel() },
-    { label: 'Apply to', value: settings.dimScope === 'all' ? 'Everything' : 'Video only' }
+    { label: 'Apply to', value: settings.dimScope === 'all' ? 'Everything' : 'Video only' },
+    { label: 'Remember dim', value: settings.rememberDim ? 'On' : 'Off', on: settings.rememberDim }
   ];
   var list = document.getElementById('dimopt-list');
   list.innerHTML = '';
@@ -1816,18 +2841,121 @@ function renderDimOpt() {
     el.appendChild(lab); el.appendChild(pill);
     list.appendChild(el);
   });
+  showSettingDesc('settings-desc', DIMOPT_DESC[dimopt.focus] || '', list.children[dimopt.focus]);
 }
-function dimoptMove(delta) { var n = dimopt.focus + delta; if (n < 0 || n > 2) return; dimopt.focus = n; renderDimOpt(); }
-function dimoptActivate() {
-  if (dimopt.focus === 0) settings.dim = !settings.dim;
-  else if (dimopt.focus === 1) {
-    var idx = 0;
-    for (var i = 0; i < DIM_LEVELS.length; i++) if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) { idx = i; break; }
-    settings.dimStrength = DIM_LEVELS[(idx + 1) % DIM_LEVELS.length].v;
-  } else settings.dimScope = settings.dimScope === 'all' ? 'video' : 'all';
+function dimoptMove(delta) {
+  var n = dimopt.focus + delta;
+  if (n < 0 || n >= DIMOPT_DESC.length) return;
+  dimopt.focus = n;
+  renderDimOpt();
+}
+// Step the dim strength to the next (dir +1) or previous (dir -1) level, and apply/save it.
+function cycleDimStrength(dir) {
+  dir = dir || 1;
+  var idx = 0, n = DIM_LEVELS.length;
+  for (var i = 0; i < n; i++) if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) { idx = i; break; }
+  settings.dimStrength = DIM_LEVELS[((idx + dir) % n + n) % n].v;
   saveSettings();
   applyDim();
+}
+function dimoptActivate(dir) {
+  if (dimopt.focus === 0) { settings.dim = !settings.dim; saveSettings(); applyDim(); }
+  else if (dimopt.focus === 1) cycleDimStrength(dir);
+  else if (dimopt.focus === 2) {
+    settings.dimScope = settings.dimScope === 'all' ? 'video' : 'all';
+    saveSettings();
+    applyDim();
+  } else {
+    settings.rememberDim = !settings.rememberDim;
+    saveSettings();
+  }
   renderDimOpt();
+}
+// The "0" remote button: a quick toggle for dim. A second press within 3 seconds
+// steps the strength instead of toggling off, so tap = on/off, tap-tap = adjust.
+var lastDimPress = 0;
+function dimQuickKey() {
+  var now = Date.now();
+  if (settings.dim && (now - lastDimPress) < 3000) {
+    cycleDimStrength();
+    toast('Dim: ' + dimStrengthLabel());
+  } else {
+    settings.dim = !settings.dim;
+    saveSettings();
+    applyDim();
+    toast(settings.dim ? ('Dim on — ' + dimStrengthLabel()) : 'Dim off');
+  }
+  lastDimPress = now;
+  if (dimopt.open) renderDimOpt();
+  if (settings.open) renderSettings();     // keep the Dim row's On/Off in sync if it's showing
+}
+
+/* Live chat options popup, opened from the gear on the Settings "Live chat" row.
+   Each row toggles (Chat, Timestamps) or cycles through a set of values. */
+var chatopt = { open: false, focus: 0 };
+var CHATOPT_ROWS = [
+  { key: 'chat',           label: 'Chat',         bool: true, desc: 'Turn the read-only chat overlay on or off.' },
+  { key: 'chatSide',       label: 'Side',         vals: [['right', 'Right'], ['left', 'Left']], desc: 'Which side of the screen chat sits on.' },
+  { key: 'chatSize',       label: 'Text size',    vals: [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], desc: 'Font size of chat messages.' },
+  { key: 'chatWidth',      label: 'Width',        vals: [['narrow', 'Narrow'], ['medium', 'Medium'], ['wide', 'Wide']], desc: 'How wide the chat column is.' },
+  { key: 'chatOpacity',    label: 'Opacity',      vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'How see-through the chat overlay is.' },
+  { key: 'chatBackground', label: 'Background',   vals: [['off', 'Off'], ['light', 'Light'], ['dark', 'Dark']], desc: 'Choose how much dark background sits behind chat messages.' },
+  { key: 'chatFade',       label: 'Fade after',   vals: [[10000, '10s'], [20000, '20s'], [40000, '40s'], [0, 'Never']], desc: 'How long a message stays before it fades out. Never keeps it until it scrolls off.' },
+  { key: 'chatBots',       label: 'Bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
+  { key: 'chatEmotes',     label: 'Emotes',       vals: [['images', 'Images'], ['text', 'Text']], desc: 'Show emotes as their real images, or just their names as text.' },
+  { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' }
+];
+function chatoptValLabel(row) {
+  if (row.bool) return settings[row.key] ? 'On' : 'Off';
+  for (var i = 0; i < row.vals.length; i++) if (row.vals[i][0] === settings[row.key]) return row.vals[i][1];
+  return '';
+}
+function openChatOpt() {
+  chatopt.open = true; chatopt.focus = 0;
+  document.getElementById('chatoptmodal').className = '';
+  renderChatOpt();
+  touchSettings();
+}
+function closeChatOpt() {
+  chatopt.open = false;
+  document.getElementById('chatoptmodal').className = 'hidden';
+  if (settings.open) renderSettings();     // refresh the Live chat On/Off pill behind it
+}
+function renderChatOpt() {
+  var list = document.getElementById('chatopt-list');
+  list.innerHTML = '';
+  CHATOPT_ROWS.forEach(function (row, i) {
+    var el = document.createElement('div');
+    el.className = 'srow' + (i === chatopt.focus ? ' focused' : '');
+    el.setAttribute('data-idx', i);
+    var on = !!(row.bool && settings[row.key]);
+    var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = row.label;
+    var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = chatoptValLabel(row);
+    el.appendChild(lab); el.appendChild(pill);
+    list.appendChild(el);
+  });
+  var f = list.children[chatopt.focus];
+  if (f) {
+    var top = f.offsetTop - list.offsetTop;
+    if (top < list.scrollTop) list.scrollTop = top - 6;
+    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
+  }
+  showSettingDesc('settings-desc', (CHATOPT_ROWS[chatopt.focus] || {}).desc || '', f);
+}
+function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= CHATOPT_ROWS.length) return; chatopt.focus = n; renderChatOpt(); }
+function chatoptActivate(dir) {
+  dir = dir || 1;
+  var row = CHATOPT_ROWS[chatopt.focus];
+  if (row.bool) settings[row.key] = !settings[row.key];
+  else {
+    var idx = 0, n = row.vals.length;
+    for (var i = 0; i < n; i++) if (row.vals[i][0] === settings[row.key]) { idx = i; break; }
+    settings[row.key] = row.vals[((idx + dir) % n + n) % n][0];
+  }
+  saveSettings();
+  if (row.key === 'chat') syncChat();        // connect/disconnect the chat socket
+  applyChatStyle();                          // side/size/width/opacity take effect immediately
+  renderChatOpt();
 }
 
 /* Update check. Compare our appinfo version to the latest GitHub release. A
@@ -1879,7 +3007,7 @@ function checkForUpdate() {
       var latest = (rel.tag_name || '').replace(/^v/, '');
       if (latest && isNewerVersion(latest, cur)) {
         updateInfo = { version: latest, notes: rel.body || '' };
-        var g = document.getElementById('quality-gear');
+        var g = document.getElementById('settings-button');
         if (g) g.classList.add('hasupdate');
         if (settings.open) { settings.items = settingsBuild(); renderSettings(); renderSettingsVer(); }
       }
@@ -1902,13 +3030,16 @@ function stripMd(s) {
 function openUpdateNotes() {
   if (!updateInfo) return;
   updateopen = true;
+  document.getElementById('settings-desc').className = 'hidden';
   document.getElementById('update-ver').textContent = 'Version ' + updateInfo.version;
   document.getElementById('update-notes').textContent = stripMd(updateInfo.notes);
   document.getElementById('updatemodal').className = '';
+  touchSettings();
 }
 function closeUpdateNotes() {
   updateopen = false;
   document.getElementById('updatemodal').className = 'hidden';
+  if (settings.open) applySettingsFocus();
 }
 
 /* Buffering spinner (live and VOD) and the centre play/pause button (VOD) */
@@ -1952,12 +3083,32 @@ function toggleVodPlay() {
 var CHAT_KEY = '32cbd69e4b950bf97679';   // Kick's public Pusher app key (us2)
 var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=js&version=8.4.0&flash=false';
 var CHAT_MAX = 80;                        // keep at most this many messages on screen
-var CHAT_FADE_MS = 40000;                 // a message fades out this long after it arrives
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null };
 function chatEl() { return document.getElementById('chat'); }
-function showChatOverlay() { chatEl().className = 'on'; }
-function hideChatOverlay() { chatEl().className = ''; }
+// The overlay's look (side/size/width/opacity) is carried as classes so the 'on'
+// visibility flag can be toggled without losing them.
+function chatClassBase() {
+  var cls = ['csize-' + settings.chatSize, 'cwidth-' + settings.chatWidth,
+             'copacity-' + settings.chatOpacity, 'cbg-' + settings.chatBackground];
+  if (settings.chatSide === 'left') cls.push('side-left');
+  return cls.join(' ');
+}
+function showChatOverlay() { chatEl().className = chatClassBase() + ' on'; }
+function hideChatOverlay() { chatEl().className = chatClassBase(); }
+function applyChatStyle() {
+  var el = chatEl();
+  var on = el.classList.contains('on');
+  el.className = chatClassBase() + (on ? ' on' : '');
+}
 function clearChat() { chatEl().innerHTML = ''; }
+// Bots and !commands are noise on a TV; optionally filter them out.
+var CHAT_BOTS = { botrix: 1, nightbot: 1, streamelements: 1, streamlabs: 1, fossabot: 1,
+                  wizebot: 1, moobot: 1, kickbot: 1, ohbot: 1 };
+function isBotMessage(d) {
+  var name = (d.sender && d.sender.username || '').toLowerCase();
+  if (CHAT_BOTS[name]) return true;
+  return String(d.content || '').replace(/^\s+/, '').charAt(0) === '!';   // chat command
+}
 function currentRoomId() {
   var c = state.current && state.channels[state.current];
   return (c && c.chatroomId) ? c.chatroomId : null;
@@ -2019,16 +3170,20 @@ function appendChatContent(row, content) {
   var re = /\[emote:(\d+):([^\]]+)\]/g, last = 0, m;
   while ((m = re.exec(content)) !== null) {
     if (m.index > last) row.appendChild(document.createTextNode(content.slice(last, m.index)));
-    var img = document.createElement('img');
-    img.className = 'cemote';
-    img.src = 'https://files.kick.com/emotes/' + m[1] + '/fullsize';
-    img.alt = m[2];
-    (function (name) {
-      img.onerror = function () {
-        if (this.parentNode) this.parentNode.replaceChild(document.createTextNode(name), this);
-      };
-    })(m[2]);
-    row.appendChild(img);
+    if (settings.chatEmotes === 'text') {
+      row.appendChild(document.createTextNode(m[2]));   // just the emote name, no image
+    } else {
+      var img = document.createElement('img');
+      img.className = 'cemote';
+      img.src = 'https://files.kick.com/emotes/' + m[1] + '/fullsize';
+      img.alt = m[2];
+      (function (name) {
+        img.onerror = function () {
+          if (this.parentNode) this.parentNode.replaceChild(document.createTextNode(name), this);
+        };
+      })(m[2]);
+      row.appendChild(img);
+    }
     last = re.lastIndex;
   }
   if (last < content.length) row.appendChild(document.createTextNode(content.slice(last)));
@@ -2059,9 +3214,16 @@ function badgeChipsFor(sender) {
 }
 function addChatMessage(d) {
   if (!d || !d.sender) return;
+  if (settings.chatBots === 'hide' && isBotMessage(d)) return;
   var box = chatEl();
   var row = document.createElement('div');
   row.className = 'cmsg';
+  if (settings.chatTimestamps) {
+    var ts = document.createElement('span'); ts.className = 'ctime';
+    var dt = new Date();
+    ts.textContent = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2) + ' ';
+    row.appendChild(ts);
+  }
   badgeChipsFor(d.sender).forEach(function (c) {
     var b = document.createElement('span');
     b.className = 'cbadge ' + c.cls;
@@ -2078,12 +3240,14 @@ function addChatMessage(d) {
   appendChatContent(row, d.content);
   box.appendChild(row);
   while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
-  // let each message fade out and drop off after a while, so the overlay does
-  // not build up into a static wall of text
-  setTimeout(function () {
-    row.className = 'cmsg cfade';
-    setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 800);
-  }, CHAT_FADE_MS);
+  // let each message fade out and drop off after a while, so the overlay does not
+  // build up into a static wall of text ('Never' / 0 keeps them until they scroll off)
+  if (settings.chatFade > 0) {
+    setTimeout(function () {
+      row.classList.add('cfade');
+      setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 800);
+    }, settings.chatFade);
+  }
 }
 
 /* OLED burn-in guard.
@@ -2091,11 +3255,11 @@ function addChatMessage(d) {
    for a while and the screen is showing something static (an idle message or a
    paused frame), we heavily dim the whole panel so nothing stays lit and bright.
    Any remote or pointer activity wakes it back up. */
-var SAVER_MS = 240000;      // four minutes of stillness on a static screen
 var saver = { on: false, timer: null };
 function markInput() {
   state.lastInput = Date.now();
   if (saver.on) wakeSaver();
+  touchSettings();
 }
 function isStaticScreen() {
   var v = document.getElementById('video');
@@ -2103,8 +3267,8 @@ function isStaticScreen() {
   return (!state.current && !state.vod) || (v && v.paused);
 }
 function checkSaver() {
-  if (!state.ready || saver.on) return;
-  if (Date.now() - state.lastInput > SAVER_MS && isStaticScreen()) showSaver();
+  if (!state.ready || saver.on || state.notifyCurrent || !settings.saverMin) return; // 0 = guard off
+  if (Date.now() - state.lastInput > settings.saverMin * 60000 && isStaticScreen()) showSaver();
 }
 function showSaver() { saver.on = true; document.getElementById('saver').className = 'on'; }
 function wakeSaver() { saver.on = false; document.getElementById('saver').className = ''; }
@@ -2194,6 +3358,7 @@ function isChDown(k) { return k === 34 || k === 428; }
 function toast(msg) {
   var t = document.getElementById('toast');
   t.textContent = msg;
+  t.style.filter = popupDimFilter();
   t.className = '';
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(function () { t.className = 'hidden'; }, 2500);
@@ -2253,23 +3418,43 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.BACK || k === KEY.OK || k === KEY.LEFT) closeUpdateNotes();
     return;
   }
+  if (qualityopt.open) {
+    e.preventDefault();
+    if (k === KEY.BACK || k === KEY.LEFT) closeQualityOpt();
+    else if (k === KEY.UP) qualityoptMove(-1);
+    else if (k === KEY.DOWN) qualityoptMove(1);
+    else if (k === KEY.OK || k === KEY.RIGHT) qualityoptActivate();
+    return;
+  }
   if (dimopt.open) {
     e.preventDefault();
-    if (k === KEY.BACK || k === KEY.LEFT) closeDimOpt();
+    if (k === KEY.BACK) closeDimOpt();
     else if (k === KEY.UP) dimoptMove(-1);
     else if (k === KEY.DOWN) dimoptMove(1);
-    else if (k === KEY.OK || k === KEY.RIGHT) dimoptActivate();
+    else if (k === KEY.OK || k === KEY.RIGHT) dimoptActivate(1);
+    else if (k === KEY.LEFT) dimoptActivate(-1);
+    return;
+  }
+  if (chatopt.open) {
+    e.preventDefault();
+    if (k === KEY.BACK) closeChatOpt();
+    else if (k === KEY.UP) chatoptMove(-1);
+    else if (k === KEY.DOWN) chatoptMove(1);
+    else if (k === KEY.OK || k === KEY.RIGHT) chatoptActivate(1);
+    else if (k === KEY.LEFT) chatoptActivate(-1);
     return;
   }
   if (settings.open) {
     e.preventDefault();
-    if (k === KEY.BACK || k === KEY.RED || k === KEY.LEFT) closeSettings();   // red toggles it shut
+    if (k === KEY.BACK || k === KEY.RED) closeSettings();   // red toggles it shut (left now adjusts)
     else if (k === KEY.UP) settingsMove(-1);
     else if (k === KEY.DOWN) settingsMove(1);
-    else if (k === KEY.OK) settingsActivate();
-    else if (k === KEY.RIGHT) {                 // right on the Dim row opens its options
-      var sit = settings.items[settings.focus];
-      if (sit && sit.kind === 'dimopt') openDimOpt(); else settingsActivate();
+    else if (k === KEY.OK) settingsOk();
+    else if (k === KEY.RIGHT) settingsActivate(); // Right operates the row's primary toggle/cycle only
+    else if (k === KEY.LEFT) {                  // left mirrors right: toggle, or previous choice
+      var lit = settings.items[settings.focus];
+      if (lit && lit.kind === 'choice') { cycleChoice(lit, -1); renderSettings(); }
+      else settingsActivate();
     }
     return;
   }
@@ -2298,19 +3483,45 @@ document.addEventListener('keydown', function (e) {
   // watching a stream
   e.preventDefault();
   var video = document.getElementById('video');
+  if (k === KEY.N0) { dimQuickKey(); return; }         // 0 toggles dim; press again within 3s to change strength
   if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
   if (k === KEY.RED) { openSettings(); return; }       // red opens settings
   if (k === KEY.YELLOW) { openVodsForContext(); return; } // yellow opens past videos
   if (isChUp(k)) { chpopMove(-1); return; }            // channel up/down surf the live list
   if (isChDown(k)) { chpopMove(1); return; }
+  if (k === KEY.OK && state.notifyCurrent) { activateNotify(); return; }
+  if (k === KEY.REW) {
+    if (state.vod) seekVod(-60); else rewindLive();
+    return;
+  }
+  if (k === KEY.FF) {
+    if (state.vod) seekVod(60); else jumpToLive();
+    return;
+  }
   if (state.sidebarOpen) {
     resetIdle();
-    if (k === KEY.UP) moveSide(-1);
+    if (state.playerToolFocus >= 0) {
+      if (k === KEY.LEFT) {
+        if (state.playerToolFocus === 1) setPlayerToolFocus(0);
+        else setPlayerToolFocus(-1);
+      } else if (k === KEY.RIGHT && state.playerToolFocus === 0) {
+        setPlayerToolFocus(1);
+      } else if (k === KEY.UP) {
+        setPlayerToolFocus(-1);
+      } else if (k === KEY.OK) {
+        activatePlayerTool();
+      } else if (k === KEY.GREEN) {
+        refreshSide();
+      } else if (k === KEY.BACK) {
+        closeSidebarWithGrace();
+      }
+    } else if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
-    else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar(); // left or right tucks the list away
-    else if (k === KEY.BACK) { closeSidebar(); hideCursor(); } // close the list and hide the pointer
+    else if (k === KEY.RIGHT) setPlayerToolFocus(0);      // move into Quality, then Settings
+    else if (k === KEY.LEFT) closeSidebar();
+    else if (k === KEY.BACK) closeSidebarWithGrace();
     return;
   }
   if (state.vod) {                                       // watching a past video
@@ -2318,8 +3529,6 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
     if (k === KEY.UP) { chpopMove(-1); return; }         // up/down surf live channels
     if (k === KEY.DOWN) { chpopMove(1); return; }
-    if (k === KEY.FF) { seekVod(60); return; }
-    if (k === KEY.REW) { seekVod(-60); return; }
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
     if (k === KEY.PLAY) { playVideo(video); return; }
     if (k === KEY.OK) { showVodOverlay(); return; }
@@ -2359,13 +3568,15 @@ function browseCardFromEvent(e) {
 }
 (function wirePointer() {
   var playerEl = document.getElementById('player');
+  document.getElementById('notify').addEventListener('click', function (e) {
+    e.stopPropagation();
+    activateNotify();
+  });
   playerEl.addEventListener('click', function (e) {
     if (!state.ready || state.mode !== 'player') return;
     if (e.target.id === 'video' || e.target === playerEl || e.target.id === 'idle') {
       if (state.sidebarOpen) {
-        closeSidebar();
-        state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;  // don't reopen on the next stray move
-        hideCursor();
+        closeSidebarWithGrace();                                  // do not reopen on the next stray move
       } else {
         state.suppressNudgeUntil = 0;                               // an explicit click always brings it back
         openSidebar();
@@ -2389,6 +3600,8 @@ function browseCardFromEvent(e) {
   var favList = document.getElementById('fav-list');
   favList.addEventListener('mouseover', function (e) {
     resetIdle();
+    hideQualityHint();
+    if (state.playerToolFocus >= 0) setPlayerToolFocus(-1);
     var hit = favRowFromEvent(e);
     if (hit && hit.idx !== state.sideFocus) { state.sideFocus = hit.idx; applySideFocus(); }
   });
@@ -2560,9 +3773,30 @@ function browseCardFromEvent(e) {
     vodDragging = false;
     seekVodFrac(vodTrackFrac(e));               // commit the seek on release
   });
-  // Settings gear and its menu
-  var gear = document.getElementById('quality-gear');
-  if (gear) gear.addEventListener('click', function (e) { e.stopPropagation(); openSettings(); });
+  // Dedicated player tools: stream quality and Settings stay separate.
+  var settingsButton = document.getElementById('settings-button');
+  if (settingsButton) {
+    settingsButton.addEventListener('mouseenter', function () {
+      hideQualityHint();
+      if (state.playerToolFocus !== 1) setPlayerToolFocus(1);
+      resetIdle();
+    });
+    settingsButton.addEventListener('click', function (e) {
+      e.stopPropagation(); setPlayerToolFocus(1); openSettings();
+    });
+  }
+  var qualityButton = document.getElementById('quality-button');
+  if (qualityButton) {
+    qualityButton.addEventListener('mouseenter', function () {
+      if (state.playerToolFocus !== 0) setPlayerToolFocus(0);
+      resetIdle();
+      showQualityHint();
+    });
+    qualityButton.addEventListener('mouseleave', function () { hideQualityHint(); });
+    qualityButton.addEventListener('click', function (e) {
+      e.stopPropagation(); setPlayerToolFocus(0); openQualityOpt();
+    });
+  }
   var slist = document.getElementById('settings-list');
   function sRowIdx(e) {
     var el = e.target;
@@ -2575,6 +3809,11 @@ function browseCardFromEvent(e) {
     var i = sRowIdx(e);
     if (i >= 0 && i !== settings.focus) { settings.focus = i; applySettingsFocus(); }
   });
+  slist.addEventListener('wheel', function (e) {
+    if (!settings.open) return;
+    e.preventDefault();
+    settingsMove(e.deltaY > 0 ? 1 : -1);
+  });
   slist.addEventListener('click', function (e) {
     var i = sRowIdx(e);
     if (i < 0) return;
@@ -2585,7 +3824,10 @@ function browseCardFromEvent(e) {
       if (cl && cl.indexOf('sgear') !== -1) { onGear = true; break; }
       g = g.parentNode;
     }
-    if (onGear) openDimOpt(); else settingsActivate();
+    if (onGear) {
+      var git = settings.items[i];
+      if (git && git.kind === 'chatopt') openChatOpt(); else openDimOpt();
+    } else settingsActivate();
   });
   document.getElementById('settingsmodal').addEventListener('click', function (e) {
     if (e.target === this) closeSettings();
@@ -2605,6 +3847,7 @@ function browseCardFromEvent(e) {
     else if (act === 'refresh') refreshSide();
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();
+    else if (act === 'dim') dimQuickKey();
   });
   // VOD centre play/pause button
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
@@ -2620,6 +3863,38 @@ function browseCardFromEvent(e) {
   dimoptList.addEventListener('mouseover', function (e) { var i = dimoptIdx(e); if (i >= 0 && i !== dimopt.focus) { dimopt.focus = i; renderDimOpt(); } });
   dimoptList.addEventListener('click', function (e) { var i = dimoptIdx(e); if (i >= 0) { dimopt.focus = i; dimoptActivate(); } });
   document.getElementById('dimoptmodal').addEventListener('click', function (e) { if (e.target === this) closeDimOpt(); });
+  // Chat options popup pointer
+  var chatoptList = document.getElementById('chatopt-list');
+  function chatoptIdx(e) {
+    var el = e.target;
+    while (el && el !== chatoptList && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === chatoptList) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return isNaN(i) ? -1 : i;
+  }
+  chatoptList.addEventListener('mouseover', function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; renderChatOpt(); } });
+  chatoptList.addEventListener('click', function (e) { var i = chatoptIdx(e); if (i >= 0) { chatopt.focus = i; chatoptActivate(); } });
+  document.getElementById('chatoptmodal').addEventListener('click', function (e) { if (e.target === this) closeChatOpt(); });
+  // Stream quality picker pointer
+  var qualityoptList = document.getElementById('qualityopt-list');
+  function qualityoptIdx(e) {
+    var el = e.target;
+    while (el && el !== qualityoptList && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === qualityoptList) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return (isNaN(i) || i < 0 || i >= qualityopt.items.length) ? -1 : i;
+  }
+  qualityoptList.addEventListener('mouseover', function (e) {
+    var i = qualityoptIdx(e);
+    if (i >= 0 && i !== qualityopt.focus) { qualityopt.focus = i; renderQualityOpt(); }
+  });
+  qualityoptList.addEventListener('click', function (e) {
+    var i = qualityoptIdx(e);
+    if (i >= 0) { qualityopt.focus = i; qualityoptActivate(); }
+  });
+  document.getElementById('qualityoptmodal').addEventListener('click', function (e) {
+    if (e.target === this) closeQualityOpt();
+  });
   // Update-available release notes popup
   document.getElementById('update-close').addEventListener('click', function () { closeUpdateNotes(); });
   document.getElementById('updatemodal').addEventListener('click', function (e) { if (e.target === this) closeUpdateNotes(); });
@@ -2647,6 +3922,8 @@ function browseCardFromEvent(e) {
   });
   // A pointer move anywhere counts as activity for the burn-in guard.
   document.addEventListener('mousemove', function () { markInput(); });
+  document.addEventListener('mousedown', function () { markInput(); });
+  document.addEventListener('wheel', function () { markInput(); });
 })();
 
 /* Watching the video element for trouble */
@@ -2657,7 +3934,16 @@ function browseCardFromEvent(e) {
     if (PB.active && state.current) recoverPlayback(state.current);
   });
   video.addEventListener('ended', function () {
-    if (state.vod) { toast('Video ended'); exitVod(); return; }
+    // A queued ended task from a source we just replaced must not complete or
+    // skip the new VOD (or be mistaken for the newly resumed live channel).
+    if (!video.ended) return;
+    if (state.vod) {
+      if (state.vod.completed || state.vod.ending) return;
+      state.vod.ending = true;
+      completeVodProgress();
+      advanceVodOrExit();
+      return;
+    }
     if (PB.active && state.current) handleEnded(state.current);   // detect a finished live stream
   });
   video.addEventListener('playing', function () {
@@ -2667,11 +3953,19 @@ function browseCardFromEvent(e) {
   // Buffering spinner for both live and VOD.
   video.addEventListener('waiting', function () { if (!video.paused) showSpinner(); });
   video.addEventListener('seeking', function () { showSpinner(); });
-  video.addEventListener('canplay', function () { hideSpinner(); });
-  video.addEventListener('seeked', function () { hideSpinner(); });
+  video.addEventListener('loadedmetadata', function () { if (state.vod) applyVodResume(); });
+  video.addEventListener('durationchange', function () { if (state.vod) applyVodResume(); });
+  video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });
+  video.addEventListener('timeupdate', function () { if (state.vod) saveVodProgress(false); });
+  video.addEventListener('seeked', function () {
+    hideSpinner();
+    if (state.vod) saveVodProgress(true);
+  });
   // Keep the VOD play/pause icon in sync with the actual state.
   video.addEventListener('play', function () { if (state.vod) vodPlayIcon(); });
-  video.addEventListener('pause', function () { if (state.vod) { vodPlayIcon(); hideSpinner(); } });
+  video.addEventListener('pause', function () {
+    if (state.vod) { saveVodProgress(true); vodPlayIcon(); hideSpinner(); }
+  });
 })();
 
 // While we are idle and cannot reach Kick, retry a little quicker than the
@@ -2684,7 +3978,10 @@ function scheduleDownRetry() {
       if (state.current || !state.netDown) { state.downRetry = false; return; }
       fetchFavorites(function () {
         if (state.sidebarOpen) renderSidebar();
-        if (!state.current) showNothing();
+        if (!state.current && !state.vod) {
+          if (state.netDown) showNothing();
+          else retryLastVodAfterReconnect();
+        }
         if (state.netDown && !state.current) loop(); else state.downRetry = false;
       });
     }, 8000);
@@ -2693,15 +3990,26 @@ function scheduleDownRetry() {
 
 /* Startup */
 document.addEventListener('visibilitychange', function () {
-  if (document.hidden) return;
-  fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
+  if (document.hidden) { saveVodProgress(true); pauseNotify(); return; }
+  fetchFavorites(function () {
+    if (state.sidebarOpen) renderSidebar();
+    if (state.ready && !state.current && !state.vod) {
+      if (state.netDown) showNothing();
+      else retryLastVodAfterReconnect();
+    }
+  });
   if (PB.active && state.current) recoverPlayback(state.current); // back in the app, check the stream is fine
+  pumpNotify();
 });
+window.addEventListener('pagehide', function () { saveVodProgress(true); });
 // Handle the network coming back or dropping out.
 window.addEventListener('online', function () {
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
-    if (state.ready && !state.current) showNothing();
+    if (state.ready && !state.current && !state.vod) {
+      if (state.netDown) showNothing();
+      else retryLastVodAfterReconnect();
+    }
   });
   if (PB.active && state.current) recoverPlayback(state.current);
   else if (state.netDown) scheduleDownRetry();
@@ -2710,30 +4018,132 @@ window.addEventListener('offline', function () {
   setNetDown(true);
   if (state.sidebarOpen) renderSidebar();
 });
+// The startup live chain is explicit rather than relying on sidebar sort order:
+// last successful live stream, first live pin, then the first other live stream.
+function startupLiveTarget() {
+  var last = loadLast();
+  var c, slug;
+  if (last && state.order.indexOf(last) !== -1) {
+    c = state.channels[last];
+    if (c && c.live && c.playbackUrl) return last;
+  }
+  for (var i = 0; i < state.order.length; i++) {
+    slug = state.order[i]; c = state.channels[slug];
+    if (c && c.live && c.playbackUrl && isPinned(slug)) return slug;
+  }
+  for (var j = 0; j < state.order.length; j++) {
+    slug = state.order[j]; c = state.channels[slug];
+    if (c && c.live && c.playbackUrl) return slug;
+  }
+  return null;
+}
+// A saved VOD contains only a channel slug and stable recording id. Resolve it
+// through Kick on every launch so deleted/gated recordings fall through and
+// expiring HLS URLs are never restored from localStorage.
+function resumeLastVodAtStartup(done) {
+  var marker = loadLastVod();
+  if (!marker) { done(false, false); return; }
+  // If none of the favorite lookups could reach Kick, the VOD lookup cannot
+  // succeed either. Keep the marker and show the offline screen immediately.
+  if (state.netDown) { done(false, true); return; }
+  document.getElementById('idle-load').className = '';
+  serviceGet('/api/v2/channels/' + encodeURIComponent(marker.slug) + '/videos', function (err, data) {
+    document.getElementById('idle-load').className = 'hidden';
+    var currentMarker = loadLastVod();
+    if (!currentMarker || currentMarker.slug !== marker.slug || currentMarker.id !== marker.id) {
+      done(false, false);
+      return;
+    }
+    // This matters for a reconnect retry, when input is already enabled. A
+    // user-selected stream must always beat a late VOD-list response.
+    if (state.ready && (state.current || state.vod || startupRecoveryUiBusy())) {
+      done(false, true);
+      return;
+    }
+    if (err) {
+      if (err === 404 || err === '404') clearLastVod();
+      done(false, !(err === 404 || err === '404'));
+      return;
+    }
+    if (!Array.isArray(data)) { done(false, true); return; }
+    var list = data.filter(playableVod);
+    var index = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (vodStableId(list[i]) === marker.id) { index = i; break; }
+    }
+    if (index < 0) {
+      clearLastVod();
+      done(false, false);
+      return;
+    }
+    if (!state.channels[marker.slug]) {
+      state.channels[marker.slug] = offlineStub(marker.slug);
+      state.channels[marker.slug].name = marker.name || marker.slug;
+    }
+    vods.slug = marker.slug;
+    vods.list = list;
+    vods.gridIdx = index;
+    state.vodReturn = startupLiveTarget();
+    playVod(list[index], list.slice(), index, marker.slug);
+    done(true, false);
+  });
+}
+function startupRecoveryUiBusy() {
+  return document.hidden || state.mode !== 'player' || state.sidebarOpen || saver.on ||
+    browse.open || vods.open || cats.open || chpop.open || settings.open ||
+    dimopt.open || chatopt.open || qualityopt.open || updateopen;
+}
+function retryLastVodAfterReconnect() {
+  if (!state.ready || state.current || state.vod || state.netDown || state.vodRecoveryInFlight) return;
+  if (!loadLastVod()) { showNothing(); return; }
+  if (startupRecoveryUiBusy()) {
+    clearTimeout(state.vodRecoveryRetryTimer);
+    state.vodRecoveryRetryTimer = setTimeout(retryLastVodAfterReconnect, 1000);
+    return;
+  }
+  state.vodRecoveryInFlight = true;
+  resumeLastVodAtStartup(function (resumed, retryable) {
+    state.vodRecoveryInFlight = false;
+    if (resumed || state.current || state.vod) return;
+    if (retryable && startupRecoveryUiBusy()) {
+      clearTimeout(state.vodRecoveryRetryTimer);
+      state.vodRecoveryRetryTimer = setTimeout(retryLastVodAfterReconnect, 1000);
+      return;
+    }
+    var target = startupLiveTarget();
+    if (target) play(target, retryable); else showNothing();
+  });
+}
+function finishStartupWithoutVod(preserveLastVod) {
+  var target = startupLiveTarget();
+  if (target) { play(target, preserveLastVod); return; }
+  // Nothing to play. On a fresh, empty setup, open the live browser so there
+  // is something to pick from right away; otherwise show the idle screen.
+  if (!getFavorites().length && !state.netDown) {
+    showState('empty');
+    openBrowse();
+  } else {
+    showNothing();
+    if (state.netDown) scheduleDownRetry();
+  }
+}
 (function boot() {
   setMode('player');
   loadQualityPref();
   loadSettings();
   applyDim();
+  applyChatStyle();                           // set the chat overlay's side/size/width/opacity
+  syncDiagnostics();
   loadAppVersion();                           // populate the version chip in Settings promptly
   setTimeout(checkForUpdate, 3000);           // check GitHub for a newer release, once the app has settled
   state.lastInput = Date.now();
   setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
   showState('splash');
-  startPlayerPoll();
   fetchFavorites(function () {
-    state.ready = true;                       // first load is done, start letting input through
-    var last = loadLast();
-    var target = (last && state.channels[last] && state.channels[last].live) ? last : firstLive();
-    if (target) { play(target); return; }
-    // Nothing to play. On a fresh, empty setup, open the live browser so there
-    // is something to pick from right away; otherwise show the idle screen.
-    if (!getFavorites().length && !state.netDown) {
-      showState('empty');
-      openBrowse();
-    } else {
-      showNothing();
-      if (state.netDown) scheduleDownRetry();
-    }
+    resumeLastVodAtStartup(function (resumed, retryable) {
+      state.ready = true;                     // startup choice is settled; accept input now
+      startPlayerPoll();                      // avoid overlapping a slow initial/recovery fetch
+      if (!resumed) finishStartupWithoutVod(retryable);
+    });
   });
 })();
