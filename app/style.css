@@ -457,10 +457,13 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: #e91916; margin-right: 7px; vertical-align: 1px;
 }
 
-/* Colour-button legend at the bottom, to the right of the sidebar (never over it) */
+/* Colour-button legend at the bottom, centred. Same 900px pill as the VOD seek
+   bar so the two align edge-to-edge; at this width it still clears the 470px
+   sidebar (left edge lands at 510px). */
 #cbguide {
-  position: absolute; left: 500px; bottom: 40px;
-  display: flex; align-items: center;
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 40px;
+  width: 900px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
   padding: 12px 20px; border-radius: 14px;
   background: rgba(11,14,15,0.82); border: 1px solid #2f3438;
 }
@@ -539,9 +542,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 
 /* VOD seek bar. Fixed, centred width so it never resizes when the sidebar
-   opens/closes, and stays clear of the 470px sidebar. */
+   opens/closes, and stays clear of the 470px sidebar. Same 900px width as
+   #cbguide below it, sitting a bit closer to the guide than to the centre
+   play/pause button (~194px above, ~95px below). */
 #vodbar {
-  position: absolute; left: 50%; transform: translateX(-50%); bottom: 130px;
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 210px;
   width: 900px; box-sizing: border-box;
   display: flex; align-items: center;
   padding: 12px 30px; border-radius: 20px;

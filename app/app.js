@@ -2190,7 +2190,7 @@ function placeDiagnostics() {
   var chatOnLeft = settings.chatSide === 'left' && chatBox.classList.contains('on');
   el.style.left = chatOnLeft ? 'auto' : (state.sidebarOpen ? '500px' : '30px');
   el.style.right = chatOnLeft ? '30px' : 'auto';
-  el.style.bottom = vodControls ? '235px' : (state.sidebarOpen ? '150px' : '30px');
+  el.style.bottom = vodControls ? '300px' : (state.sidebarOpen ? '150px' : '30px');   // above the raised seek bar
 }
 function drawDiagnostics() {
   var el = document.getElementById('diagnostics');
