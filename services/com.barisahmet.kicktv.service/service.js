@@ -46,6 +46,7 @@ function kickGet(path, cb) {
     ciphers: CHROME_CIPHERS,
     ecdhCurve: CHROME_CURVES
   }, function (res) {
+    res.setEncoding('utf8');   // decode across chunk boundaries so a split emoji cannot corrupt the JSON
     var body = '';
     res.on('data', function (d) { body += d; });
     res.on('end', function () { cb(null, res.statusCode, body); });

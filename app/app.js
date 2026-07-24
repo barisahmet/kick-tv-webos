@@ -196,15 +196,28 @@ function sortOrder(favs) {
 // to their timeouts, so boot could sit on the splash for 30s+. A small pool keeps every
 // request fast and reliable while still finishing the whole list in a second or two.
 var FETCH_CONCURRENCY = 5;
+var fetchGeneration = 0;   // stamps each refresh so a slow old one cannot overwrite a newer one
 function fetchFavorites(done) {
-  var favs = getFavorites(), total = favs.length, ok = 0, started = 0, finished = 0;
+  var favs = getFavorites(), total = favs.length, ok = 0, hard = 0, started = 0, finished = 0;
+  var gen = ++fetchGeneration;
   if (!total) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
   function onOne(slug, err, raw) {
-    if (!err) { state.channels[slug] = normalize(slug, raw); ok++; }
-    else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
+    var stale = gen !== fetchGeneration;
+    if (!err) { if (!stale) state.channels[slug] = normalize(slug, raw); ok++; }
+    else {
+      if (err !== 404) hard++;         // a 404 is a definitive answer, not a connectivity failure
+      if (!stale) {
+        if (err === 404) {             // channel is gone: drop stale live data but keep its name
+          var old = state.channels[slug];
+          state.channels[slug] = offlineStub(slug);
+          if (old && old.name) state.channels[slug].name = old.name;
+        } else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
+      }
+    }
     if (++finished === total) {
+      if (gen !== fetchGeneration) { done(); return; }  // a newer refresh owns the shared state now
       state.lastFetch = Date.now();
-      setNetDown(ok === 0);             // if nothing at all got through, treat it as offline
+      setNetDown(ok === 0 && hard > 0); // offline only when real transport failures blocked everything
       sortOrder(favs); detectOnline(favs); done();
     } else {
       pump();                          // a slot freed up — start the next one
@@ -283,7 +296,13 @@ function pumpNotify() {
   el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
   el.className = 'show';
   clearTimeout(state.notifyTimer);
-  state.notifyTimer = setTimeout(finishNotify, 5000);
+  state.notifyTimer = setTimeout(expireNotify, 5000);
+}
+// The 5s lifetime is up. If a popup slid over the alert meanwhile, requeue it
+// so it comes back visible and actionable instead of expiring unseen.
+function expireNotify() {
+  if (state.notifyCurrent && notifyUiBusy()) { pauseNotify(); return; }
+  finishNotify();
 }
 function finishNotify() {
   clearTimeout(state.notifyTimer);
@@ -303,6 +322,7 @@ function pauseNotify() {
     state.notifyCurrent = null;
   }
   document.getElementById('notify').className = '';
+  state.notifyWaitTimer = setTimeout(pumpNotify, 500);   // resume once the UI is free again
 }
 function activateNotify() {
   var item = state.notifyCurrent;
@@ -421,7 +441,7 @@ function play(slug, preserveLastVod) {
   state.preserveLastVodDuringLive = !!preserveLastVod;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
   state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
-  PB.slug = slug; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
+  PB.slug = slug; PB.session = (PB.session || 0) + 1; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
   PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = '';
   PB.userSeekUntil = 0; PB.rewound = false;
   setBanner('');
@@ -432,8 +452,9 @@ function play(slug, preserveLastVod) {
 // Fetch the channel again, which also hands us a fresh playback link since the
 // old one expires after a while, then start the video.
 function loadChannel(slug, isRecovery) {
+  var session = PB.session;            // the playback session this load belongs to
   apiGet(slug, function (err, raw) {
-    if (state.current !== slug) return;              // they already switched away
+    if (state.current !== slug || session !== PB.session) return;  // switched away, or an older session for the same channel
     PB.reloading = false;
     if (err) {
       if (isRecovery) { scheduleReconnect(slug); return; }  // a recovery try failed, so keep trying
@@ -498,8 +519,10 @@ function playVideo(video) {
 }
 // While the browse popup is up, stop decoding/loading the stream so the popup
 // stays smooth, then pick playback back up when it closes.
+var resumeWasPaused = false;   // was the video already paused when the popup opened?
 function pausePlaybackForBrowse() {
   var v = document.getElementById('video');
+  resumeWasPaused = !!v.paused;
   try { v.pause(); } catch (e) {}
   if (state.hls) { try { state.hls.stopLoad(); } catch (e) {} }
   stopWatchdog();
@@ -507,7 +530,7 @@ function pausePlaybackForBrowse() {
 function resumePlaybackAfterBrowse() {
   if (!state.current && !state.vod) return;
   if (state.hls) { try { state.hls.startLoad(); } catch (e) {} }
-  playVideo(document.getElementById('video'));
+  if (!resumeWasPaused) playVideo(document.getElementById('video'));   // respect a deliberate pause
   if (state.current) startWatchdog(state.current);   // VODs run without the live watchdog
 }
 function onNetworkError(slug, hls) {
@@ -564,8 +587,9 @@ function handleEnded(slug) {
   if (state.current !== slug || !PB.active) return;
   PB.endedCount = (PB.endedCount || 0) + 1;
   if (PB.endedCount >= 2) { advanceOrIdle(slug); return; }
+  var session = PB.session;
   apiGet(slug, function (err, raw) {
-    if (state.current !== slug) return;
+    if (state.current !== slug || session !== PB.session) return;
     var live = !err && raw && raw.livestream && raw.livestream.is_live && raw.playback_url;
     if (!live) { advanceOrIdle(slug); return; }
     state.channels[slug] = normalize(slug, raw);
@@ -669,7 +693,9 @@ function showOverlay(c) {
   ov.style.width = state.sidebarOpen ? '1450px' : '1920px';
   ov.className = '';
   clearTimeout(overlayTimer);
-  overlayTimer = setTimeout(function () { ov.className = 'hidden'; }, 4000);
+  overlayTimer = setTimeout(function () {
+    if (!state.sidebarOpen) ov.className = 'hidden';  // with the sidebar open it hides on close instead
+  }, 4000);
 }
 function toggleOverlay() {
   var ov = document.getElementById('overlay');
@@ -734,7 +760,7 @@ function openSidebar() {
   resetIdle();
   updateGear();
   placeDiagnostics();
-  if (state.vod) showVodBar();                        // VOD seek bar rides with the sidebar
+  if (state.vod) showVodOverlay();                    // the full VOD controls ride with the sidebar
   // only refetch when the data is stale, so opening the list stays snappy
   if (Date.now() - state.lastFetch > 8000) {
     fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
@@ -748,6 +774,7 @@ function closeSidebar() {
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
   hideVodBar();                                       // VOD seek bar hides with the sidebar
+  hideVodPlay();                                      // ...and so does the play/pause button
   updateGear();
   placeDiagnostics();
 }
@@ -991,9 +1018,9 @@ function addTempToFavorites() {
 function refreshSide() {
   if (!state.sidebarOpen) openSidebar();     // show the list right away, with the spinner turning
   var btn = document.getElementById('side-refresh');
-  btn.className = 'spinning';
+  btn.classList.add('spinning');            // keep 'hidden' under renderSidebar's control
   var done = false, minned = false;
-  function stop() { if (done && minned) btn.className = ''; }
+  function stop() { if (done && minned) btn.classList.remove('spinning'); }
   setTimeout(function () { minned = true; stop(); }, 700); // keep it spinning for at least one full turn
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar(); else openSidebar();
@@ -1006,9 +1033,10 @@ function refreshSide() {
 // The Add dialog is a search: type a name, get matching channels, pick one. It
 // still handles an exact slug or a kick.com URL as a fallback when search finds
 // nothing. 'input' zone = typing; 'list' zone = choosing a result.
-var add = { results: [], focus: -1, zone: 'input' };
+var add = { results: [], focus: -1, zone: 'input', session: 0 };
 function openAdd() {
   setMode('add');
+  add.session++;                    // ties in-flight adds to the dialog that started them
   add.results = []; add.focus = -1; add.zone = 'input';
   document.getElementById('addresults').innerHTML = '';
   document.getElementById('addmodal').className = '';
@@ -1130,12 +1158,13 @@ function addChannelBySlug(raw) {
     return;
   }
   toast('Adding ' + slug + '...');
+  var ses = add.session;
   apiGet(slug, function (err, data) {
     if (err) { toast(err === 404 ? 'No channel named "' + slug + '"' : 'Kick API unreachable'); return; }
     state.channels[slug] = normalize(slug, data);
     addFavorite(slug);
     toast('Added ' + state.channels[slug].name);
-    var wasAdd = state.mode === 'add';
+    var wasAdd = state.mode === 'add' && add.session === ses;   // never touch a newer dialog
     if (wasAdd) {                         // only touch the dialog if it is still the one on screen
       document.getElementById('addmodal').className = 'hidden';
       document.getElementById('addinput').blur();
@@ -1168,7 +1197,7 @@ var BROWSE_LANGS = [
 var BROWSE_COLS = 4;
 var browse = { open: false, lang: 'all', langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
-               category: null, categoryName: '' };
+               category: null, categoryName: '', session: 0 };
 
 function loadBrowseLangPref() {
   var v = null;
@@ -1197,6 +1226,7 @@ function openBrowse() {
   renderBrowseLangs();
   browse.zone = 'grid'; browse.gridIdx = 0;
   browse.category = null; browse.categoryName = '';
+  browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   document.getElementById('browse-grid').innerHTML = '';
   updateBrowseTitle();
@@ -1220,8 +1250,9 @@ function loadBrowseMore(initial) {
   if (browse.fetching || !browse.hasMore || browse.page > 8) return;
   browse.fetching = true;
   if (!browse.raw.length) setBrowseStatus('Loading...');
-  var pg = browse.page;
+  var pg = browse.page, ses = browse.session;
   serviceGet('/stream/livestreams/en?page=' + pg + '&limit=50&sort=desc', function (err, data) {
+    if (ses !== browse.session) return;   // response belongs to a closed/reopened session
     browse.fetching = false;
     if (!browse.open) return;
     var arr = (!err && data && data.data) ? data.data : [];
@@ -1379,7 +1410,7 @@ function browseAddFavorite(slug) {
    live grid to one. Kick has no per-category live-streams endpoint, so the filter
    is applied over the streams already pulled into Browse: great for popular
    categories, thinner for niche ones. Opened from the Browse header. */
-var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false };
+var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false, session: 0 };
 var CATS_COLS = 4;
 function setCatsStatus(msg) { document.getElementById('cats-status').textContent = msg || ''; }
 function catBanner(c) {
@@ -1389,7 +1420,7 @@ function catBanner(c) {
 }
 function openCats() {
   if (!browse.open) return;
-  cats.open = true; cats.gridIdx = 0; cats.list = []; cats.page = 1; cats.hasMore = true; cats.fetching = false;
+  cats.open = true; cats.session++; cats.gridIdx = 0; cats.list = []; cats.page = 1; cats.hasMore = true; cats.fetching = false;
   showCursor();
   document.getElementById('cats').className = '';
   document.getElementById('cats-grid').innerHTML = '';
@@ -1403,8 +1434,9 @@ function closeCats() {
 function loadCatsMore(initial) {
   if (cats.fetching || !cats.hasMore || cats.page > 6) return;
   cats.fetching = true;
-  var pg = cats.page;
+  var pg = cats.page, ses = cats.session;
   serviceGet('/api/v1/subcategories?page=' + pg + '&limit=32', function (err, data) {
+    if (ses !== cats.session) return;     // stale response from a previous opening
     cats.fetching = false;
     if (!cats.open) return;
     var arr = (!err && data && data.data) ? data.data : [];
@@ -1622,7 +1654,7 @@ function completeVodProgress() {
   state.vod.completed = true;
   clearVodProgress(state.vod.key);
 }
-var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0 };
+var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0, session: 0 };
 var VOD_COLS = 4;
 function setVodStatus(msg) { document.getElementById('vods-status').textContent = msg || ''; }
 // Kick includes subscriber/gated recordings in the public list but with an
@@ -1671,7 +1703,7 @@ function openVods(slug) {
   if (!state.ready || !slug) return;
   if (browse.open) closeBrowse();
   if (settings.open) closeSettings();
-  vods.open = true; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true; vods.hidden = 0;
+  vods.open = true; vods.session++; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true; vods.hidden = 0;
   state.vodReturn = state.current || state.vodReturn;   // where to go back to afterwards
   showCursor();
   closeSidebar();
@@ -1681,7 +1713,9 @@ function openVods(slug) {
   document.getElementById('vods-title').textContent = 'Past videos - ' + name;
   document.getElementById('vods-grid').innerHTML = '';
   setVodStatus('Loading...');
+  var ses = vods.session;
   serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
+    if (ses !== vods.session) return;     // a newer opening owns the popup
     vods.loading = false;
     if (!vods.open || vods.slug !== slug) return;
     var allVods = Array.isArray(data) ? data : [];
@@ -1839,7 +1873,13 @@ function attachVod(source) {
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        // in-place recovery is not free: after a few consecutive failures fall
+        // through to reloadVod so its bounded retry/exit ceiling applies
+        if (state.vod) state.vod.mediaRecoveries = (state.vod.mediaRecoveries || 0) + 1;
+        if (state.vod && state.vod.mediaRecoveries > MAX_MEDIA_RETRY) reloadVod();
+        else { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
+      }
       else reloadVod();
     });
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
@@ -1901,7 +1941,12 @@ function showVodOverlay() {
   showVodBar();
   showVodPlay();
   clearTimeout(overlayTimer);
-  overlayTimer = setTimeout(function () { ov.className = 'hidden'; hideVodPlay(); if (!state.sidebarOpen) hideVodBar(); }, 4000);
+  overlayTimer = setTimeout(function () {
+    if (state.sidebarOpen) return;   // sidebar is up: the whole UI hides together when it closes
+    ov.className = 'hidden';
+    hideVodPlay();
+    hideVodBar();
+  }, 4000);
 }
 // The seek bar: a wavy line for the played part, a flat line for the rest, and a
 // vertical handle at the play head. Redrawn a couple of times a second while up.
@@ -2568,7 +2613,8 @@ function applyToggle(key) {
     toast('Live chat ' + (settings.chat ? 'on' : 'off'));
   } else if (key === 'lowlatency') {
     toast('Low latency ' + (settings.lowlatency ? 'on' : 'off'));
-    if (state.current) recoverPlayback(state.current);   // reload so the new buffering takes hold
+    // a deliberate settings reload must not eat into the fatal-failure budget
+    if (state.current) { PB.recoverCount = 0; recoverPlayback(state.current); }
   } else if (key === 'autoadvance') {
     toast('Auto-advance ' + (settings.autoadvance ? 'on' : 'off'));
   } else if (key === 'hideOffline') {
@@ -3085,6 +3131,7 @@ function openChatSocket(room) {
     var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.event === 'pusher:ping') { try { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); } catch (e) {} return; }
     if (m.event === 'pusher:connection_established') {
+      chat.retry = 0;               // connected for real: future drops start from a short delay again
       try { ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel: 'chatrooms.' + room + '.v2' } })); } catch (e) {}
       return;
     }
@@ -3890,6 +3937,7 @@ function browseCardFromEvent(e) {
   });
   video.addEventListener('playing', function () {
     PB.stallCount = 0; PB.netRetries = 0; PB.mediaRetries = 0; setBanner('');
+    if (state.vod) state.vod.mediaRecoveries = 0;   // recovered for real, forget the failures
     hideSpinner();
   });
   // Buffering spinner for both live and VOD.
@@ -3940,7 +3988,7 @@ document.addEventListener('visibilitychange', function () {
       else retryLastVodAfterReconnect();
     }
   });
-  if (PB.active && state.current) recoverPlayback(state.current); // back in the app, check the stream is fine
+  if (PB.active && state.current) { PB.recoverCount = 0; recoverPlayback(state.current); } // a deliberate check, not a failure
   pumpNotify();
 });
 window.addEventListener('pagehide', function () { saveVodProgress(true); });
@@ -3953,7 +4001,7 @@ window.addEventListener('online', function () {
       else retryLastVodAfterReconnect();
     }
   });
-  if (PB.active && state.current) recoverPlayback(state.current);
+  if (PB.active && state.current) { PB.recoverCount = 0; recoverPlayback(state.current); }
   else if (state.netDown) scheduleDownRetry();
 });
 window.addEventListener('offline', function () {

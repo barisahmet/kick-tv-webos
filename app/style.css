@@ -879,7 +879,9 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* OLED burn-in guard: just dims the whole panel, no moving element */
 #saver {
-  position: absolute; inset: 0; z-index: 70; display: none;
+  /* must out-stack every persistent dialog (modals 76/78, update notes 92),
+     or the burn-in guard leaves their bright static text sitting on top of it */
+  position: absolute; inset: 0; z-index: 95; display: none;
   background: rgba(0,0,0,0.94);
 }
 #saver.on { display: block; }
