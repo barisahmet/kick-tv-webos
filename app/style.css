@@ -244,13 +244,32 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    steals focus from the player or remote-driven panels. */
 #diagnostics {
   position: absolute; left: 30px; bottom: 30px; z-index: 46;
-  min-width: 430px; box-sizing: border-box; pointer-events: none;
-  background: rgba(9,12,13,0.9); border: 1px solid rgba(83,252,24,0.72);
-  border-radius: 10px; padding: 14px 18px;
-  color: #dfe3e4; font-family: Menlo, Consolas, monospace;
-  font-size: 18px; line-height: 1.42; white-space: pre-line;
-  text-shadow: 0 1px 2px #000;
+  width: 430px; box-sizing: border-box; pointer-events: auto; cursor: move;
+  background: rgba(11,14,15,0.94); border: 1px solid #2f3438;
+  border-radius: 14px; padding: 0 0 14px;
+  color: #dfe3e4; text-shadow: 0 1px 2px #000;
+  box-shadow: 0 10px 34px rgba(0,0,0,0.5);
 }
+#diag-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid #23282b; margin-bottom: 10px;
+}
+#diag-title { font-size: 20px; font-weight: 800; color: #fff; letter-spacing: 0.4px; }
+#diag-close { pointer-events: auto; cursor: pointer; color: #9a9a9d; font-size: 22px; padding: 0 6px; }
+#diag-close:hover { color: #fff; }
+#diag-lines {
+  padding: 0 16px 4px; font-family: Menlo, Consolas, monospace;
+  font-size: 17px; line-height: 1.5; white-space: pre-line;
+}
+.diag-graph { padding: 8px 16px 0; }
+.diag-glabel { font-size: 16px; color: #9a9a9d; margin-bottom: 5px; }
+.diag-glabel span { float: right; color: #53fc18; font-weight: 700; }
+.diag-graph svg {
+  width: 100%; height: 44px; display: block;
+  background: rgba(255,255,255,0.05); border-radius: 8px;
+}
+.diag-graph polyline { fill: none; stroke: #53fc18; stroke-width: 2; }
+#diag-buf-line { stroke: #1f8fff; }
 
 /* Idle screen, done up like an old CRT. */
 #idle {
@@ -1002,28 +1021,14 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   box-sizing: border-box; padding: 0 24px 30px 24px;
   display: none; flex-direction: column; justify-content: flex-end;
   pointer-events: none;
-  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
-  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 20%);
 }
 #chat.on { display: flex; }
-/* Chat overlay options (side / width / opacity / text size) set from Settings */
-#chat.side-left {
-  right: auto; left: 0;
-  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
-}
-#chat.cbg-off, #chat.side-left.cbg-off { background: none; }
-#chat.cbg-light {
-  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 42%, rgba(0,0,0,0.34) 100%);
-}
-#chat.side-left.cbg-light {
-  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.18) 42%, rgba(0,0,0,0.34) 100%);
-}
-#chat.cbg-dark {
-  background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
-}
-#chat.side-left.cbg-dark {
-  background: linear-gradient(to left, rgba(0,0,0,0) 0%, rgba(0,0,0,0.42) 42%, rgba(0,0,0,0.62) 100%);
-}
+/* Chat overlay options (side / width / opacity / text size) set from Settings.
+   Backgrounds are uniform — they cover the whole column with no fading. */
+#chat.side-left { right: auto; left: 0; }
+#chat.cbg-off   { background: none; }
+#chat.cbg-light { background: rgba(0,0,0,0.34); }
+#chat.cbg-dark  { background: rgba(0,0,0,0.62); }
 #chat.cwidth-narrow { width: 360px; }
 #chat.cwidth-medium { width: 452px; }
 #chat.cwidth-wide   { width: 580px; }

@@ -679,6 +679,9 @@ function attachStream(slug, url) {
         if (state.hls === hls) updateQualityButton();
       });
     }
+    if (Hls.Events.FRAG_LOADED) {
+      hls.on(Hls.Events.FRAG_LOADED, function (ev, d) { diagCountFrag(d); });
+    }
     try { hls.loadSource(url); hls.attachMedia(video); }
     catch (e) { recoverPlayback(slug); return; }
   } else {
@@ -2589,6 +2592,9 @@ function attachVod(source) {
         if (state.hls === hls) updateQualityButton();
       });
     }
+    if (Hls.Events.FRAG_LOADED) {
+      hls.on(Hls.Events.FRAG_LOADED, function (ev, d) { diagCountFrag(d); });
+    }
     try { hls.loadSource(source); hls.attachMedia(video); }
     catch (e) { reloadVod(); return; }
   } else {
@@ -2868,6 +2874,18 @@ function liveTarget(video, range) {
    hls.js state, so turning it on cannot change playback behavior. */
 var diagnosticsTimer = null;
 var diagnosticsSample = { at: 0, frames: 0, fps: 0 };
+// Actual bytes downloaded by the player (fed by FRAG_LOADED). The network
+// graph shows real usage — not hls.js's link-capacity estimate, which on a
+// fast line reads absurdly high and only ever climbs.
+var diagBytes = 0;
+var diagRate = { lastBytes: 0, at: 0, mbps: 0 };
+function diagCountFrag(d) {
+  try {
+    var st = (d && d.frag && d.frag.stats) || (d && d.stats) || null;
+    if (st && st.total) diagBytes += st.total;
+    else if (st && st.loaded) diagBytes += st.loaded;
+  } catch (e) {}
+}
 function diagnosticBufferAhead(video) {
   var t = video.currentTime || 0, ranges = video.buffered;
   if (!ranges) return 0;
@@ -2914,10 +2932,34 @@ function diagnosticChatStatus() {
   if (chat.ws && chat.ws.readyState === 0) return 'connecting';
   return 'retrying';
 }
+// Rolling one-minute history feeding the two sparkline graphs.
+var diagHistory = { net: [], buf: [] };
+function diagPushSample(arr, v) {
+  arr.push(v);
+  while (arr.length > 60) arr.shift();
+}
+function diagDrawSpark(lineId, arr, minMax) {
+  var max = minMax;
+  for (var i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+  var pts = [];
+  for (var j = 0; j < arr.length; j++) {
+    pts.push((j * (180 / 59)).toFixed(1) + ',' + (38 - (arr[j] / max) * 34).toFixed(1));
+  }
+  var el = document.getElementById(lineId);
+  if (el) el.setAttribute('points', pts.join(' '));
+  return max;                    // callers can place reference lines on this scale
+}
 function syncDiagnostics() {
   clearInterval(diagnosticsTimer);
   diagnosticsTimer = null;
   diagnosticsSample = { at: 0, frames: 0, fps: 0 };
+  diagHistory = { net: [], buf: [] };
+  diagBytes = 0;
+  diagRate = { lastBytes: 0, at: 0, mbps: 0 };
+  diagManualPos = false;      // toggling returns the window to its default spot
+  diagDrag = null;
+  var dEl = document.getElementById('diagnostics');
+  if (dEl) dEl.style.top = 'auto';
   if (!settings.diagnostics) {
     document.getElementById('diagnostics').className = 'hidden';
     return;
@@ -2925,7 +2967,10 @@ function syncDiagnostics() {
   drawDiagnostics();
   diagnosticsTimer = setInterval(drawDiagnostics, 1000);
 }
+var diagDrag = null;        // active drag: pointer offset into the panel
+var diagManualPos = false;  // the user parked the window somewhere — stop auto-placing
 function placeDiagnostics() {
+  if (diagManualPos) return;
   var el = document.getElementById('diagnostics');
   if (!el) return;
   var vodbar = document.getElementById('vodbar');
@@ -2976,8 +3021,6 @@ function drawDiagnostics() {
   }
   var bitrate = level && (level.maxBitrate || level.bitrate);
   if (bitrate) qualityText += ' · ' + (bitrate / 1000000).toFixed(1) + ' Mbps';
-  var bandwidth = NaN;
-  try { bandwidth = hls && hls.bandwidthEstimate; } catch (e) {}
   var liveDelay = NaN;
   if (state.current) {
     try { if (hls) liveDelay = hls.latency; } catch (e) {}
@@ -2998,8 +3041,6 @@ function drawDiagnostics() {
   var lines = [
     firstLine,
     resolution + ' · ' + qualityText,
-    'Network ' + (isFinite(bandwidth) && bandwidth > 0 ? (bandwidth / 1000000).toFixed(1) + ' Mbps' : '—') +
-      ' · Buffer ' + diagnosticBufferAhead(video).toFixed(1) + 's',
     'Frames ' + (frames.total || '—') + ' · Dropped ' + frames.dropped +
       (frames.total ? ' (' + droppedPct.toFixed(2) + '%)' : ''),
     'Recovery ' + PB.reconnects + ' · Net ' + PB.netRetries + ' · Media ' + PB.mediaRetries +
@@ -3007,7 +3048,26 @@ function drawDiagnostics() {
     'Service ' + (state.netDown ? 'offline' : 'online') +
       (PB.lastError ? ' · Last ' + String(PB.lastError).slice(0, 38) : '')
   ];
-  el.textContent = lines.join('\n');
+  document.getElementById('diag-lines').textContent = lines.join('\n');
+  // Feed the sparklines: measured download rate and seconds of buffered media.
+  var bufAhead = diagnosticBufferAhead(video);
+  var nowT = Date.now();
+  var mbpsTick = 0;
+  if (diagRate.at) {
+    var dt = (nowT - diagRate.at) / 1000;
+    var db = diagBytes - diagRate.lastBytes;
+    if (dt > 0 && db >= 0) mbpsTick = (db * 8) / dt / 1000000;
+  }
+  diagRate.at = nowT;
+  diagRate.lastBytes = diagBytes;
+  diagRate.mbps = diagRate.mbps ? (diagRate.mbps * 0.5 + mbpsTick * 0.5) : mbpsTick;  // light smoothing
+  var netMbps = diagRate.mbps;
+  diagPushSample(diagHistory.net, netMbps);
+  diagPushSample(diagHistory.buf, bufAhead);
+  diagDrawSpark('diag-net-line', diagHistory.net, 1);   // floors keep flat lines readable
+  diagDrawSpark('diag-buf-line', diagHistory.buf, 5);
+  document.getElementById('diag-net-now').textContent = netMbps ? netMbps.toFixed(1) + ' Mbps' : '—';
+  document.getElementById('diag-buf-now').textContent = bufAhead.toFixed(1) + 's';
   el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
   placeDiagnostics();
   el.className = '';
@@ -4393,6 +4453,7 @@ function browseCardFromEvent(e) {
   // Moving the pointer opens the sidebar, which then hides itself after a few idle seconds.
   var lastX = -1, lastY = -1;
   playerEl.addEventListener('mousemove', function (e) {
+    if (diagDrag) return;                 // dragging the diagnostics window, not browsing
     if (!state.ready || state.mode !== 'player') return;
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
     lastX = e.clientX; lastY = e.clientY;
@@ -4521,6 +4582,35 @@ function browseCardFromEvent(e) {
     document.getElementById('browse-tip').className = 'hidden';
   });
   document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
+  // The x on the diagnostics panel switches the overlay off.
+  document.getElementById('diag-close').addEventListener('click', function (e) {
+    e.stopPropagation();
+    settings.diagnostics = false;
+    saveSettings();
+    syncDiagnostics();
+    if (settings.open) renderSettings();
+    toast('Diagnostics off');
+  });
+  // The whole diagnostics panel is a drag handle: grab anywhere, park anywhere.
+  document.getElementById('diagnostics').addEventListener('mousedown', function (e) {
+    if (e.target.id === 'diag-close') return;
+    var r = this.getBoundingClientRect();
+    diagDrag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    diagManualPos = true;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!diagDrag) return;
+    var el = document.getElementById('diagnostics');
+    var w = el.offsetWidth, h = el.offsetHeight;
+    var left = Math.max(0, Math.min(1920 - w, e.clientX - diagDrag.dx));
+    var top = Math.max(0, Math.min(1080 - h, e.clientY - diagDrag.dy));
+    el.style.left = Math.round(left) + 'px';
+    el.style.top = Math.round(top) + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  });
+  document.addEventListener('mouseup', function () { diagDrag = null; });
   // Pinned category chips above the grid.
   document.getElementById('browse-pinnedcats').addEventListener('click', function (e) {
     var t = e.target;

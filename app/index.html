@@ -28,7 +28,24 @@
     <div id="chat"></div>
     <div id="notify"></div>
     <div id="pbstatus" class="hidden"></div>
-    <div id="diagnostics" class="hidden"></div>
+    <div id="diagnostics" class="hidden">
+      <div id="diag-head">
+        <span id="diag-title">Diagnostics</span>
+        <span id="diag-close" title="Close">&#10005;</span>
+      </div>
+      <div id="diag-lines"></div>
+      <div class="diag-graph">
+        <div class="diag-glabel">Throughput<span id="diag-net-now"></span></div>
+        <svg viewBox="0 0 180 40" preserveAspectRatio="none">
+          <line id="diag-net-ref" x1="0" x2="180" y1="20" y2="20"/>
+          <polyline id="diag-net-line" points=""/>
+        </svg>
+      </div>
+      <div class="diag-graph">
+        <div class="diag-glabel">Buffer<span id="diag-buf-now"></span></div>
+        <svg viewBox="0 0 180 40" preserveAspectRatio="none"><polyline id="diag-buf-line" points=""/></svg>
+      </div>
+    </div>
     <div id="overlay" class="hidden">
       <div id="ov-avatar"></div>
       <span id="ov-name"></span>
