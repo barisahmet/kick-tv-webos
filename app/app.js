@@ -3519,8 +3519,7 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
-    else if (k === KEY.RIGHT) setPlayerToolFocus(0);      // move into Quality, then Settings
-    else if (k === KEY.LEFT) closeSidebar();
+    else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar();   // either side tucks the list away
     else if (k === KEY.BACK) closeSidebarWithGrace();
     return;
   }
@@ -3590,7 +3589,7 @@ function browseCardFromEvent(e) {
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
     lastX = e.clientX; lastY = e.clientY;
     showCursor();      // a real move brings the pointer back
-    if (state.vod) { showVodOverlay(); return; }   // in a VOD, reveal the seek bar instead
+    if (state.vod) { showVodOverlay(); }   // in a VOD, reveal the seek bar too
     nudgeSidebar();
   });
   document.getElementById('side-refresh').addEventListener('click', function (e) {
