@@ -481,29 +481,75 @@ function showNothing() {
   }
   if (m === 'empty' && state.ready) openSidebar();
 }
-// The mini home screen shown on the idle screen: a Continue Watching card for
-// the saved last VOD (with its resume point) and a row of live favorites.
+// In-progress recordings from the progress store, newest first: everything
+// resumable (>=10s in, not watched), each row knowing its channel and video id.
+function listResumableVods(max) {
+  var items = loadVodProgress().items, out = [];
+  for (var k in items) {
+    if (!Object.prototype.hasOwnProperty.call(items, k)) continue;
+    var e = items[k];
+    if (!e || e.watched || !(e.position >= 10)) continue;
+    var ci = k.indexOf(':');
+    if (ci <= 0) continue;
+    out.push({ key: k, slug: k.slice(0, ci), id: k.slice(ci + 1), entry: e });
+  }
+  out.sort(function (a, b) { return (b.entry.updated || 0) - (a.entry.updated || 0); });
+  return out.slice(0, max || 4);
+}
+// Resolve a saved recording against a fresh videos list (URLs expire) and play it.
+function openSavedVod(slug, id) {
+  if (!state.ready || state.current || state.vod) return;
+  document.getElementById('idle-load').className = '';
+  serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
+    document.getElementById('idle-load').className = 'hidden';
+    if (state.current || state.vod) return;        // something else started meanwhile
+    var list = (Array.isArray(data) ? data : []).filter(playableVod);
+    for (var i = 0; i < list.length; i++) {
+      if (vodStableId(list[i]) === String(id)) {
+        vods.slug = slug; vods.list = list; vods.gridIdx = i;
+        state.vodReturn = state.current || state.vodReturn;
+        playVod(list[i], list.slice(), i, slug);
+        return;
+      }
+    }
+    toast(err ? 'Could not load that video' : 'That video is no longer available');
+    if (!err) { clearVodProgress(slug + ':' + String(id)); renderHome(); }
+  });
+}
+// The mini home screen shown on the idle screen: a row of resumable recordings
+// (Continue Watching) and a row of live favorites.
 function renderHome() {
-  var marker = loadLastVod();
+  var resumables = listResumableVods(4);
   var cwrap = document.getElementById('home-continue');
-  if (marker) {
-    var entry = loadVodProgress().items[marker.slug + ':' + marker.id];
-    var card = document.getElementById('home-resume');
-    card.innerHTML = '';
-    var nm = document.createElement('div'); nm.className = 'homename';
-    nm.textContent = marker.name || marker.slug;
-    card.appendChild(nm);
-    var sub = document.createElement('div'); sub.className = 'homesub';
-    sub.textContent = (entry && entry.position >= 10)
-      ? 'Resume at ' + fmtClock(entry.position) + (entry.duration ? ' / ' + fmtClock(entry.duration) : '')
-      : 'Past video';
-    card.appendChild(sub);
-    if (entry && entry.position >= 10 && entry.duration > 0) {
-      var tr = document.createElement('div'); tr.className = 'homeprog';
-      var fl = document.createElement('div'); fl.className = 'homeprogfill';
-      fl.style.width = Math.round(Math.min(1, entry.position / entry.duration) * 100) + '%';
-      tr.appendChild(fl);
-      card.appendChild(tr);
+  var vrow = document.getElementById('home-resume-row');
+  vrow.innerHTML = '';
+  if (resumables.length) {
+    for (var ri = 0; ri < resumables.length; ri++) {
+      var r = resumables[ri];
+      var card = document.createElement('div');
+      card.className = 'homevod';
+      card.setAttribute('data-slug', r.slug);
+      card.setAttribute('data-vid', r.id);
+      var nm = document.createElement('div'); nm.className = 'homename';
+      nm.textContent = r.entry.name || (state.channels[r.slug] && state.channels[r.slug].name) || r.slug;
+      card.appendChild(nm);
+      if (r.entry.title) {
+        var ti = document.createElement('div'); ti.className = 'homesub';
+        ti.textContent = r.entry.title;
+        card.appendChild(ti);
+      }
+      var sub = document.createElement('div'); sub.className = 'homesub';
+      sub.textContent = fmtClock(r.entry.position) +
+        (r.entry.duration ? ' / ' + fmtClock(r.entry.duration) : '');
+      card.appendChild(sub);
+      if (r.entry.duration > 0) {
+        var tr = document.createElement('div'); tr.className = 'homeprog';
+        var fl = document.createElement('div'); fl.className = 'homeprogfill';
+        fl.style.width = Math.round(Math.min(1, r.entry.position / r.entry.duration) * 100) + '%';
+        tr.appendChild(fl);
+        card.appendChild(tr);
+      }
+      vrow.appendChild(card);
     }
     cwrap.className = '';
   } else cwrap.className = 'hidden';
@@ -711,6 +757,9 @@ function advanceOrIdle(slug) {
   }
   toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' ended');
   returnToIdle();
+  // Leave the viewer something actionable: the list of who else is live. This
+  // popup is persistent (no auto-hide) and refreshes with the 30s poll.
+  if (state.ready && liveList().length) openChpopPersistent();
 }
 // A live stream that fires 'ended' has almost certainly stopped. Verify once and
 // move on if it is offline; give a single retry if the API still lags behind.
@@ -795,6 +844,7 @@ function startPlayerPoll() {
   state.playerTimer = setInterval(function () {
     fetchFavorites(function () {
       if (state.sidebarOpen) renderSidebar();
+      if (chpop.open && chpop.persistent) refreshChpopList();   // keep the stream-end list fresh
       if (!state.current) { if (state.ready) showNothing(); return; }
       var cur = state.channels[state.current];
       if (cur) {
@@ -923,8 +973,7 @@ function closeSidebar() {
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
-  clearTimeout(sidePreviewTimer);
-  hideSidePreview();
+  sidePreviewCard.cancel();
   hideVodBar();                                       // VOD seek bar hides with the sidebar
   hideVodPlay();                                      // ...and so does the play/pause button
   updateGear();
@@ -980,47 +1029,11 @@ function applySideFocus() {
   }
   scheduleSidePreview();
 }
-/* Live thumbnail preview: dwell on a live channel row for a moment and a card
-   with the stream's current thumbnail appears beside the sidebar. */
-var sidePreviewTimer = null;
+/* Live thumbnail previews. A card shows the stream's current frame beside the
+   focused list row — used by the sidebar and the quick-switch popup. The window
+   appears instantly with a loading spinner; the frame swaps in when loaded
+   (usually at once, thanks to prefetching). */
 var previewCache = {};   // slug -> { t, url }; v1 thumbnails live on images.kick.com, which loads directly
-function previewFocusStillOn(slug) {
-  if (!state.sidebarOpen) return false;
-  var item = state.sideItems[state.sideFocus];
-  return !!(item && item.slug === slug);
-}
-var sidePreviewSlug = null;   // the row the card is showing (or being prepared) for
-function scheduleSidePreview() {
-  var item = state.sidebarOpen ? state.sideItems[state.sideFocus] : null;
-  var slug = (item && (item.type === 'chan' || item.type === 'temp')) ? item.slug : null;
-  var c = slug ? state.channels[slug] : null;
-  var want = !!(slug && c && c.live && slug !== state.current);
-  // Re-renders (the 30s poll, pin toggles...) re-apply focus without moving it.
-  // If the preview already belongs to this row, leave it alone — hiding and
-  // re-dwelling here is what made the card flash.
-  if (want && slug === sidePreviewSlug) return;
-  clearTimeout(sidePreviewTimer);
-  if (!want) { hideSidePreview(); return; }
-  // Show the window immediately with a loading spinner; the frame swaps in
-  // the moment it is ready (usually instantly, thanks to the prefetch).
-  sidePreviewSlug = slug;
-  positionSidePreview();
-  document.getElementById('sidepreview').className = 'loading';
-  var cached = previewCache[slug];
-  if (cached && Date.now() - cached.t < 60000) { preloadSidePreview(slug, cached.url); return; }
-  sidePreviewTimer = setTimeout(function () { showSidePreview(slug); }, 150);
-}
-function positionSidePreview() {
-  var el = document.getElementById('sidepreview');
-  var list = document.getElementById('fav-list');
-  var row = list.children[state.sideFocus];
-  var top = 200;
-  if (row) {
-    var r = row.getBoundingClientRect();
-    top = Math.max(90, Math.min(1080 - 280, r.top - 40));
-  }
-  el.style.top = Math.round(top) + 'px';
-}
 // The v2 payload only carries a thumbnail host the webview cannot load, so ask
 // v1 for the images.kick.com variants and prefer the 480-wide one — the card is
 // 426px and the smaller file arrives much faster.
@@ -1042,8 +1055,8 @@ function fetchPreviewUrl(slug, done) {
     if (done) done();
   });
 }
-// Resolve and warm thumbnails for the live rows as soon as the sidebar opens,
-// one at a time (the Luna bus dislikes bursts), so dwelling feels instant.
+// Resolve and warm thumbnails for the live rows as soon as a channel list
+// opens, one at a time (the Luna bus dislikes bursts), so browsing feels instant.
 function prefetchSidePreviews() {
   var queue = [];
   for (var i = 0; i < state.order.length && queue.length < 8; i++) {
@@ -1054,38 +1067,83 @@ function prefetchSidePreviews() {
     }
   }
   (function next() {
-    if (!queue.length || !state.sidebarOpen) return;
+    if (!queue.length || (!state.sidebarOpen && !chpop.open)) return;
     fetchPreviewUrl(queue.shift(), next);
   })();
 }
-function showSidePreview(slug) {
-  if (!previewFocusStillOn(slug)) return;
-  var cached = previewCache[slug];
-  if (cached && Date.now() - cached.t < 60000) { preloadSidePreview(slug, cached.url); return; }
-  fetchPreviewUrl(slug, function () {
-    var c2 = previewCache[slug];
-    if (c2) preloadSidePreview(slug, c2.url);
-    else if (sidePreviewSlug === slug) hideSidePreview();   // no thumbnail: no stuck spinner
+// One controller per card element; each follows its own list's focus. Repeat
+// updates for the same row are no-ops (re-renders must not flash the card).
+function makePreviewCard(elId, currentSlugFn, positionFn) {
+  var slugShowing = null, timer = null;
+  function el() { return document.getElementById(elId); }
+  function hide() {
+    slugShowing = null;
+    var e = el();
+    if (e) e.className = 'hidden';
+  }
+  function setTitle(e, slug) {
+    var tEl = e.querySelector('.prevtitle');
+    if (!tEl) return;
+    var c = state.channels[slug];
+    var title = (c && c.title) || '';
+    tEl.textContent = title;
+    tEl.style.display = title ? '' : 'none';
+  }
+  function present(slug, url) {
+    if (slugShowing !== slug || currentSlugFn() !== slug) return;   // focus moved meanwhile
+    var e = el();
+    e.style.backgroundImage = 'url(' + url + ')';
+    setTitle(e, slug);
+    positionFn(e);
+    e.className = '';
+  }
+  function preload(slug, url) {
+    var img = new Image();   // swap in only after a real load — never a black card
+    img.onload = function () { present(slug, url); };
+    img.onerror = function () { if (slugShowing === slug) hide(); };
+    img.src = url;
+  }
+  function update() {
+    var slug = currentSlugFn();
+    var c = slug ? state.channels[slug] : null;
+    var want = !!(slug && c && c.live && slug !== state.current);
+    if (want && slug === slugShowing) return;
+    clearTimeout(timer);
+    if (!want) { hide(); return; }
+    slugShowing = slug;
+    var e = el();
+    positionFn(e);
+    setTitle(e, slug);      // the title is known immediately, even before the frame
+    e.className = 'loading';
+    var cached = previewCache[slug];
+    if (cached && Date.now() - cached.t < 60000) { preload(slug, cached.url); return; }
+    timer = setTimeout(function () {
+      fetchPreviewUrl(slug, function () {
+        var c2 = previewCache[slug];
+        if (c2) preload(slug, c2.url);
+        else if (slugShowing === slug) hide();   // no thumbnail: no stuck spinner
+      });
+    }, 150);
+  }
+  return { update: update, cancel: function () { clearTimeout(timer); hide(); } };
+}
+var sidePreviewCard = makePreviewCard('sidepreview',
+  function () {
+    if (!state.sidebarOpen) return null;
+    var item = state.sideItems[state.sideFocus];
+    return (item && (item.type === 'chan' || item.type === 'temp')) ? item.slug : null;
+  },
+  function (e) {
+    var list = document.getElementById('fav-list');
+    var row = list.children[state.sideFocus];
+    var top = 200;
+    if (row) {
+      var r = row.getBoundingClientRect();
+      top = Math.max(90, Math.min(1080 - 280, r.top - 40));
+    }
+    e.style.top = Math.round(top) + 'px';
   });
-}
-function preloadSidePreview(slug, url) {
-  var img = new Image();   // swap in only after a real load — never a black card
-  img.onload = function () { presentSidePreview(slug, url); };
-  img.onerror = function () { if (sidePreviewSlug === slug) hideSidePreview(); };
-  img.src = url;
-}
-function presentSidePreview(slug, url) {
-  if (!previewFocusStillOn(slug) || sidePreviewSlug !== slug) return;   // focus moved during the fetch
-  var el = document.getElementById('sidepreview');
-  el.style.backgroundImage = 'url(' + url + ')';
-  positionSidePreview();
-  el.className = '';
-}
-function hideSidePreview() {
-  sidePreviewSlug = null;
-  var el = document.getElementById('sidepreview');
-  if (el) el.className = 'hidden';
-}
+function scheduleSidePreview() { sidePreviewCard.update(); }
 function renderSidebar(focusKey) {
   var prevKey = (typeof focusKey !== 'undefined' && focusKey !== null)
     ? focusKey : focusKeyOf(state.sideItems[state.sideFocus]);
@@ -1173,7 +1231,9 @@ function renderSidebar(focusKey) {
     mid.className = 'favmid';
     mid.innerHTML = '<div class="favname"></div><div class="favgame"></div>';
     mid.children[0].textContent = c.name;
-    mid.children[1].textContent = c.live ? (c.category || 'Live') : 'Offline';
+    mid.children[1].textContent = c.live
+      ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
+      : 'Offline';
     row.appendChild(mid);
 
     var info = document.createElement('div');
@@ -1455,7 +1515,7 @@ var BROWSE_COLS = 4;
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                category: null, categoryName: '', session: 0,
-               sort: 'viewers' };
+               sort: 'viewers', discover: false };
 var BROWSE_SORTS = [
   { key: 'viewers', label: 'Top' },
   { key: 'newest',  label: 'New' },
@@ -1477,6 +1537,38 @@ function cycleBrowseSort() {
   renderBrowseSort();
   renderBrowse();
   toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
+}
+/* "Discover only": hide channels you already follow — browsing is for finding
+   new ones. The preference persists across opens. */
+function loadBrowseDiscoverPref() {
+  try { return localStorage.getItem('kicktv.browsediscover') === '1'; } catch (e) { return false; }
+}
+function renderBrowseDiscover() {
+  var el = document.getElementById('browse-discover');
+  if (el) el.className = browse.discover ? 'on' : '';
+}
+function toggleBrowseDiscover() {
+  browse.discover = !browse.discover;
+  try { localStorage.setItem('kicktv.browsediscover', browse.discover ? '1' : '0'); } catch (e) {}
+  renderBrowseDiscover();
+  browse.gridIdx = 0;
+  renderBrowse();
+  toast(browse.discover ? 'Hiding channels you follow' : 'Showing all channels');
+}
+// Skeleton cards shimmer in the grid while the first page loads.
+function renderBrowseSkeletons() {
+  var grid = document.getElementById('browse-grid');
+  grid.innerHTML = '';
+  for (var i = 0; i < 8; i++) {
+    var sk = document.createElement('div');
+    sk.className = 'bcard bskel';
+    var th = document.createElement('div'); th.className = 'bthumb';
+    sk.appendChild(th);
+    var meta = document.createElement('div'); meta.className = 'bmeta';
+    meta.innerHTML = '<div class="skline w1"></div><div class="skline w2"></div>';
+    sk.appendChild(meta);
+    grid.appendChild(sk);
+  }
 }
 
 // Selected languages persist as a JSON array; an empty selection means All.
@@ -1524,9 +1616,11 @@ function openBrowse(categorySlug, categoryName) {
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   browse.sort = 'viewers';
+  browse.discover = loadBrowseDiscoverPref();
   renderBrowseSort();
+  renderBrowseDiscover();
   renderPinnedCatChips();
-  document.getElementById('browse-grid').innerHTML = '';
+  renderBrowseSkeletons();
   updateBrowseTitle();
   loadBrowseMore(true);
 }
@@ -1539,14 +1633,46 @@ function updateBrowseTitle() {
 function closeBrowse() {
   browse.open = false;
   document.getElementById('browse').className = 'hidden';
+  document.getElementById('browse-tip').className = 'hidden';
   resumePlaybackAfterBrowse();
 }
 // Fetch one page of the live directory and append it. `initial` chains a few
 // pages on open to fill the grid; scrolling to the bottom pulls more.
+// A card at the end of the grid with an indeterminate bar, shown while more
+// pages are on their way. Re-renders wipe it; each fetch re-appends it.
+function setBrowseLoadingCard(on) {
+  var grid = document.getElementById('browse-grid');
+  var card = document.getElementById('browse-loadcard');
+  if (on) {
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'browse-loadcard';
+      card.className = 'bcard bloadcard';
+      card.innerHTML = '<div class="loadtrack"><div class="loadfill"></div></div>';
+    }
+    grid.appendChild(card);          // (re)attach at the end
+  } else if (card && card.parentNode) {
+    card.parentNode.removeChild(card);
+    if (browse.gridIdx >= browse.streams.length) {   // focus was parked on the card
+      browse.gridIdx = Math.max(0, browse.streams.length - 1);
+      applyBrowseFocus();
+    }
+  }
+}
+// The loading card counts as one focusable (but inert) cell at the end, so
+// Down can reach it and the grid scrolls to reveal it.
+function browseFocusCount() {
+  var card = document.getElementById('browse-loadcard');
+  return browse.streams.length + (card && card.parentNode ? 1 : 0);
+}
+// No page cap: the directory's own end (an empty page) is the terminator, the
+// sparse auto-chain stops at a healthy grid, and closing Browse cancels via
+// the session token.
 function loadBrowseMore(initial) {
-  if (browse.fetching || !browse.hasMore || browse.page > 8) return;
+  if (browse.fetching || !browse.hasMore) return;
   browse.fetching = true;
   if (!browse.raw.length) setBrowseStatus('Loading...');
+  else setBrowseLoadingCard(true);   // subsequent pages: progress card in the grid
   var pg = browse.page, ses = browse.session;
   serviceGet('/stream/livestreams/en?page=' + pg + '&limit=50&sort=desc', function (err, data) {
     if (ses !== browse.session) return;   // response belongs to a closed/reopened session
@@ -1555,14 +1681,20 @@ function loadBrowseMore(initial) {
     var arr = (!err && data && data.data) ? data.data : [];
     if (!arr.length) {
       browse.hasMore = false;
+      setBrowseLoadingCard(false);
       if (!browse.raw.length) setBrowseStatus('Could not reach Kick'); else renderBrowse();
       return;
     }
     browse.raw = browse.raw.concat(arr);
     browse.page = pg + 1;
     renderBrowse();
-    // chain more pages while filling; go deeper when a category filter is active
-    if (initial && browse.page <= (browse.category ? 8 : 3)) loadBrowseMore(true);
+    // Chain more pages while filling. Filters (category, Discover, languages)
+    // thin each page out, so keep pulling until the grid has a healthy count —
+    // no more one-page-per-scroll crawling to find anything.
+    var filtersActive = !!(browse.category || browse.discover || browse.langs.length);
+    var sparse = filtersActive && browse.streams.length < 24;
+    if ((initial && browse.page <= (browse.category ? 8 : 3)) || sparse) loadBrowseMore(true);
+    if (!browse.fetching) setBrowseLoadingCard(false);   // no follow-up came: done
   });
 }
 function renderBrowseLangs() {
@@ -1579,9 +1711,17 @@ function renderBrowseLangs() {
 function renderBrowse() {
   var list = (browse.raw || []).slice();
   if (browse.langs.length) list = list.filter(function (s) { return browse.langs.indexOf(s.language) !== -1; });
+  if (browse.discover) {
+    var favsNow = getFavorites();
+    list = list.filter(function (s) { return favsNow.indexOf((s.channel || {}).slug) === -1; });
+  }
   if (browse.category) list = list.filter(function (s) {
     return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
   });
+  if (browse.discover) {
+    var favsNow = getFavorites();
+    list = list.filter(function (s) { return favsNow.indexOf((s.channel || {}).slug) === -1; });
+  }
   if (browse.sort === 'small') {
     list.sort(function (a, b) { return (a.viewer_count || 0) - (b.viewer_count || 0); });
   } else if (browse.sort === 'newest') {
@@ -1639,6 +1779,7 @@ function renderBrowse() {
   } else setBrowseStatus('');
 
   if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
+  renderPinnedCatChips();          // keep the per-category live counts current
   applyBrowseFocus();
 }
 function applyBrowseFocus() {
@@ -1651,7 +1792,12 @@ function applyBrowseFocus() {
   }
   var grid = document.getElementById('browse-grid');
   for (var j = 0; j < grid.children.length; j++) {
-    grid.children[j].className = 'bcard' + (browse.zone === 'grid' && j === browse.gridIdx ? ' focused' : '');
+    var focusedCls = (browse.zone === 'grid' && j === browse.gridIdx) ? ' focused' : '';
+    if (grid.children[j].id === 'browse-loadcard') {
+      grid.children[j].className = 'bcard bloadcard' + focusedCls;   // focusable, not activatable
+    } else {
+      grid.children[j].className = 'bcard' + focusedCls;
+    }
   }
   if (browse.zone === 'grid' && grid.children[browse.gridIdx]) {
     var el = grid.children[browse.gridIdx];
@@ -1660,6 +1806,34 @@ function applyBrowseFocus() {
     else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
       grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
   }
+  scheduleBrowsePeek();
+}
+// After dwelling on a browse card, refresh its thumbnail with the channel's
+// current frame (the directory image can be minutes old).
+var browsePeekTimer = null;
+function scheduleBrowsePeek() {
+  clearTimeout(browsePeekTimer);
+  if (!browse.open || browse.zone !== 'grid') return;
+  var idx = browse.gridIdx;
+  var s = browse.streams[idx];
+  var slug = s && s.channel && s.channel.slug;
+  if (!slug) return;
+  browsePeekTimer = setTimeout(function () {
+    if (!browse.open || browse.gridIdx !== idx) return;
+    function apply(url) {
+      if (!browse.open || browse.gridIdx !== idx) return;
+      var grid = document.getElementById('browse-grid');
+      var card = grid.children[idx];
+      var th = card && card.querySelector('.bthumb');
+      if (th) th.style.backgroundImage = 'url(' + url + ')';
+    }
+    var cached = previewCache[slug];
+    if (cached && Date.now() - cached.t < 60000) { apply(cached.url); return; }
+    fetchPreviewUrl(slug, function () {
+      var c2 = previewCache[slug];
+      if (c2) apply(c2.url);
+    });
+  }, 800);
 }
 // Toggle a language chip in or out of the selection. The All chip (index 0)
 // clears the selection. Multiple languages can be active at once.
@@ -1684,7 +1858,7 @@ function browseMove(dx, dy) {
     }
     return;
   }
-  var count = browse.streams.length;
+  var count = browseFocusCount();
   if (dy === -1 && browse.gridIdx < BROWSE_COLS) { browse.zone = 'lang'; applyBrowseFocus(); return; }
   if (!count) return;
   var idx = browse.gridIdx;
@@ -1723,7 +1897,11 @@ function browseAddFavorite(slug) {
    live grid to one. Kick has no per-category live-streams endpoint, so the filter
    is applied over the streams already pulled into Browse: great for popular
    categories, thinner for niche ones. Opened from the Browse header. */
-var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false, session: 0 };
+var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false, session: 0,
+             query: '', results: null };
+// The grid shows either the paginated list or, while searching, the API's
+// category search results (identical item shape).
+function displayedCats() { return cats.results || cats.list; }
 var CATS_COLS = 4;
 function setCatsStatus(msg) { document.getElementById('cats-status').textContent = msg || ''; }
 function catBanner(c) {
@@ -1734,18 +1912,34 @@ function catBanner(c) {
 function openCats() {
   if (!browse.open) return;
   cats.open = true; cats.session++; cats.gridIdx = 0; cats.list = []; cats.page = 1; cats.hasMore = true; cats.fetching = false;
+  cats.query = ''; cats.results = null;
+  document.getElementById('cats-search').value = '';
   showCursor();
   document.getElementById('cats').className = '';
-  document.getElementById('cats-grid').innerHTML = '';
+  renderCatsSkeletons();
   setCatsStatus('Loading...');
   loadCatsMore(true);
 }
 function closeCats() {
   cats.open = false;
+  try { document.getElementById('cats-search').blur(); } catch (e) {}
   document.getElementById('cats').className = 'hidden';
 }
+// Skeleton tiles shimmer while the first page loads.
+function renderCatsSkeletons() {
+  var grid = document.getElementById('cats-grid');
+  grid.innerHTML = '';
+  for (var i = 0; i < 8; i++) {
+    var sk = document.createElement('div');
+    sk.className = 'ccard cskel';
+    var b = document.createElement('div'); b.className = 'cbanner';
+    sk.appendChild(b);
+    grid.appendChild(sk);
+  }
+}
+// No page cap here either: the list's own end is the terminator.
 function loadCatsMore(initial) {
-  if (cats.fetching || !cats.hasMore || cats.page > 6) return;
+  if (cats.fetching || !cats.hasMore) return;
   cats.fetching = true;
   var pg = cats.page, ses = cats.session;
   serviceGet('/api/v1/subcategories?page=' + pg + '&limit=32', function (err, data) {
@@ -1753,12 +1947,29 @@ function loadCatsMore(initial) {
     cats.fetching = false;
     if (!cats.open) return;
     var arr = (!err && data && data.data) ? data.data : [];
-    if (!arr.length) { cats.hasMore = false; if (!cats.list.length) setCatsStatus('Could not load categories'); return; }
+    if (!arr.length) { cats.hasMore = false; if (!cats.list.length && !cats.results) setCatsStatus('Could not load categories'); return; }
     cats.list = cats.list.concat(arr);
     cats.page = pg + 1;
-    renderCats();
-    setCatsStatus('');
+    if (!cats.results) {                 // do not repaint over active search results
+      renderCats();
+      setCatsStatus('');
+    }
     if (initial && cats.page <= 2) loadCatsMore(true);
+  });
+}
+// Search across all of Kick's categories (the paginated list only holds what
+// has been scrolled in so far).
+var catsSearchTimer = null;
+function runCatsSearch(q) {
+  var ses = cats.session;
+  serviceGet('/api/search?searched_word=' + encodeURIComponent(q), function (err, data) {
+    if (ses !== cats.session || !cats.open || cats.query !== q) return;   // superseded
+    var arr = (!err && data && Object.prototype.toString.call(data.categories) === '[object Array]')
+      ? data.categories : [];
+    cats.results = arr;
+    cats.gridIdx = 0;
+    renderCats();
+    setCatsStatus(arr.length ? '' : 'No categories match');
   });
 }
 function renderCats() {
@@ -1769,7 +1980,7 @@ function renderCats() {
   allTile.className = 'ccard'; allTile.setAttribute('data-idx', '-1');
   allTile.innerHTML = '<div class="cbanner"></div><div class="cname">All categories</div>';
   grid.appendChild(allTile);
-  cats.list.forEach(function (c, i) {
+  displayedCats().forEach(function (c, i) {
     var card = document.createElement('div');
     card.className = 'ccard';
     card.setAttribute('data-idx', i);
@@ -1822,11 +2033,11 @@ function catsMove(dx, dy) {
   else if (dy === -1 && idx - CATS_COLS >= 0) idx -= CATS_COLS;
   cats.gridIdx = idx;
   applyCatsFocus();
-  if (cats.gridIdx >= (cats.list.length + 1) - 2 * CATS_COLS) loadCatsMore(false);
+  if (!cats.results && cats.gridIdx >= (cats.list.length + 1) - 2 * CATS_COLS) loadCatsMore(false);
 }
 function catsActivate() {
   if (cats.gridIdx === 0) { selectCategory(null, ''); return; }   // the All tile
-  var c = cats.list[cats.gridIdx - 1];
+  var c = displayedCats()[cats.gridIdx - 1];
   if (c) selectCategory(c.slug, c.name || c.slug);
 }
 function selectCategory(slug, name) {
@@ -1877,6 +2088,19 @@ function renderPinnedCatChips() {
   }
   box.className = '';
   if (panel) panel.className = 'haspins';   // the grid gives up a row of height
+  // Live streams per category, counted under the SAME language and Discover
+  // filters the grid uses — the number a chip shows is the number of cards
+  // clicking it will yield. Re-rendered on every filter change.
+  var counts = {};
+  var pool = browse.raw || [];
+  var favsNow = browse.discover ? getFavorites() : null;
+  for (var ri = 0; ri < pool.length; ri++) {
+    var s = pool[ri];
+    if (browse.langs.length && browse.langs.indexOf(s.language) === -1) continue;
+    if (favsNow && favsNow.indexOf((s.channel || {}).slug) !== -1) continue;
+    var rc = s.categories && s.categories[0];
+    if (rc && rc.slug) counts[rc.slug] = (counts[rc.slug] || 0) + 1;
+  }
   var all = document.createElement('span');
   all.className = 'pcat' + (browse.category ? '' : ' sel');
   all.textContent = 'All';
@@ -1885,9 +2109,15 @@ function renderPinnedCatChips() {
   for (var i = 0; i < l.length; i++) {
     var chip = document.createElement('span');
     chip.className = 'pcat' + (browse.category === l[i].slug ? ' sel' : '');
-    chip.textContent = l[i].name;
     chip.setAttribute('data-cslug', l[i].slug);
     chip.setAttribute('data-cname', l[i].name);
+    chip.appendChild(document.createTextNode(l[i].name + (counts[l[i].slug] ? ' · ' + counts[l[i].slug] : '')));
+    var x = document.createElement('span');   // quick unpin without opening Categories
+    x.className = 'pcatx';
+    x.setAttribute('data-x', '1');
+    x.setAttribute('title', 'Unpin');
+    x.textContent = '✕';
+    chip.appendChild(x);
     box.appendChild(chip);
   }
 }
@@ -2014,7 +2244,9 @@ function saveVodProgress(force) {
     data.items[state.vod.key] = {
       position: Math.floor(pos),
       duration: isFinite(dur) && dur > 0 ? Math.floor(dur) : 0,
-      updated: now
+      updated: now,
+      name: state.vod.name,        // lets the home screen label resumable videos
+      title: state.vod.title
     };
     if (watched) data.items[state.vod.key].watched = true;
   }
@@ -2064,6 +2296,41 @@ function playableVod(v) {
   v.source = source;
   return true;
 }
+// Watched state and progress fraction for a recording, from the progress store.
+function vodWatchedInfo(slug, v, items) {
+  var entry = items[vodProgressKey(slug, v)];
+  var pdur = entry ? (entry.duration || (v.duration || 0) / 1000) : 0;
+  var ppos = entry ? parseFloat(entry.position) : 0;
+  var frac = (pdur > 0 && isFinite(ppos) && ppos > 0) ? Math.min(1, ppos / pdur) : 0;
+  var watched = !!(entry && entry.watched) || frac >= 0.9;
+  return { watched: watched, frac: watched ? 1 : frac };
+}
+function loadVodHideWatchedPref() {
+  try { return localStorage.getItem('kicktv.vodhidewatched') === '1'; } catch (e) { return false; }
+}
+function applyVodFilter() {
+  if (!vods.hideWatched) { vods.list = vods.listAll.slice(); return; }
+  var items = loadVodProgress().items;
+  vods.list = [];
+  for (var i = 0; i < vods.listAll.length; i++) {
+    if (!vodWatchedInfo(vods.slug, vods.listAll[i], items).watched) vods.list.push(vods.listAll[i]);
+  }
+}
+function renderVodFilterChip() {
+  var el = document.getElementById('vods-filter');
+  if (el) el.className = vods.hideWatched ? 'on' : '';
+}
+function toggleVodHideWatched() {
+  vods.hideWatched = !vods.hideWatched;
+  try { localStorage.setItem('kicktv.vodhidewatched', vods.hideWatched ? '1' : '0'); } catch (e) {}
+  applyVodFilter();
+  vods.gridIdx = 0;
+  renderVods();
+  renderVodFilterChip();
+  setVodStatus(vods.list.length ? ''
+    : (vods.listAll.length ? 'All watched — Green shows them' : 'No past videos'));
+  toast(vods.hideWatched ? 'Hiding watched videos' : 'Showing watched videos');
+}
 function fmtDuration(ms) {
   var s = Math.floor((ms || 0) / 1000);
   var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
@@ -2101,6 +2368,8 @@ function openVods(slug) {
   if (browse.open) closeBrowse();
   if (settings.open) closeSettings();
   vods.open = true; vods.session++; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true; vods.hidden = 0;
+  vods.listAll = []; vods.hideWatched = loadVodHideWatchedPref();
+  renderVodFilterChip();
   state.vodReturn = state.current || state.vodReturn;   // where to go back to afterwards
   showCursor();
   closeSidebar();
@@ -2116,12 +2385,14 @@ function openVods(slug) {
     vods.loading = false;
     if (!vods.open || vods.slug !== slug) return;
     var allVods = Array.isArray(data) ? data : [];
-    vods.list = allVods.filter(playableVod);
-    vods.hidden = allVods.length - vods.list.length;
+    vods.listAll = allVods.filter(playableVod);
+    vods.hidden = allVods.length - vods.listAll.length;
+    applyVodFilter();
     renderVods();
     if (!vods.list.length) {
       setVodStatus(err ? 'Could not load videos'
-        : (vods.hidden ? 'No playable past videos' : 'No past videos'));
+        : (vods.listAll.length ? 'All watched — Green shows them'
+          : (vods.hidden ? 'No playable past videos' : 'No past videos')));
     }
     else setVodStatus('');
   });
@@ -2138,12 +2409,8 @@ function renderVods() {
   vods.list.forEach(function (v, i) {
     // Saved progress for this recording: a thin bar on the thumbnail, and 90%+
     // (or finished) counts as watched — badge, fade, full bar.
-    var entry = progress[vodProgressKey(vods.slug, v)];
-    var pdur = entry ? (entry.duration || (v.duration || 0) / 1000) : 0;
-    var ppos = entry ? parseFloat(entry.position) : 0;
-    var frac = (pdur > 0 && isFinite(ppos) && ppos > 0) ? Math.min(1, ppos / pdur) : 0;
-    var watched = !!(entry && entry.watched) || frac >= 0.9;
-    if (watched) frac = 1;
+    var w = vodWatchedInfo(vods.slug, v, progress);
+    var watched = w.watched, frac = w.frac;
     var base = 'bcard' + (watched ? ' watched' : '');
     var card = document.createElement('div');
     card.className = base;
@@ -3774,13 +4041,26 @@ function wakeSaver() { saver.on = false; document.getElementById('saver').classN
 /* Live-channels popup (Channel Up/Down): a quick surf list of the channels that
    are live right now. It never appears when nothing is live. OK plays the
    highlighted one; it auto-hides after a few seconds. */
-var chpop = { open: false, list: [], idx: 0, timer: null };
+var chpop = { open: false, list: [], idx: 0, timer: null, persistent: false };
+var chpopPreviewCard = makePreviewCard('chpoppreview',
+  function () { return chpop.open ? chpop.list[chpop.idx] : null; },
+  function (e) {
+    var box = document.getElementById('chpop-list');
+    var row = box.children[chpop.idx];
+    var top = 400;
+    if (row) {
+      var r = row.getBoundingClientRect();
+      top = Math.max(90, Math.min(1080 - 280, r.top - 60));
+    }
+    e.style.top = Math.round(top) + 'px';
+  });
 function liveList() {
   var out = [];
   state.order.forEach(function (s) { if (state.channels[s] && state.channels[s].live) out.push(s); });
   return out;
 }
 function chpopMove(dir) {
+  chpop.persistent = false;                 // the user is here — normal auto-hide applies again
   var live = liveList();
   if (!live.length) return;                 // nothing live: do not show
   if (!chpop.open) {
@@ -3790,6 +4070,7 @@ function chpopMove(dir) {
     chpop.list = live;
     var ci = state.current ? live.indexOf(state.current) : -1;
     chpop.idx = ci >= 0 ? ci : 0;
+    prefetchSidePreviews();               // warm thumbnails for the surf list too
   } else {
     chpop.list = live;
     if (chpop.idx >= live.length) chpop.idx = live.length - 1;
@@ -3818,7 +4099,7 @@ function renderChpop() {
     mid.className = 'chmid';
     mid.innerHTML = '<div class="chname"></div><div class="chgame"></div>';
     mid.children[0].textContent = c.name || slug;
-    mid.children[1].textContent = c.category || 'Live';
+    mid.children[1].textContent = (c.category || 'Live') + (c.title ? ' · ' + c.title : '');
     row.appendChild(mid);
     var vw = document.createElement('span');
     vw.className = 'chview';
@@ -3834,6 +4115,7 @@ function renderChpop() {
     else if (top + el.offsetHeight > box.scrollTop + box.clientHeight)
       box.scrollTop = top + el.offsetHeight - box.clientHeight + 6;
   }
+  chpopPreviewCard.update();
 }
 function chpopActivate() {
   var slug = chpop.list[chpop.idx];
@@ -3842,12 +4124,43 @@ function chpopActivate() {
 }
 function closeChpop() {
   chpop.open = false;
+  chpop.persistent = false;
   clearTimeout(chpop.timer);
+  chpopPreviewCard.cancel();
   document.getElementById('chpop').className = 'hidden';
 }
 function resetChpopTimer() {
+  if (chpop.persistent) return;        // the stream-end popup waits for the user
   clearTimeout(chpop.timer);
   chpop.timer = setTimeout(closeChpop, 4500);
+}
+// Opened when a stream ends with nothing auto-advancing: stays up until the
+// user acts, and the 30s poll keeps its list fresh (they might be away).
+function openChpopPersistent() {
+  var live = liveList();
+  if (!live.length || chpop.open || !state.ready) return;
+  chpop.open = true;
+  chpop.persistent = true;
+  showCursor();
+  document.getElementById('chpop').className = '';
+  chpop.list = live;
+  chpop.idx = 0;
+  prefetchSidePreviews();
+  renderChpop();
+  clearTimeout(chpop.timer);           // no auto-hide
+}
+function refreshChpopList() {
+  var live = liveList();
+  if (!live.length) {                  // everyone went offline while they were away
+    closeChpop();
+    if (!state.current && !state.vod) showNothing();
+    return;
+  }
+  var focused = chpop.list[chpop.idx];
+  chpop.list = live;
+  var fi = live.indexOf(focused);
+  chpop.idx = fi >= 0 ? fi : 0;
+  renderChpop();
 }
 function isChUp(k) { return k === 33 || k === 427; }
 function isChDown(k) { return k === 34 || k === 428; }
@@ -3879,6 +4192,11 @@ document.addEventListener('keydown', function (e) {
   if (!state.ready) { e.preventDefault(); return; } // still on the splash, ignore input until data is ready
   if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
   if (cats.open) {
+    var csearch = document.getElementById('cats-search');
+    if (document.activeElement === csearch) {          // typing in the search box
+      if (k === KEY.BACK || k === KEY.OK) { e.preventDefault(); csearch.blur(); }
+      return;                                          // let the on-screen keyboard type
+    }
     e.preventDefault();
     if (k === KEY.BACK || k === KEY.YELLOW) closeCats();
     else if (k === KEY.LEFT) catsMove(-1, 0);
@@ -3887,8 +4205,8 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) catsMove(0, 1);
     else if (k === KEY.OK) catsActivate();
     else if (k === KEY.GREEN) {                       // green pins/unpins the focused category
-      if (cats.gridIdx > 0 && cats.list[cats.gridIdx - 1]) {
-        var pc = cats.list[cats.gridIdx - 1];
+      if (cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
+        var pc = displayedCats()[cats.gridIdx - 1];
         toggleCatPin(pc.slug, pc.name || pc.slug);
       }
     }
@@ -3909,6 +4227,7 @@ document.addEventListener('keydown', function (e) {
   if (vods.open) {
     e.preventDefault();
     if (k === KEY.YELLOW || k === KEY.BACK) closeVods();
+    else if (k === KEY.GREEN) toggleVodHideWatched();    // green hides/shows watched videos
     else if (k === KEY.LEFT) vodMove(-1, 0);
     else if (k === KEY.RIGHT) vodMove(1, 0);
     else if (k === KEY.UP) vodMove(0, -1);
@@ -4000,22 +4319,11 @@ document.addEventListener('keydown', function (e) {
   if (k === KEY.FF) { if (state.vod) seekVod(60); return; }
   if (state.sidebarOpen) {
     resetIdle();
-    if (state.playerToolFocus >= 0) {
-      if (k === KEY.LEFT) {
-        if (state.playerToolFocus === 1) setPlayerToolFocus(0);
-        else setPlayerToolFocus(-1);
-      } else if (k === KEY.RIGHT && state.playerToolFocus === 0) {
-        setPlayerToolFocus(1);
-      } else if (k === KEY.UP) {
-        setPlayerToolFocus(-1);
-      } else if (k === KEY.OK) {
-        activatePlayerTool();
-      } else if (k === KEY.GREEN) {
-        refreshSide();
-      } else if (k === KEY.BACK) {
-        closeSidebarWithGrace();
-      }
-    } else if (k === KEY.UP) moveSide(-1);
+    // The bottom player tools are pointer-only: hovering highlights them, but
+    // the D-pad always drives the channel list. Left/Right consistently tucks
+    // the sidebar away, never cycles the tools.
+    if (state.playerToolFocus >= 0) setPlayerToolFocus(-1);
+    if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
@@ -4198,9 +4506,31 @@ function browseCardFromEvent(e) {
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
   document.getElementById('browse-sort').addEventListener('click', function (e) { e.stopPropagation(); cycleBrowseSort(); });
+  document.getElementById('browse-discover').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseDiscover(); });
+  // Balloon tip explaining what Discover does.
+  document.getElementById('browse-discover').addEventListener('mouseenter', function () {
+    var tip = document.getElementById('browse-tip');
+    tip.textContent = 'Hides channels you already follow, so Browse only shows new finds.';
+    tip.className = '';
+    var r = this.getBoundingClientRect();
+    var left = Math.max(24, Math.min(1920 - tip.offsetWidth - 24, r.left + r.width / 2 - tip.offsetWidth / 2));
+    tip.style.left = Math.round(left) + 'px';
+    tip.style.top = Math.round(r.bottom + 14) + 'px';
+  });
+  document.getElementById('browse-discover').addEventListener('mouseleave', function () {
+    document.getElementById('browse-tip').className = 'hidden';
+  });
+  document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
   // Pinned category chips above the grid.
   document.getElementById('browse-pinnedcats').addEventListener('click', function (e) {
-    var el = e.target;
+    var t = e.target;
+    if (t.getAttribute && t.getAttribute('data-x')) {   // the ✕ unpins instead of selecting
+      e.stopPropagation();
+      var pchip = t.parentNode;
+      toggleCatPin(pchip.getAttribute('data-cslug'), pchip.getAttribute('data-cname'));
+      return;
+    }
+    var el = t;
     while (el && el !== this && !(el.getAttribute && el.getAttribute('data-cslug') != null)) el = el.parentNode;
     if (!el || el === this) return;
     e.stopPropagation();
@@ -4227,8 +4557,8 @@ function browseCardFromEvent(e) {
     if (pe && pe !== catsGrid) {
       e.stopPropagation();
       var pidx = catCardIdx(e);
-      if (pidx > 0 && cats.list[pidx - 1]) {
-        var pcat = cats.list[pidx - 1];
+      if (pidx > 0 && displayedCats()[pidx - 1]) {
+        var pcat = displayedCats()[pidx - 1];
         toggleCatPin(pcat.slug, pcat.name || pcat.slug);
       }
       return;
@@ -4243,6 +4573,20 @@ function browseCardFromEvent(e) {
     if (catsGrid.scrollTop + catsGrid.clientHeight >= catsGrid.scrollHeight - 400) loadCatsMore(false);
   });
   document.getElementById('cats-close').addEventListener('click', function () { closeCats(); });
+  document.getElementById('cats-search').addEventListener('input', function () {
+    if (!cats.open) return;
+    var q = this.value.trim();
+    cats.query = q;
+    clearTimeout(catsSearchTimer);
+    if (!q) {                                  // cleared: back to the paginated list
+      cats.results = null;
+      cats.gridIdx = 0;
+      renderCats();
+      setCatsStatus(cats.list.length ? '' : 'Loading...');
+      return;
+    }
+    catsSearchTimer = setTimeout(function () { runCatsSearch(q); }, 250);
+  });
   // Past videos popup pointer
   var vodsGrid = document.getElementById('vods-grid');
   function vodCardIdx(e) {
@@ -4376,10 +4720,13 @@ function browseCardFromEvent(e) {
     openBrowse(el.getAttribute('data-catslug'), el.textContent);
   });
   // Mini home screen: Continue Watching card + live-favorite tiles.
-  document.getElementById('home-resume').addEventListener('click', function (e) {
+  document.getElementById('home-resume-row').addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-vid'))) el = el.parentNode;
+    if (!el || el === this) return;
     e.stopPropagation();
     closeSidebar();
-    retryLastVodAfterReconnect();      // the same resolver the startup recovery uses
+    openSavedVod(el.getAttribute('data-slug'), el.getAttribute('data-vid'));
   });
   document.getElementById('home-live-row').addEventListener('click', function (e) {
     var el = e.target;

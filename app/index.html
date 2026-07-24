@@ -18,7 +18,7 @@
     <div id="home" class="hidden">
       <div id="home-continue" class="hidden">
         <div class="home-head">Continue watching</div>
-        <div id="home-resume"></div>
+        <div id="home-resume-row"></div>
       </div>
       <div id="home-live" class="hidden">
         <div class="home-head">Live now</div>
@@ -45,13 +45,14 @@
       </div>
       <div id="fav-list"></div>
     </div>
-    <div id="sidepreview" class="hidden"></div>
+    <div id="sidepreview" class="hidden"><div class="prevtitle"></div></div>
     <div id="browse" class="hidden">
       <div id="browse-panel">
         <div id="browse-head">
           <span id="browse-title">Live now</span>
           <span id="browse-cats-btn" title="Browse categories">Categories</span>
           <span id="browse-sort" title="Sort order">Sort: Top</span>
+          <span id="browse-discover" title="Hide channels you follow">Discover</span>
           <div id="browse-langs"></div>
           <span id="browse-close" title="Close">&#10005;</span>
         </div>
@@ -64,6 +65,7 @@
       <div id="cats-panel">
         <div id="cats-head">
           <span id="cats-title">Categories</span>
+          <input id="cats-search" type="text" autocomplete="off" placeholder="Search categories">
           <span id="cats-close" title="Close">&#10005;</span>
         </div>
         <div id="cats-grid"></div>
@@ -74,6 +76,7 @@
       <div id="vods-panel">
         <div id="vods-head">
           <span id="vods-title">Past videos</span>
+          <span id="vods-filter" title="Hide watched videos">Hide watched</span>
           <span id="vods-close" title="Close">&#10005;</span>
         </div>
         <div id="vods-grid"></div>
@@ -85,6 +88,7 @@
         <div id="chpop-title">Live now</div>
         <div id="chpop-list"></div>
       </div>
+      <div id="chpoppreview" class="hidden"><div class="prevtitle"></div></div>
     </div>
     <div id="vodbar" class="hidden">
       <span id="vodbar-cur">0:00</span>
@@ -194,6 +198,7 @@
   </div>
 
   <div id="settings-desc" class="hidden"></div>
+  <div id="browse-tip" class="hidden"></div>
 
   <div id="updatemodal" class="hidden">
     <div id="updatebox">

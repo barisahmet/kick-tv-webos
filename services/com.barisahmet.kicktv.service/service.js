@@ -31,6 +31,10 @@ var CHROME_CIPHERS = [
 ].join(':');
 var CHROME_CURVES = 'X25519:prime256v1:secp384r1';
 
+// Reuse connections: without keep-alive every request pays a full TLS
+// handshake (~0.5s), which made paginated browsing crawl.
+var KEEPALIVE_AGENT = new https.Agent({ keepAlive: true, maxSockets: 6 });
+
 var BROWSER_HEADERS = {
   'User-Agent': UA,
   'Accept': 'application/json, text/plain, */*',
@@ -44,7 +48,8 @@ function kickGet(path, cb) {
     path: path,
     headers: BROWSER_HEADERS,
     ciphers: CHROME_CIPHERS,
-    ecdhCurve: CHROME_CURVES
+    ecdhCurve: CHROME_CURVES,
+    agent: KEEPALIVE_AGENT
   }, function (res) {
     res.setEncoding('utf8');   // decode across chunk boundaries so a split emoji cannot corrupt the JSON
     var body = '';
