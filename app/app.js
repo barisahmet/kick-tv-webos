@@ -106,6 +106,40 @@ function togglePin(slug) {
 function saveLast(slug) { try { localStorage.setItem('kicktv.last', slug); } catch (e) {} }
 function loadLast() { try { return localStorage.getItem('kicktv.last'); } catch (e) { return null; } }
 
+/* Cached channel list. The last successful refresh is persisted so the next
+   launch can render the sidebar and home screen instantly while the real fetch
+   runs. Playback URLs are never cached (they expire), so cached entries can be
+   shown but never played from directly — startup still waits for fresh data. */
+function saveChannelCache() {
+  try {
+    var out = { version: 1, updated: Date.now(), order: state.order, channels: {} };
+    for (var i = 0; i < state.order.length; i++) {
+      var s = state.order[i], c = state.channels[s];
+      if (!c) continue;
+      out.channels[s] = { slug: s, name: c.name, avatar: c.avatar, live: c.live,
+                          viewers: c.viewers, title: c.title, category: c.category,
+                          categorySlug: c.categorySlug || '', startedAt: c.startedAt || null,
+                          playbackUrl: null, chatroomId: c.chatroomId || null };
+    }
+    localStorage.setItem('kicktv.channelcache', JSON.stringify(out));
+  } catch (e) {}
+}
+function loadChannelCache() {
+  try {
+    var data = JSON.parse(localStorage.getItem('kicktv.channelcache'));
+    if (!data || data.version !== 1 || !data.channels) return;
+    var favs = getFavorites(), order = [];
+    for (var i = 0; i < (data.order || []).length; i++) {
+      var s = data.order[i];
+      if (favs.indexOf(s) !== -1 && data.channels[s]) {
+        state.channels[s] = data.channels[s];
+        order.push(s);
+      }
+    }
+    state.order = order;
+  } catch (e) {}
+}
+
 /* Talking to Kick */
 function serviceGet(path, cb) {
   var Bridge = window.WebOSServiceBridge || window.PalmServiceBridge;
@@ -199,7 +233,33 @@ function sortOrder(favs) {
 // request fast and reliable while still finishing the whole list in a second or two.
 var FETCH_CONCURRENCY = 5;
 var fetchGeneration = 0;   // stamps each refresh so a slow old one cannot overwrite a newer one
+// Refreshes are serialized: one in flight, at most one queued follow-up. Boot,
+// visibility, online and retry triggers used to pile overlapping 28-request
+// fetches onto the Luna bus until it crawled; now they collapse into a single
+// follow-up pass whose callbacks all fire on fresh data.
+var fetchInFlight = false;
+var fetchFollowUp = null;
 function fetchFavorites(done) {
+  done = done || function () {};
+  if (fetchInFlight) {
+    if (!fetchFollowUp) fetchFollowUp = [];
+    fetchFollowUp.push(done);          // wants data fresher than the pass underway
+    return;
+  }
+  fetchInFlight = true;
+  runFetchFavorites(function () {
+    fetchInFlight = false;
+    done();
+    var queued = fetchFollowUp;
+    fetchFollowUp = null;
+    if (queued && queued.length) {
+      fetchFavorites(function () {
+        for (var i = 0; i < queued.length; i++) queued[i]();
+      });
+    }
+  });
+}
+function runFetchFavorites(done) {
   var favs = getFavorites(), total = favs.length, ok = 0, hard = 0, started = 0, finished = 0;
   var gen = ++fetchGeneration;
   if (!total) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
@@ -220,7 +280,7 @@ function fetchFavorites(done) {
       if (gen !== fetchGeneration) { done(); return; }  // a newer refresh owns the shared state now
       state.lastFetch = Date.now();
       setNetDown(ok === 0 && hard > 0); // offline only when real transport failures blocked everything
-      sortOrder(favs); detectOnline(favs); done();
+      sortOrder(favs); detectOnline(favs); saveChannelCache(); done();
     } else {
       pump();                          // a slot freed up — start the next one
     }
@@ -352,11 +412,16 @@ function fmtViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
   return String(n);
 }
-// How long a stream has been live, from Kick's UTC "YYYY-MM-DD HH:MM:SS".
-function fmtUptime(str) {
+// Kick timestamps are UTC "YYYY-MM-DD HH:MM:SS" (sometimes with a T).
+function parseKickTime(str) {
   var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(str || '');
-  if (!m) return '';
-  var mins = Math.floor((Date.now() - Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])) / 60000);
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0;
+}
+// How long a stream has been live.
+function fmtUptime(str) {
+  var t = parseKickTime(str);
+  if (!t) return '';
+  var mins = Math.floor((Date.now() - t) / 60000);
   if (mins < 1) return 'just started';
   if (mins < 60) return 'live ' + mins + 'm';
   return 'live ' + Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
@@ -844,6 +909,7 @@ function openSidebar() {
   resetIdle();
   updateGear();
   placeDiagnostics();
+  prefetchSidePreviews();                             // warm live-row thumbnails for instant previews
   if (state.vod) showVodOverlay();                    // the full VOD controls ride with the sidebar
   // only refetch when the data is stale, so opening the list stays snappy
   if (Date.now() - state.lastFetch > 8000) {
@@ -857,6 +923,8 @@ function closeSidebar() {
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
+  clearTimeout(sidePreviewTimer);
+  hideSidePreview();
   hideVodBar();                                       // VOD seek bar hides with the sidebar
   hideVodPlay();                                      // ...and so does the play/pause button
   updateGear();
@@ -910,6 +978,113 @@ function applySideFocus() {
         list.scrollTop = top + row.offsetHeight - list.clientHeight + 8;
     }
   }
+  scheduleSidePreview();
+}
+/* Live thumbnail preview: dwell on a live channel row for a moment and a card
+   with the stream's current thumbnail appears beside the sidebar. */
+var sidePreviewTimer = null;
+var previewCache = {};   // slug -> { t, url }; v1 thumbnails live on images.kick.com, which loads directly
+function previewFocusStillOn(slug) {
+  if (!state.sidebarOpen) return false;
+  var item = state.sideItems[state.sideFocus];
+  return !!(item && item.slug === slug);
+}
+var sidePreviewSlug = null;   // the row the card is showing (or being prepared) for
+function scheduleSidePreview() {
+  var item = state.sidebarOpen ? state.sideItems[state.sideFocus] : null;
+  var slug = (item && (item.type === 'chan' || item.type === 'temp')) ? item.slug : null;
+  var c = slug ? state.channels[slug] : null;
+  var want = !!(slug && c && c.live && slug !== state.current);
+  // Re-renders (the 30s poll, pin toggles...) re-apply focus without moving it.
+  // If the preview already belongs to this row, leave it alone — hiding and
+  // re-dwelling here is what made the card flash.
+  if (want && slug === sidePreviewSlug) return;
+  clearTimeout(sidePreviewTimer);
+  if (!want) { hideSidePreview(); return; }
+  // Show the window immediately with a loading spinner; the frame swaps in
+  // the moment it is ready (usually instantly, thanks to the prefetch).
+  sidePreviewSlug = slug;
+  positionSidePreview();
+  document.getElementById('sidepreview').className = 'loading';
+  var cached = previewCache[slug];
+  if (cached && Date.now() - cached.t < 60000) { preloadSidePreview(slug, cached.url); return; }
+  sidePreviewTimer = setTimeout(function () { showSidePreview(slug); }, 150);
+}
+function positionSidePreview() {
+  var el = document.getElementById('sidepreview');
+  var list = document.getElementById('fav-list');
+  var row = list.children[state.sideFocus];
+  var top = 200;
+  if (row) {
+    var r = row.getBoundingClientRect();
+    top = Math.max(90, Math.min(1080 - 280, r.top - 40));
+  }
+  el.style.top = Math.round(top) + 'px';
+}
+// The v2 payload only carries a thumbnail host the webview cannot load, so ask
+// v1 for the images.kick.com variants and prefer the 480-wide one — the card is
+// 426px and the smaller file arrives much faster.
+function pickPreviewUrl(raw) {
+  var t = raw && raw.livestream && raw.livestream.thumbnail;
+  if (!t) return null;
+  var m = /(https:\/\/[^\s]+\/480\.webp[^\s]*)/.exec(String(t.responsive || ''));
+  return (m && m[1]) || t.url || null;
+}
+function fetchPreviewUrl(slug, done) {
+  serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
+    var url = err ? null : pickPreviewUrl(raw);
+    if (url) {
+      if (Object.keys(previewCache).length > 16) previewCache = {};
+      previewCache[slug] = { t: Date.now(), url: url };
+      var img = new Image();     // warm the browser cache so presenting is instant
+      img.src = url;
+    }
+    if (done) done();
+  });
+}
+// Resolve and warm thumbnails for the live rows as soon as the sidebar opens,
+// one at a time (the Luna bus dislikes bursts), so dwelling feels instant.
+function prefetchSidePreviews() {
+  var queue = [];
+  for (var i = 0; i < state.order.length && queue.length < 8; i++) {
+    var s = state.order[i], c = state.channels[s];
+    if (c && c.live && s !== state.current) {
+      var cached = previewCache[s];
+      if (!cached || Date.now() - cached.t >= 60000) queue.push(s);
+    }
+  }
+  (function next() {
+    if (!queue.length || !state.sidebarOpen) return;
+    fetchPreviewUrl(queue.shift(), next);
+  })();
+}
+function showSidePreview(slug) {
+  if (!previewFocusStillOn(slug)) return;
+  var cached = previewCache[slug];
+  if (cached && Date.now() - cached.t < 60000) { preloadSidePreview(slug, cached.url); return; }
+  fetchPreviewUrl(slug, function () {
+    var c2 = previewCache[slug];
+    if (c2) preloadSidePreview(slug, c2.url);
+    else if (sidePreviewSlug === slug) hideSidePreview();   // no thumbnail: no stuck spinner
+  });
+}
+function preloadSidePreview(slug, url) {
+  var img = new Image();   // swap in only after a real load — never a black card
+  img.onload = function () { presentSidePreview(slug, url); };
+  img.onerror = function () { if (sidePreviewSlug === slug) hideSidePreview(); };
+  img.src = url;
+}
+function presentSidePreview(slug, url) {
+  if (!previewFocusStillOn(slug) || sidePreviewSlug !== slug) return;   // focus moved during the fetch
+  var el = document.getElementById('sidepreview');
+  el.style.backgroundImage = 'url(' + url + ')';
+  positionSidePreview();
+  el.className = '';
+}
+function hideSidePreview() {
+  sidePreviewSlug = null;
+  var el = document.getElementById('sidepreview');
+  if (el) el.className = 'hidden';
 }
 function renderSidebar(focusKey) {
   var prevKey = (typeof focusKey !== 'undefined' && focusKey !== null)
@@ -1269,19 +1444,40 @@ function addChannelBySlug(raw) {
 var BROWSE_LANGS = [
   { label: 'All',      value: 'all' },
   { label: 'English',  value: 'English' },
-  { label: 'Turkce',   value: 'Turkish' },
+  { label: 'Türkçe',   value: 'Turkish' },
   { label: 'Espanol',  value: 'Spanish' },
   { label: 'Portugues',value: 'Portuguese' },
   { label: 'Arabic',   value: 'Arabic' },
-  { label: 'Francais', value: 'French' },
   { label: 'Deutsch',  value: 'German' },
-  { label: 'Polski',   value: 'Polish' },
   { label: 'Russian',  value: 'Russian' }
 ];
 var BROWSE_COLS = 4;
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
-               category: null, categoryName: '', session: 0 };
+               category: null, categoryName: '', session: 0,
+               sort: 'viewers' };
+var BROWSE_SORTS = [
+  { key: 'viewers', label: 'Top' },
+  { key: 'newest',  label: 'New' },
+  { key: 'small',   label: 'Small' }
+];
+function renderBrowseSort() {
+  var el = document.getElementById('browse-sort');
+  if (!el) return;
+  for (var i = 0; i < BROWSE_SORTS.length; i++) {
+    if (BROWSE_SORTS[i].key === browse.sort) { el.textContent = 'Sort: ' + BROWSE_SORTS[i].label; return; }
+  }
+}
+function cycleBrowseSort() {
+  var idx = 0;
+  for (var i = 0; i < BROWSE_SORTS.length; i++) if (BROWSE_SORTS[i].key === browse.sort) { idx = i; break; }
+  var next = BROWSE_SORTS[(idx + 1) % BROWSE_SORTS.length];
+  browse.sort = next.key;
+  browse.gridIdx = 0;
+  renderBrowseSort();
+  renderBrowse();
+  toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
+}
 
 // Selected languages persist as a JSON array; an empty selection means All.
 // Older installs stored a single string — migrate it on load.
@@ -1327,14 +1523,16 @@ function openBrowse(categorySlug, categoryName) {
   browse.categoryName = categorySlug ? (categoryName || '') : '';
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
+  browse.sort = 'viewers';
+  renderBrowseSort();
+  renderPinnedCatChips();
   document.getElementById('browse-grid').innerHTML = '';
   updateBrowseTitle();
   loadBrowseMore(true);
 }
-// Show the active category (if any) in the browse header.
+// The title stays "Live now" — the highlighted Categories button and the
+// selected chip already show which filter is active.
 function updateBrowseTitle() {
-  document.getElementById('browse-title').textContent =
-    browse.category ? ('Live: ' + browse.categoryName) : 'Live now';
   var btn = document.getElementById('browse-cats-btn');
   if (btn) btn.className = browse.category ? 'on' : '';
 }
@@ -1384,7 +1582,16 @@ function renderBrowse() {
   if (browse.category) list = list.filter(function (s) {
     return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
   });
-  list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
+  if (browse.sort === 'small') {
+    list.sort(function (a, b) { return (a.viewer_count || 0) - (b.viewer_count || 0); });
+  } else if (browse.sort === 'newest') {
+    for (var pi = 0; pi < list.length; pi++) {
+      if (list[pi].__startTs === undefined) list[pi].__startTs = parseKickTime(list[pi].created_at);
+    }
+    list.sort(function (a, b) { return (b.__startTs || 0) - (a.__startTs || 0); });
+  } else {
+    list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
+  }
   browse.streams = list;
 
   var grid = document.getElementById('browse-grid');
@@ -1575,6 +1782,12 @@ function renderCats() {
     vw.innerHTML = '<span class="bdot"></span>';
     vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0)));
     banner.appendChild(vw);
+    var pin = document.createElement('span');
+    pin.className = 'catpin' + (isCatPinned(c.slug) ? ' on' : '');
+    pin.setAttribute('data-act', 'catpin');
+    pin.setAttribute('title', 'Pin category');
+    pin.innerHTML = pinIcon();
+    banner.appendChild(pin);
     var name = document.createElement('div');
     name.className = 'cname';
     name.textContent = c.name || c.slug;
@@ -1622,8 +1835,61 @@ function selectCategory(slug, name) {
   browse.gridIdx = 0;
   closeCats();
   updateBrowseTitle();
+  renderPinnedCatChips();
   renderBrowse();
   if (slug) loadBrowseMore(true);   // pull more pages to better fill the filtered grid
+}
+
+/* Pinned categories: starred in the Categories popup (Green, or the pin icon),
+   they appear as quick chips above the Browse grid. */
+function getPinnedCats() {
+  try {
+    var v = JSON.parse(localStorage.getItem('kicktv.pinnedcats'));
+    return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+  } catch (e) { return []; }
+}
+function savePinnedCats(list) { try { localStorage.setItem('kicktv.pinnedcats', JSON.stringify(list)); } catch (e) {} }
+function isCatPinned(slug) {
+  var l = getPinnedCats();
+  for (var i = 0; i < l.length; i++) if (l[i].slug === slug) return true;
+  return false;
+}
+function toggleCatPin(slug, name) {
+  if (!slug) return;
+  var l = getPinnedCats(), out = [], found = false;
+  for (var i = 0; i < l.length; i++) { if (l[i].slug === slug) found = true; else out.push(l[i]); }
+  if (!found) { out.push({ slug: slug, name: name || slug }); while (out.length > 8) out.shift(); }
+  savePinnedCats(out);
+  toast(found ? ('Unpinned ' + (name || slug)) : ('Pinned ' + (name || slug)));
+  renderPinnedCatChips();
+  if (cats.open) renderCats();
+}
+function renderPinnedCatChips() {
+  var box = document.getElementById('browse-pinnedcats');
+  var panel = document.getElementById('browse-panel');
+  if (!box) return;
+  box.innerHTML = '';
+  var l = getPinnedCats();
+  if (!l.length) {
+    box.className = 'hidden';
+    if (panel) panel.className = '';
+    return;
+  }
+  box.className = '';
+  if (panel) panel.className = 'haspins';   // the grid gives up a row of height
+  var all = document.createElement('span');
+  all.className = 'pcat' + (browse.category ? '' : ' sel');
+  all.textContent = 'All';
+  all.setAttribute('data-cslug', '');
+  box.appendChild(all);
+  for (var i = 0; i < l.length; i++) {
+    var chip = document.createElement('span');
+    chip.className = 'pcat' + (browse.category === l[i].slug ? ' sel' : '');
+    chip.textContent = l[i].name;
+    chip.setAttribute('data-cslug', l[i].slug);
+    chip.setAttribute('data-cname', l[i].name);
+    box.appendChild(chip);
+  }
 }
 
 /* Past videos (VOD) popup and playback.
@@ -3620,12 +3886,19 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.UP) catsMove(0, -1);
     else if (k === KEY.DOWN) catsMove(0, 1);
     else if (k === KEY.OK) catsActivate();
+    else if (k === KEY.GREEN) {                       // green pins/unpins the focused category
+      if (cats.gridIdx > 0 && cats.list[cats.gridIdx - 1]) {
+        var pc = cats.list[cats.gridIdx - 1];
+        toggleCatPin(pc.slug, pc.name || pc.slug);
+      }
+    }
     return;
   }
   if (browse.open) {
     e.preventDefault();
     if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
     else if (k === KEY.YELLOW) openCats();               // yellow opens the categories picker
+    else if (k === KEY.GREEN) cycleBrowseSort();         // green cycles the sort order
     else if (k === KEY.LEFT) browseMove(-1, 0);
     else if (k === KEY.RIGHT) browseMove(1, 0);
     else if (k === KEY.UP) browseMove(0, -1);
@@ -3924,6 +4197,16 @@ function browseCardFromEvent(e) {
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
+  document.getElementById('browse-sort').addEventListener('click', function (e) { e.stopPropagation(); cycleBrowseSort(); });
+  // Pinned category chips above the grid.
+  document.getElementById('browse-pinnedcats').addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-cslug') != null)) el = el.parentNode;
+    if (!el || el === this) return;
+    e.stopPropagation();
+    var cslug = el.getAttribute('data-cslug');
+    selectCategory(cslug || null, el.getAttribute('data-cname') || '');
+  });
   // Categories popup pointer
   var catsGrid = document.getElementById('cats-grid');
   function catCardIdx(e) {
@@ -3939,6 +4222,17 @@ function browseCardFromEvent(e) {
     if (i >= 0 && i !== cats.gridIdx) { cats.gridIdx = i; applyCatsFocus(); }
   });
   catsGrid.addEventListener('click', function (e) {
+    var pe = e.target;    // the pin badge toggles instead of selecting
+    while (pe && pe !== catsGrid && !(pe.getAttribute && pe.getAttribute('data-act') === 'catpin')) pe = pe.parentNode;
+    if (pe && pe !== catsGrid) {
+      e.stopPropagation();
+      var pidx = catCardIdx(e);
+      if (pidx > 0 && cats.list[pidx - 1]) {
+        var pcat = cats.list[pidx - 1];
+        toggleCatPin(pcat.slug, pcat.name || pcat.slug);
+      }
+      return;
+    }
     var i = catCardIdx(e);
     if (i >= 0) { cats.gridIdx = i; catsActivate(); }
   });
@@ -4399,6 +4693,7 @@ function finishStartupFallback(preserveLastVod) {
   setMode('player');
   loadQualityPref();
   loadSettings();
+  loadChannelCache();                         // instant sidebar/home data while the real fetch runs
   applyDim();
   applyChatStyle();                           // set the chat overlay's side/size/width/opacity
   syncDiagnostics();
