@@ -15,9 +15,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Top info bar */
 #overlay {
-  position: absolute; top: 0; left: 0; width: 1920px;
+  position: absolute; top: 0; left: 0; width: 1920px; box-sizing: border-box;
   background: rgba(0,0,0,0.82);
-  padding: 26px 60px 30px 60px; font-size: 34px;
+  /* left padding leaves room for the avatar circle */
+  padding: 26px 60px 30px 168px; font-size: 34px;
+}
+#ov-avatar {
+  position: absolute; left: 60px; top: 50%; transform: translateY(-50%);
+  width: 84px; height: 84px; border-radius: 50%;
+  background: #3a3d40 center/cover no-repeat;
+  color: #fff; font-size: 40px; font-weight: 700; text-align: center; line-height: 84px;
 }
 #ov-name { font-weight: 800; color: #fff; margin-right: 24px; }
 #ov-live {
@@ -366,6 +373,20 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .baddbtn:hover { background: #53fc18; color: #0b0e0f; }
 .baddbtn.added { color: #0b0e0f; background: #53fc18; border-color: #53fc18; }
 .bmeta { padding: 9px 13px 12px; }
+
+/* Watched progress on Past-video cards (YouTube-style) */
+.bprogtrack {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 7px;
+  background: rgba(255,255,255,0.28);
+}
+.bprogfill { height: 100%; background: #53fc18; }
+.bwatched {
+  position: absolute; top: 10px; left: 10px;
+  background: rgba(0,0,0,0.82); color: #e7e9ea;
+  font-size: 20px; font-weight: 700; padding: 4px 12px; border-radius: 8px;
+}
+.bcard.watched { opacity: 0.55; }
+.bcard.watched.focused { opacity: 0.9; }
 .bname { font-size: 23px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .btitle { font-size: 18px; color: #cfd0d1; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bsub { font-size: 17px; color: #9a9a9d; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -525,6 +546,25 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodplay:hover { background: rgba(0,0,0,0.72); }
 #vodplay svg { width: 60px; height: 60px; }
 
+/* -30 / +30 skip buttons flanking the play/pause button */
+#vodback, #vodfwd {
+  position: absolute; top: 50%; transform: translate(-50%,-50%);
+  width: 92px; height: 92px; border-radius: 46px;
+  background: rgba(0,0,0,0.55); color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#vodback { left: calc(50% - 200px); }
+#vodfwd  { left: calc(50% + 200px); }
+#vodback:hover, #vodfwd:hover { background: rgba(0,0,0,0.72); }
+#vodback svg, #vodfwd svg { width: 52px; height: 52px; }
+
+/* Accumulated-seek chip: "+60s" while rapid presses are being collected */
+#seekpop {
+  position: absolute; left: 50%; top: calc(50% - 150px); transform: translateX(-50%);
+  background: rgba(0,0,0,0.55); color: #fff;
+  font-size: 34px; font-weight: 500; padding: 8px 24px; border-radius: 14px;
+}
+
 /* Buffering spinner (live and VOD). Centred with margins, not transform, so the
    spin animation (which sets transform) does not knock it off-centre. */
 #spinner {
@@ -539,6 +579,9 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    and sidebar (later in the DOM / higher z-index) stay bright on top of it. */
 #dimscreen {
   position: absolute; inset: 0; background: rgba(0,0,0,0.8); pointer-events: none;
+  /* fade in/out instead of snapping — sudden full brightness at night hurts */
+  opacity: 0;
+  transition: opacity 3s ease, background-color 1s ease;
 }
 
 /* VOD seek bar. Fixed, centred width so it never resizes when the sidebar
@@ -886,10 +929,13 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #saver {
   /* must out-stack every persistent dialog (modals 76/78, update notes 92),
      or the burn-in guard leaves their bright static text sitting on top of it */
-  position: absolute; inset: 0; z-index: 95; display: none;
+  position: absolute; inset: 0; z-index: 95;
   background: rgba(0,0,0,0.94);
+  /* ease in and out — waking it must not blind anyone at night */
+  opacity: 0; pointer-events: none;
+  transition: opacity 1.2s ease;
 }
-#saver.on { display: block; }
+#saver.on { opacity: 1; pointer-events: auto; }
 
 /* Little pop-up messages at the bottom */
 #toast {

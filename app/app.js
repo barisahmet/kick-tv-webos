@@ -410,6 +410,7 @@ function setBanner(msg) {
 }
 function teardownVideo() {
   saveVodProgress(true);          // capture the old VOD before its media/state is replaced
+  resetSeekAccum();               // a queued seek belongs to the source being torn down
   PB.active = false;
   hideVodBar();
   hideSpinner();
@@ -679,7 +680,14 @@ function stopPlayerPoll() {
 
 /* The info bar at the top */
 var overlayTimer = null;
+function setOverlayAvatar(avatarUrl, name) {
+  var av = document.getElementById('ov-avatar');
+  if (!av) return;
+  if (avatarUrl) { av.style.backgroundImage = 'url(' + avatarUrl + ')'; av.textContent = ''; }
+  else { av.style.backgroundImage = ''; av.textContent = (name || '?').charAt(0).toUpperCase(); }
+}
 function fillOverlay(c) {
+  setOverlayAvatar(c.avatar, c.name);
   document.getElementById('ov-name').textContent = c.name;
   document.getElementById('ov-viewers').textContent = c.live ? fmtViewers(c.viewers) + ' viewers' : 'Offline';
   document.getElementById('ov-title').textContent =
@@ -1618,19 +1626,33 @@ function saveVodProgress(force) {
   var now = Date.now();
   if (!force && now - vodProgressLastWrite < 5000) return;
   vodProgressLastWrite = now;
-  if (state.vod.completed) { clearVodProgress(state.vod.key); return; }
+  if (state.vod.completed) return;   // completeVodProgress already wrote the final watched entry
   var video = document.getElementById('video');
   var pos = parseFloat(video.currentTime), dur = parseFloat(video.duration);
   if (!isFinite(pos) || pos < 0) return;
   var data = loadVodProgress();
+  var prev = data.items[state.vod.key];
+  // Watched is sticky, YouTube-style: crossing 90% marks it, and rewinding
+  // afterwards does not unmark it.
+  var watched = !!(prev && prev.watched);
+  if (isFinite(dur) && dur > 0 && pos / dur >= 0.9) watched = true;
   if (pos < 10) {
-    delete data.items[state.vod.key];
+    // nothing to resume this close to the start, but keep the watched mark alive
+    if (watched) {
+      data.items[state.vod.key] = {
+        position: 0,
+        duration: isFinite(dur) && dur > 0 ? Math.floor(dur) : ((prev && prev.duration) || 0),
+        updated: now,
+        watched: true
+      };
+    } else delete data.items[state.vod.key];
   } else {
     data.items[state.vod.key] = {
       position: Math.floor(pos),
       duration: isFinite(dur) && dur > 0 ? Math.floor(dur) : 0,
       updated: now
     };
+    if (watched) data.items[state.vod.key].watched = true;
   }
   writeVodProgress(data);
 }
@@ -1652,7 +1674,18 @@ function applyVodResume() {
 function completeVodProgress() {
   if (!state.vod) return;
   state.vod.completed = true;
-  clearVodProgress(state.vod.key);
+  // Finished: no resume point (a rewatch starts from the beginning), but the
+  // recording stays marked as watched for the Past videos grid.
+  var video = document.getElementById('video');
+  var dur = parseFloat(video.duration);
+  var data = loadVodProgress();
+  data.items[state.vod.key] = {
+    position: 0,
+    duration: isFinite(dur) && dur > 0 ? Math.floor(dur) : 0,
+    updated: Date.now(),
+    watched: true
+  };
+  writeVodProgress(data);
 }
 var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0, session: 0 };
 var VOD_COLS = 4;
@@ -1737,9 +1770,20 @@ function closeVods() {
 function renderVods() {
   var grid = document.getElementById('vods-grid');
   grid.innerHTML = '';
+  var progress = loadVodProgress().items;
   vods.list.forEach(function (v, i) {
+    // Saved progress for this recording: a thin bar on the thumbnail, and 90%+
+    // (or finished) counts as watched — badge, fade, full bar.
+    var entry = progress[vodProgressKey(vods.slug, v)];
+    var pdur = entry ? (entry.duration || (v.duration || 0) / 1000) : 0;
+    var ppos = entry ? parseFloat(entry.position) : 0;
+    var frac = (pdur > 0 && isFinite(ppos) && ppos > 0) ? Math.min(1, ppos / pdur) : 0;
+    var watched = !!(entry && entry.watched) || frac >= 0.9;
+    if (watched) frac = 1;
+    var base = 'bcard' + (watched ? ' watched' : '');
     var card = document.createElement('div');
-    card.className = 'bcard';
+    card.className = base;
+    card.setAttribute('data-base', base);
     card.setAttribute('data-idx', i);
     var thumb = document.createElement('div');
     thumb.className = 'bthumb';
@@ -1753,6 +1797,21 @@ function renderVods() {
     views.className = 'bviewers';
     views.textContent = fmtViewers(v.views || 0) + ' views';
     thumb.appendChild(views);
+    if (frac > 0) {
+      var track = document.createElement('div');
+      track.className = 'bprogtrack';
+      var fill = document.createElement('div');
+      fill.className = 'bprogfill';
+      fill.style.width = Math.round(frac * 100) + '%';
+      track.appendChild(fill);
+      thumb.appendChild(track);
+    }
+    if (watched) {
+      var wbadge = document.createElement('span');
+      wbadge.className = 'bwatched';
+      wbadge.textContent = '✓ Watched';
+      thumb.appendChild(wbadge);
+    }
     card.appendChild(thumb);
     var meta = document.createElement('div');
     meta.className = 'bmeta';
@@ -1769,7 +1828,8 @@ function renderVods() {
 function applyVodFocus() {
   var grid = document.getElementById('vods-grid');
   for (var j = 0; j < grid.children.length; j++) {
-    grid.children[j].className = 'bcard' + (j === vods.gridIdx ? ' focused' : '');
+    var vcard = grid.children[j];
+    vcard.className = (vcard.getAttribute('data-base') || 'bcard') + (j === vods.gridIdx ? ' focused' : '');
   }
   var el = grid.children[vods.gridIdx];
   if (el) {
@@ -1817,6 +1877,8 @@ function playVod(v, queue, queueIndex, slug) {
   }
   var progressKey = vodProgressKey(vodSlug, v);
   var resumeAt = savedVodPosition(progressKey);
+  var savedEntry = loadVodProgress().items[progressKey];
+  var knownDuration = (savedEntry && savedEntry.duration) || (v.duration || 0) / 1000 || 0;
   vodProgressLastWrite = 0;
   state.vod = { slug: vodSlug, source: v.source,
                 title: v.session_title || 'Past video',
@@ -1824,13 +1886,17 @@ function playVod(v, queue, queueIndex, slug) {
                 queue: playQueue, queueIndex: playIndex,
                 markerId: vodStableId(v),
                 key: progressKey, resumeAt: resumeAt, resumeApplied: false,
+                knownDuration: knownDuration,
                 progressReady: false, completed: false, ending: false, retries: 0 };
   saveLastVod(vodSlug, v, state.vod.name);
   PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = '';
   setBanner('');
   showState('hidden');
   updateGear();
-  drawVodBar(0, 0);                 // reset the bar to the start; the new source has no time yet
+  // Pre-set the bar from what we already know (saved resume point + listed
+  // duration), so a resumed VOD does not sit at 0:00 and then jump once
+  // playback actually starts.
+  drawVodBar(resumeAt, knownDuration);
   attachVod(v.source);
   showVodOverlay();
 }
@@ -1921,22 +1987,58 @@ function exitVod() {
   if (back && state.channels[back] && state.channels[back].live) play(back);
   else { state.current = null; updateGear(); showNothing(); }
 }
+/* Rapid seek presses accumulate (+30, +60, +90...) and apply as one jump after
+   a short pause, YouTube-style. Nothing actually seeks until the timeout, so
+   the skip buttons stay on screen while you keep pressing. */
+var seekAccum = { delta: 0, timer: null, baseTime: null };
+var SEEK_APPLY_MS = 1200;
 function seekVod(delta) {
   var video = document.getElementById('video');
   var d = video.duration;
-  if (!d || isNaN(d)) return;
-  var t = Math.max(0, Math.min(d - 1, (video.currentTime || 0) + delta));
+  if (!state.vod || !d || isNaN(d)) return;
+  if (seekAccum.baseTime === null) seekAccum.baseTime = video.currentTime || 0;
+  seekAccum.delta += delta;
+  var el = document.getElementById('seekpop');
+  el.textContent = (seekAccum.delta >= 0 ? '+' : '-') + Math.abs(seekAccum.delta) + 's';
+  el.className = '';   // dim handling comes from applyDimAwareUi, same as the buttons
+  clearTimeout(seekAccum.timer);
+  seekAccum.timer = setTimeout(applySeekAccum, SEEK_APPLY_MS);
+  showVodOverlay();
+  drawVodBarNow();               // preview the pending target on the bar right away
+}
+function applySeekAccum() {
+  clearTimeout(seekAccum.timer);
+  seekAccum.timer = null;
+  var base = seekAccum.baseTime, dd = seekAccum.delta;
+  seekAccum.baseTime = null; seekAccum.delta = 0;
+  document.getElementById('seekpop').className = 'hidden';
+  if (!state.vod || !dd) return;
+  var video = document.getElementById('video');
+  if (!isFinite(video.duration) || !video.duration) return;
+  var t = Math.max(0, Math.min(video.duration - 1, (base === null ? (video.currentTime || 0) : base) + dd));
   try { video.currentTime = t; } catch (e) {}
   showVodOverlay();
+}
+function resetSeekAccum() {
+  clearTimeout(seekAccum.timer);
+  seekAccum.timer = null;
+  seekAccum.delta = 0; seekAccum.baseTime = null;
+  var el = document.getElementById('seekpop');
+  if (el) el.className = 'hidden';
 }
 function showVodOverlay() {
   if (!state.vod) return;
   var ov = document.getElementById('overlay');
+  var vc = state.channels[state.vod.slug];
+  setOverlayAvatar(vc && vc.avatar, state.vod.name);
   document.getElementById('ov-name').textContent = state.vod.name;
   document.getElementById('ov-live').style.display = 'none';
   document.getElementById('ov-viewers').textContent = 'Past video';
   document.getElementById('ov-title').textContent = state.vod.title;
-  ov.style.left = '0'; ov.style.width = '1920px';
+  // start at the sidebar's right edge when it is open, like the live overlay,
+  // so the info is never hidden behind the sidebar panel
+  ov.style.left = state.sidebarOpen ? '470px' : '0';
+  ov.style.width = state.sidebarOpen ? '1450px' : '1920px';
   ov.className = '';
   showVodBar();
   showVodPlay();
@@ -1967,9 +2069,19 @@ function drawVodBar(cur, dur) {
 function placeVodBar() {}
 function drawVodBarNow() {
   var v = document.getElementById('video');
-  if (!state.vod || vodDragging || !isFinite(v.duration) || !v.duration) return;
+  if (!state.vod || vodDragging) return;
+  var dur = (isFinite(v.duration) && v.duration) ? v.duration : (state.vod.knownDuration || 0);
+  if (!dur) return;
+  var cur = v.currentTime || 0;
+  if (seekAccum.baseTime !== null) {
+    // a queued relative seek is pending: preview its target
+    cur = Math.max(0, Math.min(dur - 1, seekAccum.baseTime + seekAccum.delta));
+  }
+  // While the resume seek is still pending, keep showing the target position
+  // rather than a transient 0:00.
+  else if (state.vod.resumeAt > 0 && !state.vod.resumeApplied && cur < state.vod.resumeAt) cur = state.vod.resumeAt;
   placeVodBar();
-  drawVodBar(v.currentTime || 0, v.duration);
+  drawVodBar(cur, dur);
 }
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
@@ -1983,6 +2095,7 @@ function showVodBar() {
 function seekVodFrac(frac) {
   var v = document.getElementById('video');
   if (!state.vod || !isFinite(v.duration) || !v.duration) return;
+  resetSeekAccum();               // an absolute scrub overrides any queued relative seek
   frac = Math.max(0, Math.min(1, frac));
   try { v.currentTime = frac * v.duration; } catch (e) {}
   showVodOverlay();
@@ -2368,12 +2481,13 @@ function settingsDimFilter() {
 }
 function applyDim() {
   var el = document.getElementById('dimscreen');
-  if (!settings.dim) el.className = 'hidden';
-  else {
-    el.style.background = 'rgba(0,0,0,' + settings.dimStrength + ')';
-    el.style.zIndex = (settings.dimScope === 'all') ? '68' : '';   // 'all' rides above normal player UI
-    el.className = '';
-  }
+  el.className = '';               // always in the layer tree; visibility rides on opacity
+  el.style.background = 'rgba(0,0,0,' + settings.dimStrength + ')';
+  el.style.zIndex = (settings.dimScope === 'all') ? '68' : '';   // 'all' rides above normal player UI
+  // Max -> off is the harshest jump (darkest state to full brightness), so it
+  // brightens extra slowly; every other fade uses the stylesheet's 3s.
+  el.style.transitionDuration = (!settings.dim && settings.dimStrength > 0.9) ? '10s, 1s' : '';
+  el.style.opacity = settings.dim ? '1' : '0';   // the CSS transition makes this a gentle fade
   applyDimAwareUi();
 }
 // Stream quality is intentionally not a setting; it has its own player control.
@@ -2587,7 +2701,7 @@ function applyDimAwareUi() {
   var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox'];
   var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'toast'];
   var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
-                     'pbstatus', 'overlay', 'vodbar', 'vodplay', 'spinner'];
+                     'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner'];
   // The lower group already sits under the Everything dim layer. Applying a
   // second filter there would dim it twice.
   var lowerFilter = settings.dim && settings.dimScope === 'all' ? '' : popupFilter;
@@ -2867,21 +2981,37 @@ function dimoptActivate(dir) {
   }
   renderDimOpt();
 }
-// The "0" remote button: a quick toggle for dim. A second press within 3 seconds
-// steps the strength instead of toggling off, so tap = on/off, tap-tap = adjust.
-var lastDimPress = 0;
+// The "0" remote button: a quick toggle for dim. While the dim info popup is
+// still on screen, further presses walk the cycle Light -> Medium -> Strong ->
+// Max -> Off -> Light...; once the popup has gone, the next press is a plain
+// on/off toggle again. The popup's own lifetime IS the rapid-press window.
+var dimToastShowing = false;   // any other toast replacing ours also ends the window
 function dimQuickKey() {
-  var now = Date.now();
-  if (settings.dim && (now - lastDimPress) < 3000) {
-    cycleDimStrength();
-    toast('Dim: ' + dimStrengthLabel());
+  var rapid = dimToastShowing &&
+    document.getElementById('toast').className.indexOf('hidden') === -1;
+  if (rapid && settings.dim) {
+    var idx = 0;
+    for (var i = 0; i < DIM_LEVELS.length; i++) {
+      if (Math.abs(DIM_LEVELS[i].v - settings.dimStrength) < 0.03) { idx = i; break; }
+    }
+    if (idx >= DIM_LEVELS.length - 1) {          // past Max the cycle reaches Off
+      settings.dim = false;
+      toast('Dim off');
+    } else {
+      settings.dimStrength = DIM_LEVELS[idx + 1].v;
+      toast('Dim: ' + dimStrengthLabel());
+    }
+  } else if (rapid && !settings.dim) {           // keep cycling: wrap from Off to Light
+    settings.dim = true;
+    settings.dimStrength = DIM_LEVELS[0].v;
+    toast('Dim on — ' + dimStrengthLabel());
   } else {
     settings.dim = !settings.dim;
-    saveSettings();
-    applyDim();
     toast(settings.dim ? ('Dim on — ' + dimStrengthLabel()) : 'Dim off');
   }
-  lastDimPress = now;
+  saveSettings();
+  applyDim();
+  dimToastShowing = true;      // set after the toast() above, so it survives the reset
   if (dimopt.open) renderDimOpt();
   if (settings.open) renderSettings();     // keep the Dim row's On/Off in sync if it's showing
 }
@@ -3061,10 +3191,17 @@ function showVodPlay() {
   if (!state.vod || spinnerOn) return;
   vodPlayIcon();
   document.getElementById('vodplay').className = '';
+  document.getElementById('vodback').className = '';
+  document.getElementById('vodfwd').className = '';
 }
-function hideVodPlay() { document.getElementById('vodplay').className = 'hidden'; }
+function hideVodPlay() {
+  document.getElementById('vodplay').className = 'hidden';
+  document.getElementById('vodback').className = 'hidden';
+  document.getElementById('vodfwd').className = 'hidden';
+}
 function toggleVodPlay() {
   if (!state.vod) return;
+  if (seekAccum.baseTime !== null) applySeekAccum();   // settle a queued seek before pausing
   var v = document.getElementById('video');
   if (v.paused) playVideo(v); else { try { v.pause(); } catch (e) {} }
   vodPlayIcon();
@@ -3353,6 +3490,7 @@ function isChDown(k) { return k === 34 || k === 428; }
 
 /* Small helpers */
 function toast(msg) {
+  dimToastShowing = false;   // a new toast replaces the dim popup; dimQuickKey re-flags its own
   var t = document.getElementById('toast');
   t.textContent = msg;
   t.style.filter = popupDimFilter();
@@ -3838,8 +3976,10 @@ function browseCardFromEvent(e) {
     else if (act === 'browse') openBrowse();
     else if (act === 'dim') dimQuickKey();
   });
-  // VOD centre play/pause button
+  // VOD centre play/pause button and the -30/+30 skip buttons beside it
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
+  document.getElementById('vodback').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(-30); });
+  document.getElementById('vodfwd').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(30); });
   // Dim options popup pointer
   var dimoptList = document.getElementById('dimopt-list');
   function dimoptIdx(e) {
