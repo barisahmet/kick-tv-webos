@@ -239,7 +239,7 @@ var fetchGeneration = 0;   // stamps each refresh so a slow old one cannot overw
 // follow-up pass whose callbacks all fire on fresh data.
 var fetchInFlight = false;
 var fetchFollowUp = null;
-function fetchFavorites(done) {
+function fetchFavorites(done, liveOnly) {
   done = done || function () {};
   if (fetchInFlight) {
     if (!fetchFollowUp) fetchFollowUp = [];
@@ -253,16 +253,29 @@ function fetchFavorites(done) {
     var queued = fetchFollowUp;
     fetchFollowUp = null;
     if (queued && queued.length) {
-      fetchFavorites(function () {
+      fetchFavorites(function () {     // follow-up passes are always full
         for (var i = 0; i < queued.length; i++) queued[i]();
       });
     }
-  });
+  }, liveOnly);
 }
-function runFetchFavorites(done) {
-  var favs = getFavorites(), total = favs.length, ok = 0, hard = 0, started = 0, finished = 0;
+function runFetchFavorites(done, liveOnly) {
+  var favs = getFavorites(), ok = 0, hard = 0, started = 0, finished = 0;
   var gen = ++fetchGeneration;
-  if (!total) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
+  if (!favs.length) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
+  // A liveOnly pass re-checks just the channels that can change the screen
+  // fast (currently live, or never fetched); offline ones keep cached data
+  // until the next full pass.
+  var targets = favs;
+  if (liveOnly) {
+    targets = [];
+    for (var ti = 0; ti < favs.length; ti++) {
+      var tc = state.channels[favs[ti]];
+      if (!tc || tc.live) targets.push(favs[ti]);
+    }
+    if (!targets.length) { done(); return; }
+  }
+  var total = targets.length;
   function onOne(slug, err, raw) {
     var stale = gen !== fetchGeneration;
     if (!err) { if (!stale) state.channels[slug] = normalize(slug, raw); ok++; }
@@ -278,7 +291,7 @@ function runFetchFavorites(done) {
     }
     if (++finished === total) {
       if (gen !== fetchGeneration) { done(); return; }  // a newer refresh owns the shared state now
-      state.lastFetch = Date.now();
+      if (!liveOnly) state.lastFetch = Date.now();      // partial passes don't count as fresh-everything
       setNetDown(ok === 0 && hard > 0); // offline only when real transport failures blocked everything
       sortOrder(favs); detectOnline(favs); saveChannelCache(); done();
     } else {
@@ -287,7 +300,7 @@ function runFetchFavorites(done) {
   }
   function pump() {
     while (started < total && (started - finished) < FETCH_CONCURRENCY) {
-      (function (slug) { apiGet(slug, function (err, raw) { onOne(slug, err, raw); }); })(favs[started++]);
+      (function (slug) { apiGet(slug, function (err, raw) { onOne(slug, err, raw); }); })(targets[started++]);
     }
   }
   pump();
@@ -608,7 +621,7 @@ function returnToIdle() {
   disconnectChat();
   showNothing();
 }
-function play(slug, preserveLastVod) {
+function play(slug, preserveLastVod, prefetchedRaw) {
   if (!slug) return;
   teardownVideo();
   disconnectChat();          // drop the old channel's chat; the new one connects once it loads
@@ -624,13 +637,14 @@ function play(slug, preserveLastVod) {
   setBanner('');
   showState('hidden');
   updateGear();
-  loadChannel(slug, false);
+  loadChannel(slug, false, prefetchedRaw);
 }
 // Fetch the channel again, which also hands us a fresh playback link since the
-// old one expires after a while, then start the video.
-function loadChannel(slug, isRecovery) {
+// old one expires after a while, then start the video. A caller that already
+// holds a fresh response (boot quick-start) passes it in and skips the fetch.
+function loadChannel(slug, isRecovery, prefetchedRaw) {
   var session = PB.session;            // the playback session this load belongs to
-  apiGet(slug, function (err, raw) {
+  function handle(err, raw) {
     if (state.current !== slug || session !== PB.session) return;  // switched away, or an older session for the same channel
     PB.reloading = false;
     if (err) {
@@ -651,7 +665,9 @@ function loadChannel(slug, isRecovery) {
     else { showOverlay(c); if (state.sidebarOpen) renderSidebar(slug); }
     attachStream(slug, c.playbackUrl);
     syncChat();                                  // connect chat for this channel if it is enabled
-  });
+  }
+  if (prefetchedRaw) { handle(null, prefetchedRaw); return; }
+  apiGet(slug, handle);
 }
 function attachStream(slug, url) {
   var video = document.getElementById('video');
@@ -842,9 +858,13 @@ function armOrExit() {
   state.quitTimer = setTimeout(function () { state.quitArmed = false; }, 2500);
 }
 
+var playerPollTick = 0;
 function startPlayerPoll() {
   stopPlayerPoll();
   state.playerTimer = setInterval(function () {
+    playerPollTick++;
+    // Every third tick (90s) is a full refresh; in between, only live channels
+    // are re-checked — a handful of ~50ms requests instead of the whole list.
     fetchFavorites(function () {
       if (state.sidebarOpen) renderSidebar();
       if (chpop.open && chpop.persistent) refreshChpopList();   // keep the stream-end list fresh
@@ -854,7 +874,7 @@ function startPlayerPoll() {
         var ov = document.getElementById('overlay');
         if (ov.className.indexOf('hidden') === -1) fillOverlay(cur);
       }
-    });
+    }, playerPollTick % 3 !== 0);
   }, PLAYER_REFRESH_MS);
 }
 function stopPlayerPoll() {
@@ -1518,7 +1538,7 @@ var BROWSE_COLS = 4;
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                category: null, categoryName: '', session: 0,
-               sort: 'viewers', discover: false };
+               sort: 'viewers', discover: false, renderLimit: 60 };
 var BROWSE_SORTS = [
   { key: 'viewers', label: 'Top' },
   { key: 'newest',  label: 'New' },
@@ -1537,6 +1557,7 @@ function cycleBrowseSort() {
   var next = BROWSE_SORTS[(idx + 1) % BROWSE_SORTS.length];
   browse.sort = next.key;
   browse.gridIdx = 0;
+  browse.renderLimit = 60;
   renderBrowseSort();
   renderBrowse();
   toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
@@ -1555,6 +1576,7 @@ function toggleBrowseDiscover() {
   try { localStorage.setItem('kicktv.browsediscover', browse.discover ? '1' : '0'); } catch (e) {}
   renderBrowseDiscover();
   browse.gridIdx = 0;
+  browse.renderLimit = 60;
   renderBrowse();
   toast(browse.discover ? 'Hiding channels you follow' : 'Showing all channels');
 }
@@ -1618,6 +1640,7 @@ function openBrowse(categorySlug, categoryName) {
   browse.categoryName = categorySlug ? (categoryName || '') : '';
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
+  browse.renderLimit = 60;
   browse.sort = 'viewers';
   browse.discover = loadBrowseDiscoverPref();
   renderBrowseSort();
@@ -1688,9 +1711,25 @@ function loadBrowseMore(initial) {
       if (!browse.raw.length) setBrowseStatus('Could not reach Kick'); else renderBrowse();
       return;
     }
+    // Keep only the fields the app uses — deep scans can hold thousands of
+    // these, and the full directory objects are ~10x bigger.
+    for (var pi2 = 0; pi2 < arr.length; pi2++) {
+      var it = arr[pi2], ch2 = it.channel || {}, cat0 = (it.categories && it.categories[0]) || null;
+      arr[pi2] = {
+        viewer_count: it.viewer_count || 0,
+        language: it.language || '',
+        session_title: it.session_title || '',
+        created_at: it.created_at || '',
+        thumbnail: it.thumbnail || null,
+        categories: cat0 ? [{ name: cat0.name || '', slug: cat0.slug || '' }] : [],
+        channel: { slug: ch2.slug || it.slug || '', user: { username: (ch2.user && ch2.user.username) || '' } }
+      };
+    }
     browse.raw = browse.raw.concat(arr);
     browse.page = pg + 1;
-    renderBrowse();
+    // Beyond the rendered window a repaint per page is wasted work; every
+    // third page keeps the chip counts and loading card fresh enough.
+    if (browse.streams.length < browse.renderLimit || pg % 3 === 0) renderBrowse();
     // Chain more pages while filling. Filters (category, Discover, languages)
     // thin each page out, so keep pulling until the grid has a healthy count —
     // no more one-page-per-scroll crawling to find anything.
@@ -1737,10 +1776,14 @@ function renderBrowse() {
   }
   browse.streams = list;
 
+  // Windowed rendering: only the first renderLimit cards live in the DOM. The
+  // window grows as focus or scrolling nears its end, so deep scans stay cheap
+  // no matter how many streams are loaded behind it.
+  if (browse.gridIdx >= browse.renderLimit) browse.renderLimit = browse.gridIdx + 40;
   var grid = document.getElementById('browse-grid');
   var savedScroll = grid.scrollTop;
   grid.innerHTML = '';
-  browse.streams.forEach(function (s, i) {
+  browse.streams.slice(0, browse.renderLimit).forEach(function (s, i) {
     var ch = s.channel || {}, user = ch.user || {};
     var card = document.createElement('div');
     card.className = 'bcard';
@@ -1850,6 +1893,7 @@ function toggleBrowseLang(idx) {
   }
   saveBrowseLangPref();
   browse.gridIdx = 0;
+  browse.renderLimit = 60;
   renderBrowse();            // just re-filter what we already fetched
 }
 function browseMove(dx, dy) {
@@ -1872,6 +1916,10 @@ function browseMove(dx, dy) {
   else if (dy === -1 && idx - BROWSE_COLS >= 0) idx -= BROWSE_COLS;
   else if (dy === 1 || dx === 1) loadBrowseMore(false);
   browse.gridIdx = idx;
+  if (idx >= browse.renderLimit - 2 * BROWSE_COLS && browse.renderLimit < browse.streams.length) {
+    browse.renderLimit += 40;          // extend the window before focus hits its edge
+    renderBrowse();
+  }
   applyBrowseFocus();
   // pull the next page as soon as focus reaches the last couple of rows
   if (browse.gridIdx >= browse.streams.length - 2 * BROWSE_COLS) loadBrowseMore(false);
@@ -2047,6 +2095,7 @@ function selectCategory(slug, name) {
   browse.category = slug || null;
   browse.categoryName = name || '';
   browse.gridIdx = 0;
+  browse.renderLimit = 60;
   closeCats();
   updateBrowseTitle();
   renderPinnedCatChips();
@@ -4561,7 +4610,10 @@ function browseCardFromEvent(e) {
     if (!browse.open) return;
     e.preventDefault();
     browseGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
-    if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) loadBrowseMore(false);
+    if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) {
+      if (browse.renderLimit < browse.streams.length) { browse.renderLimit += 40; renderBrowse(); }
+      loadBrowseMore(false);
+    }
   });
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
   var catsBtn = document.getElementById('browse-cats-btn');
@@ -5126,6 +5178,28 @@ function finishStartupFallback(preserveLastVod) {
     if (state.netDown) scheduleDownRetry();
   }
 }
+// Try to get video on screen from a single ~50ms request — the saved VOD
+// marker or the last watched channel — instead of waiting ~2s for the full
+// favorites refresh. Calls done(false) to fall back to the favorites-based
+// startup decision.
+function quickStart(done) {
+  var marker = loadLastVod();
+  if (marker) {
+    resumeLastVodAtStartup(function (resumed) { done(!!resumed); });
+    return;
+  }
+  var last = loadLast();
+  if (!last) { done(false); return; }
+  apiGet(last, function (err, raw) {
+    if (state.current || state.vod) { done(true); return; }
+    if (!err && raw) {
+      var c = normalize(last, raw);
+      state.channels[last] = c;
+      if (c.live && c.playbackUrl) { play(last, false, raw); done(true); return; }   // no refetch
+    }
+    done(false);
+  });
+}
 (function boot() {
   setMode('player');
   loadQualityPref();
@@ -5139,11 +5213,30 @@ function finishStartupFallback(preserveLastVod) {
   state.lastInput = Date.now();
   setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
   showState('splash');
+  // The quick start goes onto the Luna bus FIRST (its single request must not
+  // queue behind the favorites pool); the full refresh follows right behind
+  // and loads the other channels while playback is already starting.
+  var favoritesDone = false, favoritesWaiters = [];
+  quickStart(function (started) {
+    if (started) {
+      state.ready = true;
+      startPlayerPoll();
+      return;
+    }
+    var decide = function () {                // nothing quick-startable: wait for real data
+      resumeLastVodAtStartup(function (resumed, retryable) {
+        state.ready = true;                   // startup choice is settled; accept input now
+        startPlayerPoll();
+        if (!resumed) finishStartupWithoutVod(retryable);
+      });
+    };
+    if (favoritesDone) decide(); else favoritesWaiters.push(decide);
+  });
   fetchFavorites(function () {
-    resumeLastVodAtStartup(function (resumed, retryable) {
-      state.ready = true;                     // startup choice is settled; accept input now
-      startPlayerPoll();                      // avoid overlapping a slow initial/recovery fetch
-      if (!resumed) finishStartupWithoutVod(retryable);
-    });
+    favoritesDone = true;
+    // a quick-started VOD could not know where to return to before this
+    if (state.vod && !state.vodReturn) state.vodReturn = startupLiveTarget();
+    for (var i = 0; i < favoritesWaiters.length; i++) favoritesWaiters[i]();
+    favoritesWaiters = [];
   });
 })();
