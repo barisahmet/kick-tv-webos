@@ -166,6 +166,8 @@ function normalize(slug, raw) {
     viewers: live ? (raw.livestream.viewer_count || 0) : 0,
     title: live ? (raw.livestream.session_title || '') : '',
     category: cats && cats[0] ? (cats[0].name || '') : '',
+    categorySlug: cats && cats[0] ? (cats[0].slug || '') : '',
+    startedAt: live ? (raw.livestream.created_at || null) : null,
     playbackUrl: raw.playback_url || null,
     chatroomId: (raw.chatroom && raw.chatroom.id) || null
   };
@@ -350,6 +352,15 @@ function fmtViewers(n) {
   if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
   return String(n);
 }
+// How long a stream has been live, from Kick's UTC "YYYY-MM-DD HH:MM:SS".
+function fmtUptime(str) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(str || '');
+  if (!m) return '';
+  var mins = Math.floor((Date.now() - Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])) / 60000);
+  if (mins < 1) return 'just started';
+  if (mins < 60) return 'live ' + mins + 'm';
+  return 'live ' + Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+}
 // The little pushpin. It is filled with currentColor so the CSS decides whether
 // it looks green (pinned) or grey (the button you see on hover).
 function pinIcon() {
@@ -371,6 +382,7 @@ function firstLive() {
 /* Playback */
 function showState(mode) {
   var idle = document.getElementById('idle');
+  document.getElementById('home').className = 'hidden';   // showNothing re-shows it when idle
   if (!mode || mode === 'hidden') { idle.className = 'hidden'; return; }
   idle.className = mode;                 // splash | offline | available | empty | lost
   if (mode === 'splash') return;         // the splash just shows the KICK TV wordmark
@@ -398,7 +410,60 @@ function showNothing() {
   if (state.vod) return;                 // a past video is playing; never show an idle screen over it
   var m = idleModeForNothing();
   showState(m);
+  if (m === 'offline' || m === 'available') {   // mini home: continue watching + live tiles
+    renderHome();
+    document.getElementById('home').className = '';
+  }
   if (m === 'empty' && state.ready) openSidebar();
+}
+// The mini home screen shown on the idle screen: a Continue Watching card for
+// the saved last VOD (with its resume point) and a row of live favorites.
+function renderHome() {
+  var marker = loadLastVod();
+  var cwrap = document.getElementById('home-continue');
+  if (marker) {
+    var entry = loadVodProgress().items[marker.slug + ':' + marker.id];
+    var card = document.getElementById('home-resume');
+    card.innerHTML = '';
+    var nm = document.createElement('div'); nm.className = 'homename';
+    nm.textContent = marker.name || marker.slug;
+    card.appendChild(nm);
+    var sub = document.createElement('div'); sub.className = 'homesub';
+    sub.textContent = (entry && entry.position >= 10)
+      ? 'Resume at ' + fmtClock(entry.position) + (entry.duration ? ' / ' + fmtClock(entry.duration) : '')
+      : 'Past video';
+    card.appendChild(sub);
+    if (entry && entry.position >= 10 && entry.duration > 0) {
+      var tr = document.createElement('div'); tr.className = 'homeprog';
+      var fl = document.createElement('div'); fl.className = 'homeprogfill';
+      fl.style.width = Math.round(Math.min(1, entry.position / entry.duration) * 100) + '%';
+      tr.appendChild(fl);
+      card.appendChild(tr);
+    }
+    cwrap.className = '';
+  } else cwrap.className = 'hidden';
+  var row = document.getElementById('home-live-row');
+  row.innerHTML = '';
+  var shown = 0;
+  for (var i = 0; i < state.order.length && shown < 5; i++) {
+    var s = state.order[i], c = state.channels[s];
+    if (!c || !c.live) continue;
+    shown++;
+    var t = document.createElement('div');
+    t.className = 'hometile';
+    t.setAttribute('data-slug', s);
+    var av = document.createElement('div'); av.className = 'homeav';
+    if (c.avatar) av.style.backgroundImage = 'url(' + c.avatar + ')';
+    else av.textContent = (c.name || s).charAt(0).toUpperCase();
+    t.appendChild(av);
+    var hn = document.createElement('div'); hn.className = 'hometname'; hn.textContent = c.name;
+    t.appendChild(hn);
+    var hv = document.createElement('div'); hv.className = 'hometsub';
+    hv.textContent = fmtViewers(c.viewers) + (c.category ? ' · ' + c.category : '');
+    t.appendChild(hv);
+    row.appendChild(t);
+  }
+  document.getElementById('home-live').className = shown ? '' : 'hidden';
 }
 function setBanner(msg) {
   var el = document.getElementById('pbstatus');
@@ -689,9 +754,20 @@ function setOverlayAvatar(avatarUrl, name) {
 function fillOverlay(c) {
   setOverlayAvatar(c.avatar, c.name);
   document.getElementById('ov-name').textContent = c.name;
-  document.getElementById('ov-viewers').textContent = c.live ? fmtViewers(c.viewers) + ' viewers' : 'Offline';
-  document.getElementById('ov-title').textContent =
-    (c.category ? c.category + ' · ' : '') + (c.title || '');
+  var up = c.live && c.startedAt ? fmtUptime(c.startedAt) : '';
+  document.getElementById('ov-viewers').textContent =
+    c.live ? (fmtViewers(c.viewers) + ' viewers' + (up ? ' · ' + up : '')) : 'Offline';
+  // The category is a clickable chip: clicking it opens Browse filtered to it.
+  var titleEl = document.getElementById('ov-title');
+  titleEl.innerHTML = '';
+  if (c.category) {
+    var cat = document.createElement('span');
+    cat.className = 'ovcat';
+    if (c.categorySlug) cat.setAttribute('data-catslug', c.categorySlug);
+    cat.textContent = c.category;
+    titleEl.appendChild(cat);
+    if (c.title) titleEl.appendChild(document.createTextNode(' · ' + c.title));
+  } else titleEl.textContent = c.title || '';
 }
 function showOverlay(c) {
   fillOverlay(c);
@@ -1032,7 +1108,7 @@ function refreshSide() {
   setTimeout(function () { minned = true; stop(); }, 700); // keep it spinning for at least one full turn
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar(); else openSidebar();
-    if (!state.current && !state.vod) showState(idleModeForNothing());
+    if (!state.current && !state.vod) showNothing();
     done = true; stop();
   });
 }
@@ -1182,7 +1258,7 @@ function addChannelBySlug(raw) {
     }
     fetchFavorites(function () {
       if (wasAdd && !state.sidebarOpen) openSidebar(); else if (state.sidebarOpen) renderSidebar(slug);
-      if (!state.current && !state.vod && state.mode === 'player') showState(idleModeForNothing());
+      if (!state.current && !state.vod && state.mode === 'player') showNothing();
     });
   });
 }
@@ -1203,27 +1279,40 @@ var BROWSE_LANGS = [
   { label: 'Russian',  value: 'Russian' }
 ];
 var BROWSE_COLS = 4;
-var browse = { open: false, lang: 'all', langIdx: 0, zone: 'grid', gridIdx: 0,
+var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                category: null, categoryName: '', session: 0 };
 
+// Selected languages persist as a JSON array; an empty selection means All.
+// Older installs stored a single string — migrate it on load.
 function loadBrowseLangPref() {
   var v = null;
   try { v = localStorage.getItem('kicktv.browselang'); } catch (e) {}
-  browse.lang = v || 'all';
-  browse.langIdx = 0;
-  for (var i = 0; i < BROWSE_LANGS.length; i++) {
-    if (BROWSE_LANGS[i].value === browse.lang) { browse.langIdx = i; break; }
+  browse.langs = [];
+  if (v && v.charAt(0) === '[') {
+    try {
+      var arr = JSON.parse(v);
+      for (var i = 0; i < arr.length; i++) {
+        for (var j = 1; j < BROWSE_LANGS.length; j++) {
+          if (BROWSE_LANGS[j].value === arr[i]) { browse.langs.push(arr[i]); break; }
+        }
+      }
+    } catch (e2) {}
+  } else if (v && v !== 'all') {
+    for (var k = 1; k < BROWSE_LANGS.length; k++) {
+      if (BROWSE_LANGS[k].value === v) { browse.langs.push(v); break; }
+    }
   }
+  browse.langIdx = 0;
 }
-function saveBrowseLangPref() { try { localStorage.setItem('kicktv.browselang', browse.lang); } catch (e) {} }
+function saveBrowseLangPref() { try { localStorage.setItem('kicktv.browselang', JSON.stringify(browse.langs)); } catch (e) {} }
 function setBrowseStatus(msg) { document.getElementById('browse-status').textContent = msg || ''; }
 function thumbUrl(s) {
   var t = s && s.thumbnail;
   if (!t) return null;
   return t.src || t.url || (typeof t === 'string' ? t : null);
 }
-function openBrowse() {
+function openBrowse(categorySlug, categoryName) {
   if (!state.ready) return;
   browse.open = true;
   showCursor();
@@ -1233,7 +1322,9 @@ function openBrowse() {
   loadBrowseLangPref();
   renderBrowseLangs();
   browse.zone = 'grid'; browse.gridIdx = 0;
-  browse.category = null; browse.categoryName = '';
+  // optionally open pre-filtered (the clickable category in the top bar)
+  browse.category = categorySlug || null;
+  browse.categoryName = categorySlug ? (categoryName || '') : '';
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   document.getElementById('browse-grid').innerHTML = '';
@@ -1289,7 +1380,7 @@ function renderBrowseLangs() {
 }
 function renderBrowse() {
   var list = (browse.raw || []).slice();
-  if (browse.lang !== 'all') list = list.filter(function (s) { return s.language === browse.lang; });
+  if (browse.langs.length) list = list.filter(function (s) { return browse.langs.indexOf(s.language) !== -1; });
   if (browse.category) list = list.filter(function (s) {
     return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
   });
@@ -1337,7 +1428,7 @@ function renderBrowse() {
   if (!browse.streams.length) {
     setBrowseStatus(browse.fetching ? 'Loading...' :
       (browse.category ? 'No ' + browse.categoryName + ' streams in the top live list' :
-       (browse.lang === 'all' ? 'Nothing live right now' : 'No live channels in this language yet')));
+       (!browse.langs.length ? 'Nothing live right now' : 'No live channels in these languages yet')));
   } else setBrowseStatus('');
 
   if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
@@ -1348,7 +1439,7 @@ function applyBrowseFocus() {
   for (var i = 0; i < langsEl.children.length; i++) {
     var chip = langsEl.children[i];
     chip.className = 'blang' +
-      (BROWSE_LANGS[i].value === browse.lang ? ' sel' : '') +
+      ((i === 0 ? !browse.langs.length : browse.langs.indexOf(BROWSE_LANGS[i].value) !== -1) ? ' sel' : '') +
       (browse.zone === 'lang' && i === browse.langIdx ? ' focused' : '');
   }
   var grid = document.getElementById('browse-grid');
@@ -1363,9 +1454,16 @@ function applyBrowseFocus() {
       grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
   }
 }
-function selectBrowseLang(idx) {
+// Toggle a language chip in or out of the selection. The All chip (index 0)
+// clears the selection. Multiple languages can be active at once.
+function toggleBrowseLang(idx) {
   browse.langIdx = idx;
-  browse.lang = BROWSE_LANGS[idx].value;
+  if (idx === 0) browse.langs = [];
+  else {
+    var v = BROWSE_LANGS[idx].value;
+    var i = browse.langs.indexOf(v);
+    if (i === -1) browse.langs.push(v); else browse.langs.splice(i, 1);
+  }
   saveBrowseLangPref();
   browse.gridIdx = 0;
   renderBrowse();            // just re-filter what we already fetched
@@ -1375,7 +1473,7 @@ function browseMove(dx, dy) {
     if (dy === 1) { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
     if (dx !== 0) {
       var n = browse.langIdx + dx;
-      if (n >= 0 && n < BROWSE_LANGS.length) selectBrowseLang(n);
+      if (n >= 0 && n < BROWSE_LANGS.length) { browse.langIdx = n; applyBrowseFocus(); }  // move focus only; OK toggles
     }
     return;
   }
@@ -1395,7 +1493,7 @@ function browseMove(dx, dy) {
   if (browse.gridIdx >= browse.streams.length - 2 * BROWSE_COLS) loadBrowseMore(false);
 }
 function browseActivate() {
-  if (browse.zone === 'lang') { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
+  if (browse.zone === 'lang') { toggleBrowseLang(browse.langIdx); return; }  // OK toggles the chip; Down enters the grid
   var s = browse.streams[browse.gridIdx];
   if (s && s.channel && s.channel.slug) {
     browse.open = false;
@@ -3800,8 +3898,7 @@ function browseCardFromEvent(e) {
     while (el && el !== this && !(el.getAttribute && el.getAttribute('data-idx') !== null && el.getAttribute('data-idx') !== undefined)) el = el.parentNode;
     if (el && el !== this && el.getAttribute('data-idx') != null) {
       browse.zone = 'lang';
-      selectBrowseLang(parseInt(el.getAttribute('data-idx'), 10));
-      applyBrowseFocus();
+      toggleBrowseLang(parseInt(el.getAttribute('data-idx'), 10));
     }
   });
   var browseGrid = document.getElementById('browse-grid');
@@ -3975,6 +4072,28 @@ function browseCardFromEvent(e) {
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();
     else if (act === 'dim') dimQuickKey();
+  });
+  // The category chip in the top bar opens Browse filtered to that category.
+  document.getElementById('ov-title').addEventListener('click', function (e) {
+    var el = e.target;
+    if (!(el.getAttribute && el.getAttribute('data-catslug'))) return;
+    e.stopPropagation();
+    if (!state.ready || state.mode !== 'player') return;
+    openBrowse(el.getAttribute('data-catslug'), el.textContent);
+  });
+  // Mini home screen: Continue Watching card + live-favorite tiles.
+  document.getElementById('home-resume').addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeSidebar();
+    retryLastVodAfterReconnect();      // the same resolver the startup recovery uses
+  });
+  document.getElementById('home-live-row').addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-slug'))) el = el.parentNode;
+    if (!el || el === this) return;
+    e.stopPropagation();
+    var slug = el.getAttribute('data-slug');
+    if (state.channels[slug] && state.channels[slug].live) { closeSidebar(); play(slug); }
   });
   // VOD centre play/pause button and the -30/+30 skip buttons beside it
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
@@ -4245,6 +4364,25 @@ function retryLastVodAfterReconnect() {
   });
 }
 function finishStartupWithoutVod(preserveLastVod) {
+  // The last watched channel may be one you don't follow (opened from Browse).
+  // It is not in the favorites data, so look it up directly and give it the
+  // same "last watched wins" priority a followed channel gets.
+  var last = loadLast();
+  if (last && state.order.indexOf(last) === -1 && !state.netDown) {
+    apiGet(last, function (err, raw) {
+      if (state.current || state.vod) return;        // something else started meanwhile
+      if (!err && raw) {
+        var c = normalize(last, raw);
+        state.channels[last] = c;
+        if (c.live && c.playbackUrl) { play(last, preserveLastVod); return; }
+      }
+      finishStartupFallback(preserveLastVod);        // offline or gone: the usual chain
+    });
+    return;
+  }
+  finishStartupFallback(preserveLastVod);
+}
+function finishStartupFallback(preserveLastVod) {
   var target = startupLiveTarget();
   if (target) { play(target, preserveLastVod); return; }
   // Nothing to play. On a fresh, empty setup, open the live browser so there

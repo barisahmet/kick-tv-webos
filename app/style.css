@@ -33,6 +33,37 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #ov-viewers { color: #53fc18; margin-right: 24px; }
 #ov-title { display: block; font-size: 26px; color: #bcbcbe; margin-top: 8px; }
+.ovcat[data-catslug] { cursor: pointer; }
+.ovcat[data-catslug]:hover { color: #53fc18; text-decoration: underline; }
+
+/* Mini home screen on the idle screen: continue watching + live tiles */
+#home { position: absolute; left: 0; right: 0; bottom: 130px; z-index: 5; }
+.home-head { font-size: 26px; color: #9a9a9d; margin: 0 0 12px; text-align: center; }
+#home-continue { margin-bottom: 26px; }
+#home-resume {
+  width: 560px; margin: 0 auto; box-sizing: border-box;
+  background: rgba(23,26,28,0.9); border: 1px solid #2f3438; border-radius: 14px;
+  padding: 18px 22px; cursor: pointer; text-align: left;
+}
+#home-resume:hover { border-color: #53fc18; }
+.homename { font-size: 26px; font-weight: 700; color: #e7e9ea; }
+.homesub { font-size: 20px; color: #9a9a9d; margin-top: 4px; }
+.homeprog { height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; margin-top: 12px; overflow: hidden; }
+.homeprogfill { height: 100%; background: #53fc18; }
+#home-live-row { display: flex; justify-content: center; }
+.hometile {
+  width: 250px; box-sizing: border-box; margin: 0 10px; padding: 18px;
+  background: rgba(23,26,28,0.9); border: 1px solid #2f3438; border-radius: 14px;
+  cursor: pointer; text-align: center;
+}
+.hometile:hover { border-color: #53fc18; }
+.homeav {
+  width: 84px; height: 84px; border-radius: 50%; margin: 0 auto 12px;
+  background: #3a3d40 center/cover no-repeat;
+  color: #fff; font-size: 38px; font-weight: 700; line-height: 84px; text-align: center;
+}
+.hometname { font-size: 26px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hometsub { font-size: 20px; color: #9a9a9d; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Channel sidebar. Slate colours. Slides in from the left. */
 #sidebar {
