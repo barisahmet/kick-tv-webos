@@ -734,6 +734,7 @@ function openSidebar() {
   resetIdle();
   updateGear();
   placeDiagnostics();
+  if (state.vod) showVodBar();                        // VOD seek bar rides with the sidebar
   // only refetch when the data is stale, so opening the list stays snappy
   if (Date.now() - state.lastFetch > 8000) {
     fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
@@ -746,6 +747,7 @@ function closeSidebar() {
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
+  hideVodBar();                                       // VOD seek bar hides with the sidebar
   updateGear();
   placeDiagnostics();
 }
@@ -1899,7 +1901,7 @@ function showVodOverlay() {
   showVodBar();
   showVodPlay();
   clearTimeout(overlayTimer);
-  overlayTimer = setTimeout(function () { ov.className = 'hidden'; hideVodBar(); hideVodPlay(); }, 4000);
+  overlayTimer = setTimeout(function () { ov.className = 'hidden'; hideVodPlay(); if (!state.sidebarOpen) hideVodBar(); }, 4000);
 }
 // The seek bar: a wavy line for the played part, a flat line for the rest, and a
 // vertical handle at the play head. Redrawn a couple of times a second while up.
@@ -1916,10 +1918,8 @@ function drawVodBar(cur, dur) {
   document.getElementById('vodbar-cur').textContent = fmtClock(cur);
   document.getElementById('vodbar-dur').textContent = fmtClock(dur);
 }
-// Keep the bar clear of the sidebar when it is open.
-function placeVodBar() {
-  document.getElementById('vodbar').style.left = state.sidebarOpen ? '500px' : '210px';
-}
+// The bar is a fixed, centred width now (see CSS), so nothing to reposition.
+function placeVodBar() {}
 function drawVodBarNow() {
   var v = document.getElementById('video');
   if (!state.vod || vodDragging || !isFinite(v.duration) || !v.duration) return;
@@ -2073,56 +2073,6 @@ function liveTarget(video, range) {
   if (typeof target !== 'number' || !isFinite(target) ||
       target < range.start || target > range.end) target = range.end - 1;
   return Math.max(range.start, Math.min(range.end - 0.1, target));
-}
-function rewindLive() {
-  if (!state.current || state.vod) return;
-  var video = document.getElementById('video');
-  var range;
-  try { range = liveSeekRange(video); } catch (e) { range = null; }
-  if (!range || range.end - range.start < 3) { toast('Live rewind is not available yet'); return; }
-  var edge = liveTarget(video, range);
-  var target = Math.max(range.start + 0.25, Math.min(edge, (video.currentTime || edge) - 30));
-  if ((video.currentTime || edge) - target < 2) { toast('Live rewind is not available yet'); return; }
-  var wasRewound = PB.rewound;
-  PB.rewound = true;
-  PB.userSeekUntil = Date.now() + 8000;
-  if (state.hls && state.hls.config) state.hls.config.maxLiveSyncPlaybackRate = 1;
-  try { video.playbackRate = 1; video.currentTime = target; }
-  catch (e) {
-    PB.rewound = wasRewound;
-    PB.userSeekUntil = 0;
-    if (state.hls && state.hls.config) {
-      state.hls.config.maxLiveSyncPlaybackRate = wasRewound ? 1 : (settings.lowlatency ? 1.5 : 1);
-    }
-    toast('Live rewind failed');
-    return;
-  }
-  toast('Live rewind · ' + Math.max(1, Math.round(edge - target)) + 's behind');
-  drawDiagnostics();
-}
-function jumpToLive() {
-  if (!state.current || state.vod) return;
-  var video = document.getElementById('video');
-  var range;
-  try { range = liveSeekRange(video); } catch (e) { range = null; }
-  if (!range) { toast('Live edge is not available'); return; }
-  var target = liveTarget(video, range);
-  var wasRewound = PB.rewound;
-  PB.rewound = false;
-  PB.userSeekUntil = Date.now() + 8000;
-  if (state.hls && state.hls.config) state.hls.config.maxLiveSyncPlaybackRate = settings.lowlatency ? 1.5 : 1;
-  try { video.playbackRate = 1; video.currentTime = target; }
-  catch (e) {
-    PB.rewound = wasRewound;
-    PB.userSeekUntil = 0;
-    if (state.hls && state.hls.config) {
-      state.hls.config.maxLiveSyncPlaybackRate = wasRewound ? 1 : (settings.lowlatency ? 1.5 : 1);
-    }
-    toast('Could not jump to live');
-    return;
-  }
-  toast('Back to live');
-  drawDiagnostics();
 }
 
 /* Optional playback diagnostics. This deliberately reads only public media and
@@ -3490,14 +3440,8 @@ document.addEventListener('keydown', function (e) {
   if (isChUp(k)) { chpopMove(-1); return; }            // channel up/down surf the live list
   if (isChDown(k)) { chpopMove(1); return; }
   if (k === KEY.OK && state.notifyCurrent) { activateNotify(); return; }
-  if (k === KEY.REW) {
-    if (state.vod) seekVod(-60); else rewindLive();
-    return;
-  }
-  if (k === KEY.FF) {
-    if (state.vod) seekVod(60); else jumpToLive();
-    return;
-  }
+  if (k === KEY.REW) { if (state.vod) seekVod(-60); return; }
+  if (k === KEY.FF) { if (state.vod) seekVod(60); return; }
   if (state.sidebarOpen) {
     resetIdle();
     if (state.playerToolFocus >= 0) {
@@ -3589,8 +3533,9 @@ function browseCardFromEvent(e) {
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
     lastX = e.clientX; lastY = e.clientY;
     showCursor();      // a real move brings the pointer back
-    if (state.vod) { showVodOverlay(); }   // in a VOD, reveal the seek bar too
+    if (!state.sidebarOpen && Date.now() < state.suppressNudgeUntil) return;   // click-to-hide grace
     nudgeSidebar();
+    if (state.vod) showVodOverlay();               // reveal the VOD seek bar
   });
   document.getElementById('side-refresh').addEventListener('click', function (e) {
     e.stopPropagation();
@@ -3768,9 +3713,7 @@ function browseCardFromEvent(e) {
     if (vodDragging) vodPreview(e);
   });
   document.addEventListener('mouseup', function (e) {
-    if (!vodDragging) return;
-    vodDragging = false;
-    seekVodFrac(vodTrackFrac(e));               // commit the seek on release
+    if (vodDragging) { vodDragging = false; seekVodFrac(vodTrackFrac(e)); }
   });
   // Dedicated player tools: stream quality and Settings stay separate.
   var settingsButton = document.getElementById('settings-button');
