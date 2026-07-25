@@ -3033,6 +3033,12 @@ function blurVodBar() {
   vodBarFocused = false;
   applyVodBarFocus();
 }
+// Showing at all, focused or not. Back dismisses the controls whenever they are
+// up, and only exits the video once they are gone.
+function vodBarVisible() {
+  var el = document.getElementById('vodbar');
+  return !!el && el.className.indexOf('hidden') === -1;
+}
 // Dismiss the whole VOD control set. Shared by the overlay timeout and by Back.
 function hideVodControls() {
   document.getElementById('overlay').className = 'hidden';
@@ -4891,7 +4897,8 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.RIGHT) { seekVod(30); return; }
     if (k === KEY.UP)    { blurVodBar(); return; }       // step back up to the video
     if (k === KEY.DOWN)  { showVodOverlay(); return; }   // already at the bottom; keep it alive
-    if (k === KEY.BACK)  { hideVodControls(); return; }  // dismiss; a second Back exits
+    // Back is handled once, below, for the whole VOD branch — a focused bar is
+    // by definition a visible one, so the general rule already covers it.
     if (k === KEY.OK) {
       if (seekAccum.baseTime !== null) applySeekAccum(); // commit the queued jump now
       else toggleVodPlay();
@@ -4900,7 +4907,11 @@ document.addEventListener('keydown', function (e) {
     // PLAY, PAUSE, REW, FF and STOP fall through to the normal VOD keys below
   }
   if (state.vod) {                                       // watching a past video
-    if (k === KEY.BACK || k === KEY.STOP) { exitVod(); return; }
+    if (k === KEY.STOP) { exitVod(); return; }           // stop always means stop
+    if (k === KEY.BACK) {                                // dismiss the controls first
+      if (vodBarVisible()) { hideVodControls(); return; }
+      exitVod(); return;
+    }
     if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
     if (k === KEY.UP) { chpopMove(-1); return; }         // up surfs live channels
     if (k === KEY.DOWN) { focusVodBar(); return; }       // down grabs the seek bar
