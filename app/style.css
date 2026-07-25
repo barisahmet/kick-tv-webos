@@ -138,6 +138,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .favrow.current { border-left-color: #53fc18; }
 .favrow.offline { opacity: 0.5; }            /* dim offline channels, and keep them dim on hover */
 .favrow.offline .pinmark { opacity: 0.45; }  /* fade the pin marker a bit more when offline */
+/* A blocked category's channel is still live — it shows viewers, category and
+   title as usual, just dimmed like an offline row and sunk to the bottom. */
+.favrow.blocked { opacity: 0.5; }
+.favrow.blocked .pinmark { opacity: 0.45; }
 .favrow.offlinegroup {
   height: 58px; color: #b9bdc0; border-left: 0; display: flex;
   align-items: center; padding: 0 24px; box-sizing: border-box;
@@ -501,6 +505,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 .catpin.on { color: #53fc18; }
 .catpin .pinicon { width: 24px; height: 24px; }
+/* Block badge, beside the pin. The viewer count owns the top-right corner. */
+.catblock {
+  position: absolute; top: 8px; left: 56px;
+  width: 40px; height: 40px; border-radius: 20px;
+  background: rgba(0,0,0,0.65); color: #9a9a9d; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.catblock:hover { color: #fff; }
+.catblock.on { color: #e91916; }
+.catblock .blockicon { width: 24px; height: 24px; }
 .bcard {
   box-sizing: border-box; width: 384px; margin: 8px; border-radius: 12px; overflow: hidden;
   position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
@@ -677,6 +691,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #chpop-list { max-height: 720px; overflow: hidden; padding: 10px; }
 .chrow { display: flex; align-items: center; height: 74px; padding: 0 16px; border-radius: 10px; cursor: pointer; }
 .chrow.focused { background: #48505b; box-shadow: inset 3px 0 0 rgba(83,252,24,0.6); }
+.chrow.blocked { opacity: 0.5; }
 .chav {
   width: 50px; height: 50px; border-radius: 25px; flex-shrink: 0; margin-right: 16px;
   background: #3a3d40 center/cover no-repeat;
@@ -989,6 +1004,37 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
 }
 #chatopt-list { max-height: 610px; overflow: hidden; }
+
+/* Blocked categories popup, opened from the Settings row. */
+#blockedcatsmodal {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 78;
+  background: rgba(0,0,0,0.35);
+}
+#blockedcatsbox {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 520px;
+  background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
+  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+}
+#blockedcats-head {
+  font-size: 26px; font-weight: 800; color: #fff;
+  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
+}
+#blockedcats-list { max-height: 610px; overflow: hidden; }
+.bcatrow {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 26px; font-size: 27px; color: #d6d7d8; cursor: pointer;
+}
+.bcatrow.focused { background: #2a2f33; }
+.bcatx { color: #7c8084; font-weight: 700; font-size: 24px; padding: 0 6px; }
+.bcatrow.focused .bcatx, .bcatx:hover { color: #ff5f52; }
+.bcatempty { padding: 16px 26px; font-size: 23px; color: #7c8084; }
+/* Route to where blocking actually happens, always shown — most needed when the
+   list is empty and the user has no idea where the block button lives. */
+.bcatlink { color: #9a9a9d; font-size: 24px; border-top: 1px solid #2f3438; margin-top: 6px; }
+.bcatlink .slabel { color: #9a9a9d; }
+.bcatlink.focused { background: #2a2f33; }
+.bcatlink.focused .slabel { color: #53fc18; }
+.bcatchev { color: #53fc18; font-weight: 700; font-size: 26px; padding: 0 6px; }
 
 /* Detached callout balloon. JS places it beside the focused row and aligns the
    arrow with that row. The update dialog remains above it at z-index 92. */

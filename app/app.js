@@ -214,16 +214,18 @@ function offlineStub(slug) {
 // live ones by viewer count, then pinned-but-offline, then everyone else
 // offline. The two offline groups are alphabetical.
 function sortOrder(favs) {
+  // 0 pinned-live, 1 live, 2 blocked-live, 3 pinned-offline, 4 offline.
+  // A blocked live channel ignores its pin — that is the point of blocking.
   function grp(c) {
-    if (c.live) return isPinned(c.slug) ? 0 : 1;
-    return isPinned(c.slug) ? 2 : 3;
+    if (c.live) return isChannelBlocked(c) ? 2 : (isPinned(c.slug) ? 0 : 1);
+    return isPinned(c.slug) ? 3 : 4;
   }
   state.order = favs.slice().sort(function (a, b) {
     var ca = state.channels[a], cb2 = state.channels[b];
     var ga = grp(ca), gb = grp(cb2);
     if (ga !== gb) return ga - gb;
-    if (ga >= 2) return ca.name.toLowerCase() < cb2.name.toLowerCase() ? -1 : 1;   // offline: alphabetical
-    return cb2.viewers - ca.viewers;                                               // live: by viewers
+    if (ga >= 3) return ca.name.toLowerCase() < cb2.name.toLowerCase() ? -1 : 1;   // offline: alphabetical
+    return cb2.viewers - ca.viewers;                            // live, blocked included: by viewers
   });
 }
 // Cap how many channel lookups are in flight at once. Firing all of them together
@@ -334,12 +336,13 @@ function alertAllowed(item) {
   if (!item || settings.alerts === 'off' || getFavorites().indexOf(item.slug) === -1) return false;
   var c = state.channels[item.slug];
   if (!c || !c.live) return false;
+  if (isChannelBlocked(c)) return false;   // a blocked category never interrupts
   return settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(item.slug));
 }
 function notifyUiBusy() {
   return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||
     browse.open || vods.open || cats.open || settings.open || dimopt.open ||
-    chatopt.open || (qualityopt && qualityopt.open) || updateopen || chpop.open;
+    chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen || chpop.open;
 }
 function notifyOnline(items) {
   items.forEach(function (item) {
@@ -449,6 +452,13 @@ function fmtUptime(str) {
 function pinIcon() {
   return '<svg class="pinicon" viewBox="0 0 24 24" fill="currentColor">' +
          '<path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H19v-2l-3-2z"/></svg>';
+}
+// A circle with a slash, drawn the same way as pinIcon so CSS picks the colour.
+function blockIcon() {
+  return '<svg class="blockicon" viewBox="0 0 24 24" fill="currentColor">' +
+         '<path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 2c1.85 0 3.55.63 4.9 1.69' +
+         'L5.69 16.9A7.96 7.96 0 0112 4zm0 16a7.96 7.96 0 01-4.9-1.69L18.31 7.1' +
+         'A7.96 7.96 0 0112 20z"/></svg>';
 }
 function liveCount() {
   var n = 0;
@@ -1253,7 +1263,10 @@ function renderSidebar(focusKey) {
     }
     var isTemp = item.type === 'temp';
     var slug = item.slug, c = state.channels[slug], pinned = !isTemp && isPinned(slug);
+    // A blocked row keeps all its live information and is merely dimmed.
+    var blocked = isChannelBlocked(c);
     var base = 'favrow' + (isTemp ? ' temp' : '') + (c.live ? '' : ' offline') +
+               (blocked ? ' blocked' : '') +
                (slug === state.current ? ' current' : '') + (pinned ? ' pinned' : '');
     var row = document.createElement('div');
     row.setAttribute('data-base', base);
@@ -1991,6 +2004,7 @@ function openCats() {
 }
 function closeCats() {
   cats.open = false;
+  hideTip();
   try { document.getElementById('cats-search').blur(); } catch (e) {}
   document.getElementById('cats').className = 'hidden';
 }
@@ -2068,6 +2082,12 @@ function renderCats() {
     pin.setAttribute('title', 'Pin category');
     pin.innerHTML = pinIcon();
     banner.appendChild(pin);
+    var block = document.createElement('span');
+    block.className = 'catblock' + (isCatBlocked(c.slug) ? ' on' : '');
+    block.setAttribute('data-act', 'catblock');
+    block.setAttribute('title', 'Block category');
+    block.innerHTML = blockIcon();
+    banner.appendChild(block);
     var name = document.createElement('div');
     name.className = 'cname';
     name.textContent = c.name || c.slug;
@@ -2190,6 +2210,67 @@ function renderPinnedCatChips() {
     chip.appendChild(x);
     box.appendChild(chip);
   }
+}
+
+/* Blocked categories. A category you would rather not see: followed channels
+   streaming in one stay in your list but sink to the bottom of the live group,
+   greyed out, and stop raising alerts or being picked automatically. */
+var BLOCKEDCATS_KEY = 'kicktv.blockedcats';
+var BLOCKEDCATS_LIMIT = 32;   // only ever shown in a scrollable popup, unlike the 8 pinned chips
+// sortOrder asks this hundreds of times per pass, so the parsed list is kept
+// around. saveBlockedCats is the only writer, which is the whole invalidation
+// story. Callers must treat the returned array as read-only.
+var blockedCatsMemo = null;
+function getBlockedCats() {
+  if (blockedCatsMemo) return blockedCatsMemo;
+  var v = null;
+  try { v = JSON.parse(localStorage.getItem(BLOCKEDCATS_KEY)); } catch (e) {}
+  blockedCatsMemo = Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+  return blockedCatsMemo;
+}
+function saveBlockedCats(list) {
+  blockedCatsMemo = null;
+  try { localStorage.setItem(BLOCKEDCATS_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function isCatBlocked(slug) {
+  if (!slug) return false;
+  var l = getBlockedCats();
+  for (var i = 0; i < l.length; i++) if (l[i].slug === slug) return true;
+  return false;
+}
+// Only ever true for a live channel: an offline record carries an empty
+// categorySlug, so blocking simply does not apply to it.
+function isChannelBlocked(c) {
+  return !!(c && c.live && c.categorySlug && isCatBlocked(c.categorySlug));
+}
+// Store only — callers handle the toast and the re-render.
+function toggleCatBlock(slug, name) {
+  if (!slug) return false;
+  var l = getBlockedCats(), out = [], found = false, i;
+  for (i = 0; i < l.length; i++) { if (l[i].slug === slug) found = true; else out.push(l[i]); }
+  if (!found) {
+    out.push({ slug: slug, name: name || slug });
+    while (out.length > BLOCKEDCATS_LIMIT) out.shift();
+  }
+  saveBlockedCats(out);
+  // Pinned and blocked contradict each other. Drop the pin directly rather than
+  // through toggleCatPin, which would toast and re-render on its own.
+  if (!found && isCatPinned(slug)) {
+    var p = getPinnedCats(), keep = [];
+    for (i = 0; i < p.length; i++) if (p[i].slug !== slug) keep.push(p[i]);
+    savePinnedCats(keep);
+  }
+  return !found;
+}
+// Everything that has to catch up once the blocked set changes. Re-sorting is
+// what moves a channel into or out of the demoted tier.
+function applyBlockedChange() {
+  sortOrder(state.order.slice());
+  if (state.sidebarOpen) renderSidebar();
+  if (chpop.open) refreshChpopList();
+  renderPinnedCatChips();          // blocking may have removed a pin
+  if (cats.open) renderCats();
+  if (settings.open) renderSettings();
 }
 
 /* Past videos (VOD) popup and playback.
@@ -3309,14 +3390,16 @@ function drawDiagnostics() {
 function nextLiveAfter(slug) {
   for (var i = 0; i < state.order.length; i++) {
     var s = state.order[i];
-    if (s !== slug && state.channels[s] && state.channels[s].live) return s;
+    if (s !== slug && state.channels[s] && state.channels[s].live &&
+        !isChannelBlocked(state.channels[s])) return s;
   }
   return null;
 }
 function firstLivePinned(slug) {
   for (var i = 0; i < state.order.length; i++) {
     var s = state.order[i];
-    if (s !== slug && state.channels[s] && state.channels[s].live && isPinned(s)) return s;
+    if (s !== slug && state.channels[s] && state.channels[s].live &&
+        !isChannelBlocked(state.channels[s]) && isPinned(s)) return s;
   }
   return null;
 }
@@ -3341,7 +3424,9 @@ function closeSettingsStack() {
   updateopen = false;
   dimopt.open = false;
   chatopt.open = false;
+  blockedcats.open = false;
   qualityopt.open = false;
+  document.getElementById('blockedcatsmodal').className = 'hidden';
   document.getElementById('updatemodal').className = 'hidden';
   document.getElementById('dimoptmodal').className = 'hidden';
   document.getElementById('chatoptmodal').className = 'hidden';
@@ -3421,6 +3506,7 @@ function settingsBuild() {
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
     { kind: 'toggle', key: 'hideOffline', label: 'Hide offline' },
+    { kind: 'blockedcats', label: 'Blocked categories' },
     { kind: 'toggle', key: 'diagnostics', label: 'Diagnostics' },
     { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'choice', key: 'alerts', label: 'Live alerts',
@@ -3481,6 +3567,12 @@ function renderSettings() {
       var on = it.kind === 'dimopt' ? settings.dim : (it.kind === 'chatopt' ? settings.chat : !!settings[it.key]);
       var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = on ? 'On' : 'Off';
       el.appendChild(pill);
+    } else if (it.kind === 'blockedcats') {
+      el.setAttribute('data-focusable', '1');
+      var blab = document.createElement('span'); blab.className = 'slabel'; blab.textContent = it.label;
+      var bpill = document.createElement('span'); bpill.className = 'spill';
+      bpill.textContent = String(getBlockedCats().length);
+      el.appendChild(blab); el.appendChild(bpill);
     } else if (it.kind === 'choice') {
       el.setAttribute('data-focusable', '1');
       var clab = document.createElement('span'); clab.className = 'slabel'; clab.textContent = it.label;
@@ -3537,6 +3629,8 @@ function settingsActivate() {
     saveSettings();
     applyToggle('chat');
     renderSettings();
+  } else if (it.kind === 'blockedcats') {
+    openBlockedCats();                         // no toggle semantics; Right opens it too
   } else if (it.kind === 'choice') {
     cycleChoice(it);
     renderSettings();
@@ -3546,6 +3640,7 @@ function settingsOk() {
   var it = settings.items[settings.focus];
   if (it && it.kind === 'dimopt') openDimOpt();
   else if (it && it.kind === 'chatopt') openChatOpt();
+  else if (it && it.kind === 'blockedcats') openBlockedCats();
   else settingsActivate();
 }
 // Find the display label for a 'choice' row's current value.
@@ -3571,6 +3666,7 @@ var SETTINGS_DESC = {
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
   autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
   hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
+  blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
   diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
   dim: 'Reduce screen brightness. Press OK or use the gear for strength, scope and startup behavior, or press 0 while watching.',
   alerts: 'Choose which followed channels may show a five-second live alert.',
@@ -3586,6 +3682,7 @@ function descForSettingItem(it) {
   if (!it) return '';
   if (it.kind === 'chatopt') return SETTINGS_DESC.chat;
   if (it.kind === 'dimopt') return SETTINGS_DESC.dim;
+  if (it.kind === 'blockedcats') return SETTINGS_DESC.blockedcats;
   if (it.kind === 'toggle' || it.kind === 'choice') return SETTINGS_DESC[it.key] || '';
   return '';
 }
@@ -3622,7 +3719,7 @@ function applyDimAwareUi() {
   qualityHint.style.filter = popupFilter;
   // Settings remains readable at no darker than Medium. Every other popup uses
   // the selected strength, including Strong and Max.
-  var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox'];
+  var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox'];
   var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'toast'];
   var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
                      'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner'];
@@ -4008,6 +4105,86 @@ function chatoptActivate(dir) {
   renderChatOpt();
 }
 
+/* Blocked categories popup, opened from the Settings row. Each row unblocks. */
+var blockedcats = { open: false, focus: 0, items: [] };
+function openBlockedCats() {
+  blockedcats.open = true;
+  blockedcats.items = getBlockedCats().slice();
+  blockedcats.focus = 0;
+  document.getElementById('blockedcatsmodal').className = '';
+  renderBlockedCats();
+  touchSettings();
+}
+function closeBlockedCats() {
+  blockedcats.open = false;
+  document.getElementById('blockedcatsmodal').className = 'hidden';
+  if (settings.open) renderSettings();     // refresh the count on the row behind it
+}
+// The link row always sits last, including when nothing is blocked — that is
+// exactly when the user needs telling where the block button lives.
+function blockedcatsLinkIndex() { return blockedcats.items.length; }
+function renderBlockedCats() {
+  blockedcats.items = getBlockedCats().slice();
+  var list = document.getElementById('blockedcats-list');
+  list.innerHTML = '';
+  if (blockedcats.focus > blockedcatsLinkIndex()) blockedcats.focus = blockedcatsLinkIndex();
+  if (!blockedcats.items.length) {
+    var empty = document.createElement('div');
+    empty.className = 'bcatempty';
+    empty.textContent = 'No blocked categories';
+    list.appendChild(empty);
+  } else {
+    blockedcats.items.forEach(function (c, i) {
+      var el = document.createElement('div');
+      el.className = 'bcatrow' + (i === blockedcats.focus ? ' focused' : '');
+      el.setAttribute('data-idx', i);
+      var lab = document.createElement('span'); lab.className = 'slabel';
+      lab.textContent = c.name || c.slug;
+      var x = document.createElement('span'); x.className = 'bcatx'; x.textContent = '✕';
+      el.appendChild(lab); el.appendChild(x);
+      list.appendChild(el);
+    });
+  }
+  var link = document.createElement('div');
+  link.className = 'bcatrow bcatlink' + (blockedcats.focus === blockedcatsLinkIndex() ? ' focused' : '');
+  link.setAttribute('data-idx', String(blockedcatsLinkIndex()));
+  var llab = document.createElement('span'); llab.className = 'slabel';
+  llab.textContent = 'Block a category — open Categories';
+  var chev = document.createElement('span'); chev.className = 'bcatchev'; chev.textContent = '›';
+  link.appendChild(llab); link.appendChild(chev);
+  list.appendChild(link);
+
+  var f = list.children[blockedcats.focus] || list.lastChild;
+  if (f) {
+    var top = f.offsetTop - list.offsetTop;
+    if (top < list.scrollTop) list.scrollTop = top - 6;
+    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight)
+      list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
+  }
+  showSettingDesc('settings-desc', SETTINGS_DESC.blockedcats, f);
+}
+function blockedcatsMove(delta) {
+  var n = blockedcats.focus + delta;
+  if (n < 0 || n > blockedcatsLinkIndex()) return;
+  blockedcats.focus = n;
+  renderBlockedCats();
+}
+function blockedcatsActivate() {
+  if (blockedcats.focus === blockedcatsLinkIndex()) {   // the shortcut, not an unblock
+    closeBlockedCats();
+    closeSettingsStack();
+    openBrowse();
+    openCats();                                        // openBrowse sets browse.open first
+    return;
+  }
+  var c = blockedcats.items[blockedcats.focus];
+  if (!c) return;
+  toggleCatBlock(c.slug, c.name);          // it is blocked, so this unblocks it
+  toast('Unblocked ' + (c.name || c.slug));
+  applyBlockedChange();
+  renderBlockedCats();
+}
+
 /* Update check. Compare our appinfo version to the latest GitHub release. A
    sandboxed webOS app cannot install anything itself, so this only flags a red
    dot on the gear and shows the release notes; the user re-sideloads manually. */
@@ -4381,7 +4558,8 @@ function renderChpop() {
   chpop.list.forEach(function (slug, i) {
     var c = state.channels[slug] || {};
     var row = document.createElement('div');
-    row.className = 'chrow' + (i === chpop.idx ? ' focused' : '');
+    row.className = 'chrow' + (isChannelBlocked(c) ? ' blocked' : '') +
+                    (i === chpop.idx ? ' focused' : '');
     row.setAttribute('data-idx', i);
     var av = document.createElement('div');
     av.className = 'chav';
@@ -4458,6 +4636,23 @@ function refreshChpopList() {
 function isChUp(k) { return k === 33 || k === 427; }
 function isChDown(k) { return k === 34 || k === 428; }
 
+/* One balloon, shared by anything that wants to explain itself on hover. */
+function showTip(text, anchor) {
+  var tip = document.getElementById('browse-tip');
+  if (!tip || !anchor) return;
+  tip.textContent = text;
+  tip.className = '';
+  var r = anchor.getBoundingClientRect();
+  var left = Math.max(24, Math.min(1920 - tip.offsetWidth - 24,
+                                   r.left + r.width / 2 - tip.offsetWidth / 2));
+  tip.style.left = Math.round(left) + 'px';
+  tip.style.top = Math.round(r.bottom + 14) + 'px';
+}
+function hideTip() {
+  var tip = document.getElementById('browse-tip');
+  if (tip) tip.className = 'hidden';
+}
+
 /* Small helpers */
 function toast(msg) {
   dimToastShowing = false;   // a new toast replaces the dim popup; dimQuickKey re-flags its own
@@ -4507,6 +4702,14 @@ document.addEventListener('keydown', function (e) {
       if (cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
         var pc = displayedCats()[cats.gridIdx - 1];
         toggleCatPin(pc.slug, pc.name || pc.slug);
+      }
+    }
+    else if (k === KEY.RED) {                         // red blocks or unblocks the focused category
+      if (cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
+        var bcat = displayedCats()[cats.gridIdx - 1];
+        var nowBlocked = toggleCatBlock(bcat.slug, bcat.name || bcat.slug);
+        toast((nowBlocked ? 'Blocked ' : 'Unblocked ') + (bcat.name || bcat.slug));
+        applyBlockedChange();
       }
     }
     return;
@@ -4566,6 +4769,14 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) chatoptMove(1);
     else if (k === KEY.OK || k === KEY.RIGHT) chatoptActivate(1);
     else if (k === KEY.LEFT) chatoptActivate(-1);
+    return;
+  }
+  if (blockedcats.open) {
+    e.preventDefault();
+    if (k === KEY.BACK) closeBlockedCats();
+    else if (k === KEY.UP) blockedcatsMove(-1);
+    else if (k === KEY.DOWN) blockedcatsMove(1);
+    else if (k === KEY.OK || k === KEY.RIGHT) blockedcatsActivate();
     return;
   }
   if (settings.open) {
@@ -4812,17 +5023,9 @@ function browseCardFromEvent(e) {
   document.getElementById('browse-discover').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseDiscover(); });
   // Balloon tip explaining what Discover does.
   document.getElementById('browse-discover').addEventListener('mouseenter', function () {
-    var tip = document.getElementById('browse-tip');
-    tip.textContent = 'Hides channels you already follow, so Browse only shows new finds.';
-    tip.className = '';
-    var r = this.getBoundingClientRect();
-    var left = Math.max(24, Math.min(1920 - tip.offsetWidth - 24, r.left + r.width / 2 - tip.offsetWidth / 2));
-    tip.style.left = Math.round(left) + 'px';
-    tip.style.top = Math.round(r.bottom + 14) + 'px';
+    showTip('Hides channels you already follow, so Browse only shows new finds.', this);
   });
-  document.getElementById('browse-discover').addEventListener('mouseleave', function () {
-    document.getElementById('browse-tip').className = 'hidden';
-  });
+  document.getElementById('browse-discover').addEventListener('mouseleave', hideTip);
   document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
   // The x on the diagnostics panel switches the overlay off.
   document.getElementById('diag-close').addEventListener('click', function (e) {
@@ -4882,8 +5085,30 @@ function browseCardFromEvent(e) {
   catsGrid.addEventListener('mouseover', function (e) {
     var i = catCardIdx(e);
     if (i >= 0 && i !== cats.gridIdx) { cats.gridIdx = i; applyCatsFocus(); }
+    // mouseenter does not bubble, so the badge tip rides on the grid's mouseover
+    var t = e.target;
+    while (t && t !== catsGrid && !(t.getAttribute && t.getAttribute('data-act') === 'catblock')) t = t.parentNode;
+    if (t && t !== catsGrid) {
+      showTip('Blocked categories drop to the bottom of your channel list, greyed out, and stop showing live alerts.', t);
+    } else hideTip();
+  });
+  catsGrid.addEventListener('mouseout', function (e) {
+    if (!e.relatedTarget || !catsGrid.contains(e.relatedTarget)) hideTip();
   });
   catsGrid.addEventListener('click', function (e) {
+    var be = e.target;    // the block badge blocks instead of selecting
+    while (be && be !== catsGrid && !(be.getAttribute && be.getAttribute('data-act') === 'catblock')) be = be.parentNode;
+    if (be && be !== catsGrid) {
+      e.stopPropagation();
+      var bidx = catCardIdx(e);
+      if (bidx > 0 && displayedCats()[bidx - 1]) {
+        var bcat2 = displayedCats()[bidx - 1];
+        var nb = toggleCatBlock(bcat2.slug, bcat2.name || bcat2.slug);
+        toast((nb ? 'Blocked ' : 'Unblocked ') + (bcat2.name || bcat2.slug));
+        applyBlockedChange();
+      }
+      return;
+    }
     var pe = e.target;    // the pin badge toggles instead of selecting
     while (pe && pe !== catsGrid && !(pe.getAttribute && pe.getAttribute('data-act') === 'catpin')) pe = pe.parentNode;
     if (pe && pe !== catsGrid) {
@@ -5096,6 +5321,27 @@ function browseCardFromEvent(e) {
   chatoptList.addEventListener('mouseover', function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; renderChatOpt(); } });
   chatoptList.addEventListener('click', function (e) { var i = chatoptIdx(e); if (i >= 0) { chatopt.focus = i; chatoptActivate(); } });
   document.getElementById('chatoptmodal').addEventListener('click', function (e) { if (e.target === this) closeChatOpt(); });
+  // Blocked categories popup pointer
+  var blockedcatsList = document.getElementById('blockedcats-list');
+  function blockedcatsIdx(e) {
+    var el = e.target;
+    while (el && el !== blockedcatsList && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (!el || el === blockedcatsList) return -1;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    // the link row sits one past the last entry, so it is a valid index here
+    return (isNaN(i) || i < 0 || i > blockedcatsLinkIndex()) ? -1 : i;
+  }
+  blockedcatsList.addEventListener('mouseover', function (e) {
+    var i = blockedcatsIdx(e);
+    if (i >= 0 && i !== blockedcats.focus) { blockedcats.focus = i; renderBlockedCats(); }
+  });
+  blockedcatsList.addEventListener('click', function (e) {
+    var i = blockedcatsIdx(e);
+    if (i >= 0) { blockedcats.focus = i; blockedcatsActivate(); }
+  });
+  document.getElementById('blockedcatsmodal').addEventListener('click', function (e) {
+    if (e.target === this) closeBlockedCats();
+  });
   // Stream quality picker pointer
   var qualityoptList = document.getElementById('qualityopt-list');
   function qualityoptIdx(e) {
@@ -5254,11 +5500,11 @@ function startupLiveTarget() {
   }
   for (var i = 0; i < state.order.length; i++) {
     slug = state.order[i]; c = state.channels[slug];
-    if (c && c.live && c.playbackUrl && isPinned(slug)) return slug;
+    if (c && c.live && c.playbackUrl && !isChannelBlocked(c) && isPinned(slug)) return slug;
   }
   for (var j = 0; j < state.order.length; j++) {
     slug = state.order[j]; c = state.channels[slug];
-    if (c && c.live && c.playbackUrl) return slug;
+    if (c && c.live && c.playbackUrl && !isChannelBlocked(c)) return slug;
   }
   return null;
 }
@@ -5316,7 +5562,7 @@ function resumeLastVodAtStartup(done) {
 function startupRecoveryUiBusy() {
   return document.hidden || state.mode !== 'player' || state.sidebarOpen || saver.on ||
     browse.open || vods.open || cats.open || chpop.open || settings.open ||
-    dimopt.open || chatopt.open || qualityopt.open || updateopen;
+    dimopt.open || chatopt.open || blockedcats.open || qualityopt.open || updateopen;
 }
 function retryLastVodAfterReconnect() {
   if (!state.ready || state.current || state.vod || state.netDown || state.vodRecoveryInFlight) return;
