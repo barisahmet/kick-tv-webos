@@ -604,6 +604,7 @@ function setBanner(msg) {
 }
 function teardownVideo() {
   saveVodProgress(true);          // capture the old VOD before its media/state is replaced
+  saveLiveMark(true);             // ...and where we were in a live stream, for its recording
   resetSeekAccum();               // a queued seek belongs to the source being torn down
   PB.active = false;
   hideVodBar();
@@ -679,6 +680,8 @@ function attachStream(slug, url) {
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   PB.netRetries = 0; PB.mediaRetries = 0;
   PB.userSeekUntil = 0; PB.rewound = false;
+  liveWatchStartedMs = Date.now();   // a fresh live session to mark
+  liveMarkLastWrite = 0;
   try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
@@ -2277,6 +2280,168 @@ function clearVodProgress(key) {
     writeVodProgress(data);
   }
 }
+
+/* Live marks. Where you were in a live stream when you stopped watching, held
+   until the recording of that session turns up in Past videos. Nothing is shown
+   while the stream is still running — this is purely a note to self. */
+var LIVEMARK_KEY = 'kicktv.livemarks';
+var LIVEMARK_LIMIT = 20;
+var LIVEMARK_TTL_MS = 14 * 24 * 3600 * 1000;   // a recording that never appears fades away
+var LIVEMARK_MIN_WATCH_MS = 60000;             // ignore a stream you only glanced at
+function loadLiveMarks() {
+  try {
+    var data = JSON.parse(localStorage.getItem(LIVEMARK_KEY));
+    if (data && data.version === 1 && data.items && typeof data.items === 'object') return data;
+  } catch (e) {}
+  return { version: 1, items: {} };
+}
+function writeLiveMarks(data) {
+  try {
+    var keys = Object.keys(data.items);
+    if (keys.length > LIVEMARK_LIMIT) {
+      keys.sort(function (a, b) {
+        return (data.items[a].updated || 0) - (data.items[b].updated || 0);
+      });
+      while (keys.length > LIVEMARK_LIMIT) delete data.items[keys.shift()];
+    }
+    localStorage.setItem(LIVEMARK_KEY, JSON.stringify(data));
+  } catch (e) {}
+}
+function clearLiveMark(slug) {
+  var data = loadLiveMarks();
+  if (data.items[slug]) { delete data.items[slug]; writeLiveMarks(data); }
+}
+var LIVEMARK_MATCH_TOLERANCE_MS = 600000;   // 10 min of slack between session and recording
+var LIVEMARK_DURATION_GRACE_SEC = 120;      // a recording can stop a little short of the stream
+// Kick reports recording length in milliseconds.
+function vodDurationMs(v) { return (v && v.duration) || 0; }
+// The recording's real start. The mark was taken WHILE the stream ran, so a
+// created_at later than that capture cannot be a start — it is a record time,
+// and the true start is that minus the recording's length. This is what lets the
+// match work whichever way Kick means the field.
+function vodStartMs(v, leftAtMs) {
+  var raw = parseKickTime(v && v.created_at);
+  if (!raw) return 0;
+  return raw <= leftAtMs ? raw : raw - vodDurationMs(v);
+}
+// Does this recording's span actually cover the moment the viewer left? Used as
+// the fallback: it is the difference between "probably the same session" and
+// "the only thing left in the list", which may be an unrelated later stream.
+function vodCoversMark(v, mark) {
+  var st = vodStartMs(v, mark.leftAtMs);
+  if (!st) return false;
+  return mark.leftAtMs >= st && mark.leftAtMs <= st + vodDurationMs(v);
+}
+// Pick the recording of the session this mark came from.
+// Verified against the live API on 2026-07-25: a video item's created_at is the
+// stream start and matches the channel's startedAt exactly, so the primary match
+// is effectively an equality test and the tolerance is just slack.
+function matchVodForMark(mark, list) {
+  var sessionMs = parseKickTime(mark && mark.sessionStartedAt);
+  if (!sessionMs || !list || !list.length) return null;
+  var i, candidates = [], hits = [];
+  for (i = 0; i < list.length; i++) {
+    // The stream still running is in this list too, with is_live set and a
+    // duration of 0. It is not a finished recording.
+    if (list[i].is_live) continue;
+    // You cannot have left 90 minutes into a 40 minute recording.
+    if (vodDurationMs(list[i]) / 1000 >= mark.offsetSec - LIVEMARK_DURATION_GRACE_SEC) {
+      candidates.push(list[i]);
+    }
+  }
+  for (i = 0; i < candidates.length; i++) {
+    var st = vodStartMs(candidates[i], mark.leftAtMs);
+    if (st && Math.abs(st - sessionMs) <= LIVEMARK_MATCH_TOLERANCE_MS) hits.push(candidates[i]);
+  }
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) {                     // same start: let the title decide
+    for (i = 0; i < hits.length; i++) {
+      if (mark.title && hits[i].session_title === mark.title) return hits[i];
+    }
+    return hits[0];
+  }
+  // The start did not line up. Only accept a lone candidate whose span actually
+  // contains the moment we left — Kick prunes old recordings, so "the only one
+  // left" can easily be a different stream entirely.
+  if (candidates.length === 1 && vodCoversMark(candidates[0], mark)) return candidates[0];
+  return null;
+}
+// Where in the recording the viewer actually was. Measured against the
+// recording's own timeline, so one that starts a little after the stream went
+// live still lands in the right place.
+function positionForMark(mark, v) {
+  var startMs = vodStartMs(v, mark.leftAtMs);
+  if (!startMs) return 0;
+  var durSec = vodDurationMs(v) / 1000;
+  if (!(durSec > 0)) return 0;
+  var offset = (mark.leftAtMs - startMs) / 1000;
+  // Stop a second short of the 0.9 mark that counts as watched, so a seeded
+  // position can never make a recording you barely saw look finished.
+  var maxPos = durSec * 0.9 - 1;
+  if (offset > maxPos) offset = maxPos;
+  return offset > 0 ? Math.floor(offset) : 0;
+}
+// Past videos just opened. If the marked session has ended and its recording is
+// in this list, seed that recording's resume point and retire the mark. Progress
+// the viewer built by actually watching always wins.
+function resolveLiveMark(slug, list) {
+  var marks = loadLiveMarks();
+  var mark = marks.items[slug];
+  if (!mark) return false;
+  var now = Date.now();
+  if (now - (mark.updated || 0) > LIVEMARK_TTL_MS) { clearLiveMark(slug); return false; }
+  // Compare the session, not just the live flag: the channel may be live again
+  // with a new stream, which means the marked one is over.
+  var c = state.channels[slug];
+  if (c && c.live && c.startedAt === mark.sessionStartedAt) return false;
+  var matched = matchVodForMark(mark, list);
+  if (!matched) return false;                      // maybe next time; it expires eventually
+  var key = vodProgressKey(slug, matched);
+  var progress = loadVodProgress();
+  if (progress.items[key]) { clearLiveMark(slug); return false; }   // never rewind
+  var pos = positionForMark(mark, matched);
+  if (!(pos >= 10)) { clearLiveMark(slug); return false; }          // nothing worth resuming
+  progress.items[key] = {
+    position: pos,
+    duration: Math.floor(vodDurationMs(matched) / 1000),
+    updated: now,
+    name: mark.name,
+    title: mark.title
+  };
+  writeVodProgress(progress);
+  clearLiveMark(slug);
+  return true;
+}
+var liveWatchStartedMs = 0;   // when the current live playback began
+var liveMarkLastWrite = 0;
+// Quietly remember where the viewer is in the live stream, so the recording of
+// this session can pick up there once it ends. Nothing is shown for this.
+function saveLiveMark(force) {
+  var slug = state.current;
+  if (!slug || state.vod) return;
+  var c = state.channels[slug];
+  if (!c || !c.live || !c.startedAt) return;
+  var now = Date.now();
+  // Tuning in for a few seconds should not plant a mark hours deep.
+  if (!liveWatchStartedMs || now - liveWatchStartedMs < LIVEMARK_MIN_WATCH_MS) return;
+  if (!force && now - liveMarkLastWrite < 5000) return;
+  var startedMs = parseKickTime(c.startedAt);
+  if (!startedMs) return;
+  var offsetSec = Math.floor((now - startedMs) / 1000);
+  if (!(offsetSec >= 10)) return;
+  liveMarkLastWrite = now;
+  var data = loadLiveMarks();
+  data.items[slug] = {
+    sessionStartedAt: c.startedAt,
+    leftAtMs: now,
+    offsetSec: offsetSec,
+    name: c.name || slug,
+    title: c.title || '',
+    updated: now
+  };
+  writeLiveMarks(data);
+}
+
 function saveVodProgress(force) {
   if (!state.vod || !state.vod.key) return;
   // Ignore media events left over from the previous source until this VOD has
@@ -2454,6 +2619,9 @@ function openVods(slug) {
     var allVods = Array.isArray(data) ? data : [];
     vods.listAll = allVods.filter(playableVod);
     vods.hidden = allVods.length - vods.listAll.length;
+    // If a live session was marked and has since ended, its recording picks up
+    // where the viewer left. Must run before applyVodFilter, which reads progress.
+    try { resolveLiveMark(slug, vods.listAll); } catch (e) {}
     applyVodFilter();
     renderVods();
     if (!vods.list.length) {
@@ -2627,6 +2795,7 @@ function attachVod(source) {
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   if (state.vod) { state.vod.resumeApplied = false; state.vod.progressReady = false; }
+  liveWatchStartedMs = 0;            // a recording is not a live session
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
@@ -5009,7 +5178,10 @@ function browseCardFromEvent(e) {
   video.addEventListener('loadedmetadata', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('durationchange', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });
-  video.addEventListener('timeupdate', function () { if (state.vod) saveVodProgress(false); });
+  video.addEventListener('timeupdate', function () {
+    if (state.vod) saveVodProgress(false);
+    else saveLiveMark(false);
+  });
   video.addEventListener('seeked', function () {
     hideSpinner();
     if (state.vod) saveVodProgress(true);
@@ -5043,7 +5215,7 @@ function scheduleDownRetry() {
 
 /* Startup */
 document.addEventListener('visibilitychange', function () {
-  if (document.hidden) { saveVodProgress(true); pauseNotify(); return; }
+  if (document.hidden) { saveVodProgress(true); saveLiveMark(true); pauseNotify(); return; }
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
     if (state.ready && !state.current && !state.vod) {
@@ -5054,7 +5226,7 @@ document.addEventListener('visibilitychange', function () {
   if (PB.active && state.current) { PB.recoverCount = 0; recoverPlayback(state.current); } // a deliberate check, not a failure
   pumpNotify();
 });
-window.addEventListener('pagehide', function () { saveVodProgress(true); });
+window.addEventListener('pagehide', function () { saveVodProgress(true); saveLiveMark(true); });
 // Handle the network coming back or dropping out.
 window.addEventListener('online', function () {
   fetchFavorites(function () {
