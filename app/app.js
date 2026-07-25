@@ -3040,10 +3040,12 @@ function focusVodBar() {
   showVodOverlay();          // shows the bar and buttons, resets the hide timer
   applyVodCtrlFocus();
 }
-function focusVodButtons() {
+// idx is optional: the D-pad lands on play/pause, the pointer lands on whichever
+// button it is actually over.
+function focusVodButtons(idx) {
   if (!state.vod) return;
   vodFocus = 'buttons';
-  vodBtnIdx = 1;             // land on play/pause, the middle button
+  vodBtnIdx = (typeof idx === 'number') ? idx : 1;
   showVodOverlay();
   applyVodCtrlFocus();
 }
@@ -4940,8 +4942,11 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.UP)    { focusVodButtons(); return; }   // step up to the buttons
     if (k === KEY.DOWN)  { showVodOverlay(); return; }    // bottom of the ladder; keep it alive
     if (k === KEY.OK) {
-      if (seekAccum.baseTime !== null) applySeekAccum();  // commit the queued jump now
-      else toggleVodPlay();
+      // Commit a queued jump, and otherwise do nothing but keep the controls up.
+      // Pause has its own button one rung above, so OK here must never toggle
+      // playback — pressing it twice to confirm a seek would otherwise pause.
+      if (seekAccum.baseTime !== null) applySeekAccum();
+      else showVodOverlay();
       return;
     }
     // Back, PLAY, PAUSE, REW, FF and STOP fall through to the shared VOD keys
@@ -5406,6 +5411,15 @@ function browseCardFromEvent(e) {
     if (state.channels[slug] && state.channels[slug].live) { closeSidebar(); play(slug); }
   });
   // VOD centre play/pause button and the -30/+30 skip buttons beside it
+  // Hovering moves focus, the same way the sidebar and the grids behave, so the
+  // pointer and the D-pad share one highlight rather than having two of their own.
+  document.getElementById('vodbar').addEventListener('mouseenter', function () { focusVodBar(); });
+  for (var vb = 0; vb < VOD_BTN_IDS.length; vb++) {
+    (function (i) {
+      document.getElementById(VOD_BTN_IDS[i])
+        .addEventListener('mouseenter', function () { focusVodButtons(i); });
+    })(vb);
+  }
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
   document.getElementById('vodback').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(-30); });
   document.getElementById('vodfwd').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(30); });
