@@ -3009,23 +3009,54 @@ function showVodOverlay() {
   clearTimeout(overlayTimer);
   overlayTimer = setTimeout(function () {
     if (state.sidebarOpen) return;   // sidebar is up: the whole UI hides together when it closes
-    ov.className = 'hidden';
-    hideVodPlay();
-    hideVodBar();
+    hideVodControls();
   }, 4000);
 }
 // The seek bar: a wavy line for the played part, a flat line for the rest, and a
 // vertical handle at the play head. Redrawn a couple of times a second while up.
 var vodbarTimer = null;
 var vodDragging = false;
+// Down gives the seek bar focus so Left and Right scrub instead of opening the
+// sidebar. Cleared in hideVodBar and nowhere else, so it cannot outlive the bar.
+var vodBarFocused = false;
+function applyVodBarFocus() {
+  var el = document.getElementById('vodbar');
+  if (el) el.className = vodBarFocused ? 'focused' : '';
+}
+function focusVodBar() {
+  if (!state.vod) return;
+  vodBarFocused = true;
+  showVodOverlay();          // shows the bar and play button, resets the hide timer
+  applyVodBarFocus();
+}
+function blurVodBar() {
+  vodBarFocused = false;
+  applyVodBarFocus();
+}
+// Dismiss the whole VOD control set. Shared by the overlay timeout and by Back.
+function hideVodControls() {
+  document.getElementById('overlay').className = 'hidden';
+  hideVodPlay();
+  hideVodBar();              // clears vodBarFocused
+}
 function fmtClock(sec) { return fmtDuration((sec || 0) * 1000); }
 function drawVodBar(cur, dur) {
   var W = 1500, mid = 20;
   var prog = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
   var px = prog * W;
+  // A focused bar gets a chunkier play head. The viewBox is 1500 wide against a
+  // ~840px element with preserveAspectRatio="none", so horizontal units compress
+  // by about 0.56 — 14 here renders as roughly 8px on screen.
+  var hw = vodBarFocused ? 14 : 8;
+  var hh = vodBarFocused ? 38 : 30;
+  var hy = vodBarFocused ? 1 : 5;
   document.getElementById('vodbar-played').setAttribute('d', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
   document.getElementById('vodbar-remain').setAttribute('x1', px.toFixed(1));
-  document.getElementById('vodbar-handle').setAttribute('x', (px - 4).toFixed(1));
+  var handle = document.getElementById('vodbar-handle');
+  handle.setAttribute('width', hw);
+  handle.setAttribute('height', hh);
+  handle.setAttribute('y', hy);
+  handle.setAttribute('x', (px - hw / 2).toFixed(1));
   document.getElementById('vodbar-cur').textContent = fmtClock(cur);
   document.getElementById('vodbar-dur').textContent = fmtClock(dur);
 }
@@ -3049,7 +3080,7 @@ function drawVodBarNow() {
 }
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
-  document.getElementById('vodbar').className = '';
+  applyVodBarFocus();                    // '' or 'focused' — never blindly cleared
   placeDiagnostics();
   placeVodBar();
   drawVodBarNow();
@@ -3065,6 +3096,7 @@ function seekVodFrac(frac) {
   showVodOverlay();
 }
 function hideVodBar() {
+  vodBarFocused = false;                 // focus must never outlive the bar
   document.getElementById('vodbar').className = 'hidden';
   placeDiagnostics();
   if (vodbarTimer) { clearInterval(vodbarTimer); vodbarTimer = null; }
@@ -4854,11 +4886,24 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.BACK) closeSidebarWithGrace();
     return;
   }
+  if (state.vod && vodBarFocused) {                      // seek bar has focus
+    if (k === KEY.LEFT)  { seekVod(-30); return; }
+    if (k === KEY.RIGHT) { seekVod(30); return; }
+    if (k === KEY.UP)    { blurVodBar(); return; }       // step back up to the video
+    if (k === KEY.DOWN)  { showVodOverlay(); return; }   // already at the bottom; keep it alive
+    if (k === KEY.BACK)  { hideVodControls(); return; }  // dismiss; a second Back exits
+    if (k === KEY.OK) {
+      if (seekAccum.baseTime !== null) applySeekAccum(); // commit the queued jump now
+      else toggleVodPlay();
+      return;
+    }
+    // PLAY, PAUSE, REW, FF and STOP fall through to the normal VOD keys below
+  }
   if (state.vod) {                                       // watching a past video
     if (k === KEY.BACK || k === KEY.STOP) { exitVod(); return; }
     if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
-    if (k === KEY.UP) { chpopMove(-1); return; }         // up/down surf live channels
-    if (k === KEY.DOWN) { chpopMove(1); return; }
+    if (k === KEY.UP) { chpopMove(-1); return; }         // up surfs live channels
+    if (k === KEY.DOWN) { focusVodBar(); return; }       // down grabs the seek bar
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
     if (k === KEY.PLAY) { playVideo(video); return; }
     if (k === KEY.OK) { showVodOverlay(); return; }

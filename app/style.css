@@ -760,8 +760,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   width: 900px; box-sizing: border-box;
   display: flex; align-items: center;
   padding: 12px 30px; border-radius: 20px;
+  border: 2px solid transparent;   /* reserved, so focus does not shift the contents */
   background: rgba(9,12,13,0.6); box-shadow: 0 8px 30px rgba(0,0,0,0.45);
 }
+/* Down gives the bar focus: Left and Right scrub instead of opening the sidebar. */
+#vodbar.focused {
+  border: 2px solid #53fc18;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.45), 0 0 0 3px rgba(83,252,24,0.18);
+}
+#vodbar.focused #vodbar-handle { fill: #53fc18; }
 #vodbar-cur, #vodbar-dur {
   font-size: 26px; font-weight: 700; color: #fff; min-width: 120px;
   text-shadow: 0 1px 4px rgba(0,0,0,0.9);
