@@ -93,14 +93,27 @@ function removeFavorite(slug) {
   if (SEED_FAVORITES.indexOf(slug) !== -1 && removed.indexOf(slug) === -1) {
     removed.push(slug); lsSet('kicktv.removed', removed);
   }
-  var pinned = lsGet('kicktv.pinned'), pi = pinned.indexOf(slug);
-  if (pi !== -1) { pinned.splice(pi, 1); lsSet('kicktv.pinned', pinned); }
+  var pinned = getPinned(), pi = pinned.indexOf(slug);
+  if (pi !== -1) { pinned.splice(pi, 1); savePinned(pinned); }
 }
-function isPinned(slug) { return lsGet('kicktv.pinned').indexOf(slug) !== -1; }
+// isPinned is asked a few hundred times per sortOrder pass — twice per
+// comparison — so the parsed list is kept around rather than re-read and
+// re-parsed each time. Every write goes through savePinned, which is the whole
+// invalidation story: do not lsSet('kicktv.pinned', ...) anywhere else.
+var pinnedMemo = null;
+function getPinned() {
+  if (!pinnedMemo) pinnedMemo = lsGet('kicktv.pinned');
+  return pinnedMemo;
+}
+function savePinned(list) {
+  pinnedMemo = list;          // what we are about to persist is what readers should see
+  lsSet('kicktv.pinned', list);
+}
+function isPinned(slug) { return getPinned().indexOf(slug) !== -1; }
 function togglePin(slug) {
-  var pinned = lsGet('kicktv.pinned'), i = pinned.indexOf(slug);
+  var pinned = getPinned(), i = pinned.indexOf(slug);
   if (i === -1) pinned.push(slug); else pinned.splice(i, 1);
-  lsSet('kicktv.pinned', pinned);
+  savePinned(pinned);
   return i === -1; // true if we just pinned it, false if we just unpinned it
 }
 function saveLast(slug) { try { localStorage.setItem('kicktv.last', slug); } catch (e) {} }
