@@ -3016,22 +3016,52 @@ function showVodOverlay() {
 // vertical handle at the play head. Redrawn a couple of times a second while up.
 var vodbarTimer = null;
 var vodDragging = false;
-// Down gives the seek bar focus so Left and Right scrub instead of opening the
-// sidebar. Cleared in hideVodBar and nowhere else, so it cannot outlive the bar.
-var vodBarFocused = false;
-function applyVodBarFocus() {
-  var el = document.getElementById('vodbar');
-  if (el) el.className = vodBarFocused ? 'focused' : '';
+/* VOD control focus. A two-rung ladder above the video: the seek bar, and the
+   transport buttons above it. Up and Down move between them, Left and Right do
+   whatever the focused rung does. Cleared in hideVodBar and nowhere else, so
+   focus cannot outlive the controls. */
+var vodFocus = '';           // '', 'bar' or 'buttons'
+var vodBtnIdx = 1;           // 0 rewind, 1 play/pause, 2 forward
+var VOD_BTN_IDS = ['vodback', 'vodplay', 'vodfwd'];
+function applyVodCtrlFocus() {
+  var bar = document.getElementById('vodbar');
+  if (bar && bar.className.indexOf('hidden') === -1) {
+    bar.className = vodFocus === 'bar' ? 'focused' : '';
+  }
+  for (var i = 0; i < VOD_BTN_IDS.length; i++) {
+    var el = document.getElementById(VOD_BTN_IDS[i]);
+    if (!el || el.className.indexOf('hidden') !== -1) continue;
+    el.className = (vodFocus === 'buttons' && i === vodBtnIdx) ? 'focused' : '';
+  }
 }
 function focusVodBar() {
   if (!state.vod) return;
-  vodBarFocused = true;
-  showVodOverlay();          // shows the bar and play button, resets the hide timer
-  applyVodBarFocus();
+  vodFocus = 'bar';
+  showVodOverlay();          // shows the bar and buttons, resets the hide timer
+  applyVodCtrlFocus();
 }
-function blurVodBar() {
-  vodBarFocused = false;
-  applyVodBarFocus();
+function focusVodButtons() {
+  if (!state.vod) return;
+  vodFocus = 'buttons';
+  vodBtnIdx = 1;             // land on play/pause, the middle button
+  showVodOverlay();
+  applyVodCtrlFocus();
+}
+function blurVodFocus() {
+  vodFocus = '';
+  applyVodCtrlFocus();
+}
+function vodBtnMove(d) {
+  var n = vodBtnIdx + d;
+  if (n < 0 || n >= VOD_BTN_IDS.length) return;
+  vodBtnIdx = n;
+  showVodOverlay();          // keep the controls alive while moving between them
+  applyVodCtrlFocus();
+}
+function vodBtnActivate() {
+  if (vodBtnIdx === 0) seekVod(-30);
+  else if (vodBtnIdx === 2) seekVod(30);
+  else toggleVodPlay();
 }
 // Showing at all, focused or not. Back dismisses the controls whenever they are
 // up, and only exits the video once they are gone.
@@ -3043,7 +3073,7 @@ function vodBarVisible() {
 function hideVodControls() {
   document.getElementById('overlay').className = 'hidden';
   hideVodPlay();
-  hideVodBar();              // clears vodBarFocused
+  hideVodBar();              // clears vodFocus
 }
 function fmtClock(sec) { return fmtDuration((sec || 0) * 1000); }
 function drawVodBar(cur, dur) {
@@ -3053,9 +3083,9 @@ function drawVodBar(cur, dur) {
   // A focused bar gets a chunkier play head. The viewBox is 1500 wide against a
   // ~840px element with preserveAspectRatio="none", so horizontal units compress
   // by about 0.56 — 14 here renders as roughly 8px on screen.
-  var hw = vodBarFocused ? 14 : 8;
-  var hh = vodBarFocused ? 38 : 30;
-  var hy = vodBarFocused ? 1 : 5;
+  var hw = vodFocus === 'bar' ? 14 : 8;
+  var hh = vodFocus === 'bar' ? 38 : 30;
+  var hy = vodFocus === 'bar' ? 1 : 5;
   document.getElementById('vodbar-played').setAttribute('d', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
   document.getElementById('vodbar-remain').setAttribute('x1', px.toFixed(1));
   var handle = document.getElementById('vodbar-handle');
@@ -3086,7 +3116,8 @@ function drawVodBarNow() {
 }
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
-  applyVodBarFocus();                    // '' or 'focused' — never blindly cleared
+  document.getElementById('vodbar').className = '';   // un-hide first
+  applyVodCtrlFocus();                       // then re-apply focus, never blindly cleared
   placeDiagnostics();
   placeVodBar();
   drawVodBarNow();
@@ -3102,7 +3133,7 @@ function seekVodFrac(frac) {
   showVodOverlay();
 }
 function hideVodBar() {
-  vodBarFocused = false;                 // focus must never outlive the bar
+  vodFocus = '';                         // focus must never outlive the controls
   document.getElementById('vodbar').className = 'hidden';
   placeDiagnostics();
   if (vodbarTimer) { clearInterval(vodbarTimer); vodbarTimer = null; }
@@ -4342,9 +4373,10 @@ function vodPlayIcon() {
 function showVodPlay() {
   if (!state.vod || spinnerOn) return;
   vodPlayIcon();
-  document.getElementById('vodplay').className = '';
+  document.getElementById('vodplay').className = '';   // un-hide first...
   document.getElementById('vodback').className = '';
   document.getElementById('vodfwd').className = '';
+  applyVodCtrlFocus();                                     // ...then restore any focus ring
 }
 function hideVodPlay() {
   document.getElementById('vodplay').className = 'hidden';
@@ -4873,8 +4905,10 @@ document.addEventListener('keydown', function (e) {
   if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
   if (k === KEY.RED) { openSettings(); return; }       // red opens settings
   if (k === KEY.YELLOW) { openVodsForContext(); return; } // yellow opens past videos
-  if (isChUp(k)) { chpopMove(-1); return; }            // channel up/down surf the live list
-  if (isChDown(k)) { chpopMove(1); return; }
+  if (!state.vod) {                                    // the surf list is for live channels
+    if (isChUp(k)) { chpopMove(-1); return; }          // channel up/down surf the live list
+    if (isChDown(k)) { chpopMove(1); return; }
+  }
   if (k === KEY.OK && state.notifyCurrent) { activateNotify(); return; }
   if (k === KEY.REW) { if (state.vod) seekVod(-60); return; }
   if (k === KEY.FF) { if (state.vod) seekVod(60); return; }
@@ -4892,29 +4926,38 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.BACK) closeSidebarWithGrace();
     return;
   }
-  if (state.vod && vodBarFocused) {                      // seek bar has focus
+  if (state.vod && vodFocus === 'buttons') {             // transport buttons have focus
+    if (k === KEY.LEFT)  { vodBtnMove(-1); return; }     // rewind · pause · forward
+    if (k === KEY.RIGHT) { vodBtnMove(1); return; }
+    if (k === KEY.DOWN)  { focusVodBar(); return; }      // step back down to the bar
+    if (k === KEY.UP)    { showVodOverlay(); return; }   // top of the ladder; keep it alive
+    if (k === KEY.OK)    { vodBtnActivate(); return; }
+    // Back, PLAY, PAUSE, REW, FF and STOP fall through to the shared VOD keys
+  }
+  if (state.vod && vodFocus === 'bar') {                  // seek bar has focus
     if (k === KEY.LEFT)  { seekVod(-30); return; }
     if (k === KEY.RIGHT) { seekVod(30); return; }
-    if (k === KEY.UP)    { blurVodBar(); return; }       // step back up to the video
-    if (k === KEY.DOWN)  { showVodOverlay(); return; }   // already at the bottom; keep it alive
-    // Back is handled once, below, for the whole VOD branch — a focused bar is
-    // by definition a visible one, so the general rule already covers it.
+    if (k === KEY.UP)    { focusVodButtons(); return; }   // step up to the buttons
+    if (k === KEY.DOWN)  { showVodOverlay(); return; }    // bottom of the ladder; keep it alive
     if (k === KEY.OK) {
-      if (seekAccum.baseTime !== null) applySeekAccum(); // commit the queued jump now
+      if (seekAccum.baseTime !== null) applySeekAccum();  // commit the queued jump now
       else toggleVodPlay();
       return;
     }
-    // PLAY, PAUSE, REW, FF and STOP fall through to the normal VOD keys below
+    // Back, PLAY, PAUSE, REW, FF and STOP fall through to the shared VOD keys
   }
   if (state.vod) {                                       // watching a past video
     if (k === KEY.STOP) { exitVod(); return; }           // stop always means stop
-    if (k === KEY.BACK) {                                // dismiss the controls first
+    if (k === KEY.BACK) {
+      // Undo before dismiss before exit: a queued jump is cancelled first, so
+      // Back always means "take back the last thing I did".
+      if (seekAccum.baseTime !== null) { resetSeekAccum(); showVodOverlay(); return; }
       if (vodBarVisible()) { hideVodControls(); return; }
       exitVod(); return;
     }
     if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
-    if (k === KEY.UP) { chpopMove(-1); return; }         // up surfs live channels
-    if (k === KEY.DOWN) { focusVodBar(); return; }       // down grabs the seek bar
+    if (k === KEY.UP) { focusVodBar(); return; }         // either arrow grabs the seek bar
+    if (k === KEY.DOWN) { focusVodBar(); return; }
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
     if (k === KEY.PLAY) { playVideo(video); return; }
     if (k === KEY.OK) { showVodOverlay(); return; }

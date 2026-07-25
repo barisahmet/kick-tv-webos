@@ -723,6 +723,12 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodback { left: calc(50% - 200px); }
 #vodfwd  { left: calc(50% + 200px); }
 #vodback:hover, #vodfwd:hover { background: rgba(0,0,0,0.72); }
+/* Up from the seek bar focuses these; Left and Right move between them. */
+#vodplay.focused, #vodback.focused, #vodfwd.focused {
+  background: rgba(0,0,0,0.72);
+  box-shadow: 0 0 0 3px #53fc18, 0 0 22px rgba(83,252,24,0.35);
+  color: #53fc18;
+}
 #vodback svg, #vodfwd svg { width: 52px; height: 52px; }
 
 /* Accumulated-seek chip: "+60s" while rapid presses are being collected */
