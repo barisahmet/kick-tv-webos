@@ -292,7 +292,12 @@ function runFetchFavorites(done, liveOnly) {
     if (++finished === total) {
       if (gen !== fetchGeneration) { done(); return; }  // a newer refresh owns the shared state now
       if (!liveOnly) state.lastFetch = Date.now();      // partial passes don't count as fresh-everything
-      setNetDown(ok === 0 && hard > 0); // offline only when real transport failures blocked everything
+      // Only a full pass has seen every channel, so only a full pass may declare us
+      // offline. A liveOnly pass samples a handful of channels; one of them failing
+      // says nothing about the rest. It can still clear the flag, because a single
+      // success is proof we reached Kick.
+      if (!liveOnly) setNetDown(ok === 0 && hard > 0);
+      else if (ok > 0) setNetDown(false);
       sortOrder(favs); detectOnline(favs); saveChannelCache(); done();
     } else {
       pump();                          // a slot freed up — start the next one
@@ -764,16 +769,23 @@ function recoverPlayback(slug) {
 }
 // Move on when a live stream ends: hop to the next live favorite if auto-advance
 // is on, otherwise show the idle screen.
+// The hop budget lives outside PB because play() resets every PB counter, so
+// without it two channels that Kick reports live but the TV cannot decode would
+// hand each other back and forth forever.
+var MAX_AUTO_ADVANCE = 3;
+var autoAdvanceRun = 0;
 function advanceOrIdle(slug) {
-  if (settings.autoadvance) {
+  if (settings.autoadvance && autoAdvanceRun < MAX_AUTO_ADVANCE) {
     // prefer a live pinned channel, then fall back to the next live one
     var nx = firstLivePinned(slug) || nextLiveAfter(slug);
     if (nx) {
+      autoAdvanceRun++;
       toast('Auto-advancing to ' + (state.channels[nx].name || nx));
       play(nx, state.preserveLastVodDuringLive);
       return;
     }
   }
+  autoAdvanceRun = 0;          // this chain is over; the next stream end gets a fresh budget
   toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' ended');
   returnToIdle();
   // Leave the viewer something actionable: the list of who else is live. This
@@ -825,6 +837,7 @@ function startWatchdog(slug) {
       if (PB.lastTime >= 0) {                          // real progress, not just the first tick
         PB.netRetries = 0; PB.mediaRetries = 0;
         PB.recoverCount = 0; PB.endedCount = 0;        // healthy playback: clear the give-up counters
+        autoAdvanceRun = 0;                            // we landed on something that really plays
         setBanner('');                                 // it is moving again, clear the message
       }
     }
@@ -1535,6 +1548,7 @@ var BROWSE_LANGS = [
   { label: 'Russian',  value: 'Russian' }
 ];
 var BROWSE_COLS = 4;
+var BROWSE_MAX_AUTO_PAGES = 12;   // ceiling for the automatic sparse-filter chain below
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                category: null, categoryName: '', session: 0,
@@ -1733,8 +1747,13 @@ function loadBrowseMore(initial) {
     // Chain more pages while filling. Filters (category, Discover, languages)
     // thin each page out, so keep pulling until the grid has a healthy count —
     // no more one-page-per-scroll crawling to find anything.
+    // The sparse chain keeps pulling until the filtered grid looks healthy, but a
+    // filter whose whole population is under 24 can never get there, so it needs a
+    // hard ceiling or it walks the entire directory. hasMore stays true, so moving
+    // or scrolling to the end still fetches more on demand — only the automatic
+    // chain is bounded.
     var filtersActive = !!(browse.category || browse.discover || browse.langs.length);
-    var sparse = filtersActive && browse.streams.length < 24;
+    var sparse = filtersActive && browse.streams.length < 24 && browse.page <= BROWSE_MAX_AUTO_PAGES;
     if ((initial && browse.page <= (browse.category ? 8 : 3)) || sparse) loadBrowseMore(true);
     if (!browse.fetching) setBrowseLoadingCard(false);   // no follow-up came: done
   });
@@ -1760,10 +1779,6 @@ function renderBrowse() {
   if (browse.category) list = list.filter(function (s) {
     return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
   });
-  if (browse.discover) {
-    var favsNow = getFavorites();
-    list = list.filter(function (s) { return favsNow.indexOf((s.channel || {}).slug) === -1; });
-  }
   if (browse.sort === 'small') {
     list.sort(function (a, b) { return (a.viewer_count || 0) - (b.viewer_count || 0); });
   } else if (browse.sort === 'newest') {
@@ -4298,7 +4313,13 @@ document.addEventListener('keydown', function (e) {
   var wasSaver = saver.on;
   markInput();                                      // any key counts as activity for the burn-in guard
   if (wasSaver) { e.preventDefault(); return; }     // the first press just dismisses the screensaver
-  if (!state.ready) { e.preventDefault(); return; } // still on the splash, ignore input until data is ready
+  if (!state.ready) {                               // still on the splash, ignore input until data is ready
+    e.preventDefault();
+    // ...except the way out. disableBackHistoryAPI means we own the Back key, so
+    // swallowing it here would leave no escape if boot ever stalls.
+    if (k === KEY.BACK || k === KEY.STOP) armOrExit();
+    return;
+  }
   if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
   if (cats.open) {
     var csearch = document.getElementById('cats-search');
@@ -5200,6 +5221,27 @@ function quickStart(done) {
     done(false);
   });
 }
+// The favorites fetch bounds each request but not the whole pass, and the splash
+// ignores every key, so a congested Luna bus could otherwise hold the app for
+// minutes. Boot therefore has its own deadline: once it expires we accept input
+// and show the idle screen from cached data, and the fetch keeps filling in behind.
+var BOOT_DEADLINE_MS = 8000;
+var bootDeadlineTimer = null;
+// Becomes interactive exactly once, whichever path gets here first.
+function markBootReady() {
+  if (state.ready) return false;
+  clearTimeout(bootDeadlineTimer);
+  bootDeadlineTimer = null;
+  state.ready = true;
+  startPlayerPoll();
+  return true;
+}
+// True once the viewer (or the deadline's idle screen) owns what is on screen, so
+// a late startup decision must not yank them somewhere else.
+function bootChoiceSuperseded() {
+  return !!(state.current || state.vod || state.sidebarOpen || state.mode !== 'player' ||
+            browse.open || vods.open || cats.open || chpop.open);
+}
 (function boot() {
   setMode('player');
   loadQualityPref();
@@ -5216,18 +5258,24 @@ function quickStart(done) {
   // The quick start goes onto the Luna bus FIRST (its single request must not
   // queue behind the favorites pool); the full refresh follows right behind
   // and loads the other channels while playback is already starting.
+  bootDeadlineTimer = setTimeout(function () {
+    if (!markBootReady()) return;
+    showNothing();                            // cached channels give the idle screen something to show
+  }, BOOT_DEADLINE_MS);
   var favoritesDone = false, favoritesWaiters = [];
   quickStart(function (started) {
     if (started) {
-      state.ready = true;
-      startPlayerPoll();
+      markBootReady();
       return;
     }
     var decide = function () {                // nothing quick-startable: wait for real data
       resumeLastVodAtStartup(function (resumed, retryable) {
-        state.ready = true;                   // startup choice is settled; accept input now
-        startPlayerPoll();
-        if (!resumed) finishStartupWithoutVod(retryable);
+        var firstReady = markBootReady();     // startup choice is settled; accept input now
+        if (resumed) return;
+        // If the deadline already handed control over, only finish the startup
+        // choice when the viewer has not picked something themselves meanwhile.
+        if (!firstReady && bootChoiceSuperseded()) return;
+        finishStartupWithoutVod(retryable);
       });
     };
     if (favoritesDone) decide(); else favoritesWaiters.push(decide);

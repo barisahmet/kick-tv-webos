@@ -43,6 +43,15 @@ var BROWSER_HEADERS = {
 };
 
 function kickGet(path, cb) {
+  // One answer per request, whatever happens. The request and the response are
+  // separate event sources and an abort can fire both, so without this guard a
+  // single fetch could respond twice on the same Luna message.
+  var settled = false;
+  function finish(err, status, body) {
+    if (settled) return;
+    settled = true;
+    cb(err, status, body);
+  }
   var req = https.get({
     host: 'kick.com',
     path: path,
@@ -53,10 +62,24 @@ function kickGet(path, cb) {
   }, function (res) {
     res.setEncoding('utf8');   // decode across chunk boundaries so a split emoji cannot corrupt the JSON
     var body = '';
+    var expected = parseInt(res.headers['content-length'], 10);
     res.on('data', function (d) { body += d; });
-    res.on('end', function () { cb(null, res.statusCode, body); });
+    // The timeout below is a socket inactivity timeout, so it can abort a response
+    // that is already half-read. This Node build still emits 'end' after 'aborted',
+    // which would otherwise hand the app a truncated body under a 200. Catch the
+    // cut here, and check the length for the same reason. Newer Node emits 'error'
+    // on the response instead — unhandled, that would take the whole service down.
+    res.on('aborted', function () { finish('response aborted'); });
+    res.on('error', function (e) { finish('response ' + String(e && e.message || e)); });
+    res.on('end', function () {
+      if (!isNaN(expected) && Buffer.byteLength(body, 'utf8') < expected) {
+        finish('truncated response');
+        return;
+      }
+      finish(null, res.statusCode, body);
+    });
   });
-  req.on('error', function (e) { cb(String(e && e.message || e)); });
+  req.on('error', function (e) { finish(String(e && e.message || e)); });
   req.setTimeout(10000, function () { req.abort(); });
 }
 

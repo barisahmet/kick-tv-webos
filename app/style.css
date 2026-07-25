@@ -95,6 +95,12 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Channel sidebar. Slate colours. Slides in from the left. */
 #sidebar {
   position: absolute; top: 0; left: 0; width: 470px; height: 1080px;
+  /* Must out-stack the idle home screen (z-index 5). #player is position:relative
+     with no z-index, so it creates no stacking context and the two compete in the
+     root one — without this the centred home cards paint over the open panel and,
+     being clickable, swallow clicks meant for channel rows. Stays below the preview
+     card (47), player tools (48) and every popup. */
+  z-index: 6;
   background: rgba(27,30,32,0.97);
   border-right: 2px solid #2f3438;
   transform: translateX(-472px);
