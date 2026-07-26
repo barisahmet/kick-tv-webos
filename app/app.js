@@ -1609,6 +1609,8 @@ var BROWSE_SORTS = [
   { key: 'newest',  label: 'New' },
   { key: 'small',   label: 'Small' }
 ];
+// The sort chip is gone from the header; Browse always orders by viewers. The
+// sort machinery is left in place so the control can come back cheaply.
 function renderBrowseSort() {
   var el = document.getElementById('browse-sort');
   if (!el) return;
@@ -1627,7 +1629,7 @@ function cycleBrowseSort() {
   renderBrowse();
   toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
 }
-/* "Discover only": hide channels you already follow — browsing is for finding
+/* "Hide Followed": hide channels you already follow — browsing is for finding
    new ones. The preference persists across opens. */
 function loadBrowseDiscoverPref() {
   try { return localStorage.getItem('kicktv.browsediscover') === '1'; } catch (e) { return false; }
@@ -4902,7 +4904,6 @@ document.addEventListener('keydown', function (e) {
     e.preventDefault();
     if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
     else if (k === KEY.YELLOW) openCats();               // yellow opens the categories picker
-    else if (k === KEY.GREEN) cycleBrowseSort();         // green cycles the sort order
     else if (k === KEY.LEFT) browseMove(-1, 0);
     else if (k === KEY.RIGHT) browseMove(1, 0);
     else if (k === KEY.UP) browseMove(0, -1);
@@ -5235,9 +5236,8 @@ function browseCardFromEvent(e) {
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
-  document.getElementById('browse-sort').addEventListener('click', function (e) { e.stopPropagation(); cycleBrowseSort(); });
   document.getElementById('browse-discover').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseDiscover(); });
-  // Balloon tip explaining what Discover does.
+  // Balloon tip explaining what Hide Followed does.
   document.getElementById('browse-discover').addEventListener('mouseenter', function () {
     showTip('Hides channels you already follow, so Browse only shows new finds.', this);
   });

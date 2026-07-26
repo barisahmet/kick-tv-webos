@@ -443,6 +443,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: #1a201b; color: #b9bcbb; cursor: pointer; border: 2px solid transparent;
 }
 .blang.sel { background: #143206; color: #53fc18; }
+.blang:hover { border-color: #53fc18; color: #fff; }   /* instant, like the cards */
 .blang.focused { border-color: #53fc18; color: #fff; }
 #browse-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
 #browse-close:hover { color: #fff; }
