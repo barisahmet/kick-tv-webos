@@ -441,10 +441,9 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .blang {
   font-size: 22px; padding: 7px 18px; margin: 0 8px 4px 0; border-radius: 18px;
   background: #1a201b; color: #b9bcbb; cursor: pointer; border: 2px solid transparent;
-  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease, transform 140ms ease;
 }
 .blang.sel { background: #143206; color: #53fc18; }
-.blang.focused { border-color: #53fc18; color: #fff; transform: scale(1.06); }
+.blang.focused { border-color: #53fc18; color: #fff; }
 #browse-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
 #browse-close:hover { color: #fff; }
 #browse-grid {
@@ -533,9 +532,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .bcard {
   box-sizing: border-box; width: 384px; margin: 8px; border-radius: 12px; overflow: hidden;
   position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
-  transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
 }
-.bcard.focused { border-color: #53fc18; transform: scale(1.03); box-shadow: 0 8px 26px rgba(0,0,0,0.5), 0 0 22px rgba(83,252,24,0.25); }
+/* Highlight without lifting or fading in: no scale, no drop shadow, no transition.
+   Growing a card nudges its neighbours and costs a repaint on every pointer move,
+   and an animated edge lags behind the pointer. The green edge appears at once. */
+.bcard.focused { border-color: #53fc18; box-shadow: 0 0 22px rgba(83,252,24,0.25); }
 .bthumb { width: 100%; height: 212px; background: #101213 center/cover no-repeat; position: relative; }
 .bviewers {
   position: absolute; bottom: 8px; right: 8px;
@@ -640,9 +641,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .ccard {
   box-sizing: border-box; width: 384px; height: 220px; margin: 8px; border-radius: 12px;
   overflow: hidden; position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
-  transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
 }
-.ccard.focused { border-color: #53fc18; transform: scale(1.03); box-shadow: 0 8px 26px rgba(0,0,0,0.5), 0 0 22px rgba(83,252,24,0.25); }
+.ccard.focused { border-color: #53fc18; box-shadow: 0 0 22px rgba(83,252,24,0.25); }
 .cbanner { width: 100%; height: 100%; background: #101213 center/cover no-repeat; }
 .cname {
   position: absolute; left: 0; bottom: 0; width: 100%; box-sizing: border-box; padding: 22px 14px 12px;

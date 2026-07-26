@@ -775,20 +775,13 @@ function playVideo(video) {
 }
 // While the browse popup is up, stop decoding/loading the stream so the popup
 // stays smooth, then pick playback back up when it closes.
-var resumeWasPaused = false;   // was the video already paused when the popup opened?
-function pausePlaybackForBrowse() {
-  var v = document.getElementById('video');
-  resumeWasPaused = !!v.paused;
-  try { v.pause(); } catch (e) {}
-  if (state.hls) { try { state.hls.stopLoad(); } catch (e) {} }
-  stopWatchdog();
-}
-function resumePlaybackAfterBrowse() {
-  if (!state.current && !state.vod) return;
-  if (state.hls) { try { state.hls.startLoad(); } catch (e) {} }
-  if (!resumeWasPaused) playVideo(document.getElementById('video'));   // respect a deliberate pause
-  if (state.current) startWatchdog(state.current);   // VODs run without the live watchdog
-}
+var resumeWasPaused = false;   // unused while the pause-under-popups experiment is in
+/* EXPERIMENT — playback keeps running under the popups.
+   These used to pause the video and stop the loader so a popup stayed smooth on
+   the TV's limited decode budget. Both are now no-ops so the stream continues
+   behind Browse and Past videos. Revert this commit to restore the old behaviour. */
+function pausePlaybackForBrowse() {}
+function resumePlaybackAfterBrowse() {}
 function onNetworkError(slug, hls) {
   if (state.current !== slug) return;
   PB.netRetries++;
