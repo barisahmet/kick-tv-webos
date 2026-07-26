@@ -21,8 +21,25 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: #000 center/cover no-repeat;
   pointer-events: none;   /* decorative — clicks must still reach the player */
 }
-/* Fallback avatar: keep it small and centred rather than scaled to the panel. */
-#poster.avatar { background-size: 260px auto; }
+/* Fallback avatar. Small, round and lit rather than a square stretched flat on
+   black. The pulse animates opacity only — a box-shadow or gradient animation at
+   this size makes the TV's compositor work for no reason. */
+#poster.avatar { display: flex; align-items: center; justify-content: center; }
+#poster-av { display: none; }
+#poster.avatar #poster-av {
+  display: block; position: relative;
+  width: 260px; height: 260px; border-radius: 50%;
+  background: #17191b center/cover no-repeat;
+  box-shadow: 0 0 0 3px rgba(83,252,24,0.45), 0 0 60px 4px rgba(0,0,0,0.6);
+}
+#poster.avatar #poster-av::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 460px; height: 460px; margin: -230px 0 0 -230px;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(83,252,24,0.28) 0%, rgba(83,252,24,0.10) 42%, rgba(83,252,24,0) 68%);
+  animation: posterglow 2.4s ease-in-out infinite;
+}
+@keyframes posterglow { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 
 /* Top info bar */
 #overlay {

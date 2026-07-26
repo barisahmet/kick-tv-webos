@@ -708,11 +708,25 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
 // fill 1920x1080 is a mess of pixels, whereas a stream thumbnail is meant to cover.
 function setPosterStill(url, isAvatar) {
   var el = document.getElementById('poster');
+  var av = document.getElementById('poster-av');
   if (!el) return;
-  if (url) {
+  if (!url) {
+    el.className = 'hidden';
+    el.style.backgroundImage = '';
+    if (av) av.style.backgroundImage = '';
+    return;
+  }
+  // A stream frame fills the panel. An avatar goes on the inner element instead,
+  // which can be round and carry its own glow rather than being stretched flat.
+  if (isAvatar) {
+    el.style.backgroundImage = '';
+    if (av) av.style.backgroundImage = 'url(' + url + ')';
+    el.className = 'avatar';
+  } else {
     el.style.backgroundImage = 'url(' + url + ')';
-    el.className = isAvatar ? 'avatar' : '';
-  } else { el.className = 'hidden'; el.style.backgroundImage = ''; }
+    if (av) av.style.backgroundImage = '';
+    el.className = '';
+  }
 }
 // A warmed stream frame if we have a recent one, otherwise the avatar, which
 // still beats a black screen.
