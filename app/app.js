@@ -495,10 +495,12 @@ function showState(mode) {
   var big, sub;
   if (mode === 'empty') { big = 'No channels yet'; sub = 'Open the menu to add one'; }
   else if (mode === 'lost') { big = "Can't reach Kick"; sub = 'Trying to reconnect'; }
-  else if (mode === 'available') { big = 'Some channels are live'; sub = 'Open the menu to watch'; }
+  else if (mode === 'available') { big = ''; sub = ''; }   // the Live now row already says it
   else { big = 'No one is live right now'; sub = 'Open the menu to see your channels'; }
   var msg = document.getElementById('idle-msg');
   msg.innerHTML = '';
+  if (!big && !sub) { msg.className = 'hidden'; return; }   // nothing to say; leave the space
+  msg.className = '';
   var b = document.createElement('div'); b.className = 'idle-big'; b.textContent = big;
   var s = document.createElement('div'); s.className = 'idle-sub'; s.textContent = sub;
   msg.appendChild(b); msg.appendChild(s);
@@ -637,6 +639,7 @@ function teardownVideo() {
   if (PB.reconnectTimer) { clearTimeout(PB.reconnectTimer); PB.reconnectTimer = null; }
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
+  setPosterStill(null);           // before load(), so nothing stale is left showing
   try { video.pause(); video.removeAttribute('src'); video.load(); } catch (e) {}
 }
 function returnToIdle() {
@@ -698,6 +701,27 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
   if (prefetchedRaw) { handle(null, prefetchedRaw); return; }
   apiGet(slug, handle);
 }
+/* Show a still while the first frame is decoding, instead of black. Live uses the
+   warmed preview thumbnail; a recording uses its own. Cleared on teardown so a
+   stale image never sits over the next thing that plays. */
+// isAvatar keeps a small profile picture at its own size: an avatar blown up to
+// fill 1920x1080 is a mess of pixels, whereas a stream thumbnail is meant to cover.
+function setPosterStill(url, isAvatar) {
+  var el = document.getElementById('poster');
+  if (!el) return;
+  if (url) {
+    el.style.backgroundImage = 'url(' + url + ')';
+    el.className = isAvatar ? 'avatar' : '';
+  } else { el.className = 'hidden'; el.style.backgroundImage = ''; }
+}
+// A warmed stream frame if we have a recent one, otherwise the avatar, which
+// still beats a black screen.
+function livePoster(slug) {
+  var c = previewCache[slug];
+  if (c && Date.now() - c.t < 60000) return { url: c.url, avatar: false };
+  var ch = state.channels[slug];
+  return { url: (ch && ch.avatar) || null, avatar: true };
+}
 function attachStream(slug, url) {
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
@@ -708,6 +732,8 @@ function attachStream(slug, url) {
   liveWatchCountedMs = liveWatchStartedMs;
   liveWatchAccumSec = 0;
   liveWatchSeeded = false;           // re-fold the stored total on the next save
+  var lp = livePoster(slug);
+  setPosterStill(lp.url, lp.avatar);
   try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
@@ -2819,7 +2845,9 @@ function renderVods() {
     if (url) thumb.style.backgroundImage = 'url(' + url + ')';
     var dur = document.createElement('span');
     dur.className = 'bdur';
-    dur.textContent = fmtDuration(v.duration);
+    // The stream still running is in this list too, with a duration of 0. Saying
+    // "0:00" reads like an empty recording; it is simply not finished yet.
+    dur.textContent = v.is_live ? 'In progress' : fmtDuration(v.duration);
     thumb.appendChild(dur);
     var views = document.createElement('span');
     views.className = 'bviewers';
@@ -2913,6 +2941,8 @@ function playVod(v, queue, queueIndex, slug) {
                 name: (state.channels[vodSlug] && state.channels[vodSlug].name) || vodSlug,
                 queue: playQueue, queueIndex: playIndex,
                 markerId: vodStableId(v),
+                poster: vodThumb(v),      // shown while the first frame decodes
+
                 key: progressKey, resumeAt: resumeAt, resumeApplied: false,
                 knownDuration: knownDuration,
                 progressReady: false, completed: false, ending: false, retries: 0 };
@@ -2958,6 +2988,7 @@ function attachVod(source) {
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   if (state.vod) { state.vod.resumeApplied = false; state.vod.progressReady = false; }
   liveWatchStartedMs = 0;            // a recording is not a live session
+  setPosterStill(state.vod && state.vod.poster);   // also covers a reload
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
@@ -5617,8 +5648,12 @@ function browseCardFromEvent(e) {
   video.addEventListener('playing', function () {
     PB.stallCount = 0; PB.netRetries = 0; PB.mediaRetries = 0; setBanner('');
     if (state.vod) state.vod.mediaRecoveries = 0;   // recovered for real, forget the failures
+    setPosterStill(null);                           // real frames are on the plane now
     hideSpinner();
   });
+  // loadeddata means a first frame exists, which is usually a touch earlier
+  // than 'playing' — drop the still at whichever arrives first.
+  video.addEventListener('loadeddata', function () { setPosterStill(null); });
   // Buffering spinner for both live and VOD.
   video.addEventListener('waiting', function () { if (!video.paused) showSpinner(); });
   video.addEventListener('seeking', function () { showSpinner(); });

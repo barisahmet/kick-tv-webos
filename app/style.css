@@ -12,6 +12,17 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Player and video */
 #player { background: #000; position: relative; }
 #video { width: 1920px; height: 1080px; background: #000; }
+/* Still frame held over the video plane until real frames arrive, so switching
+   channels does not flash black. The plane is composited by the TV, not the
+   browser, so a <video poster> never shows — this has to be its own layer.
+   Sits directly after #video so it is above it and below every overlay. */
+#poster {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
+  background: #000 center/cover no-repeat;
+  pointer-events: none;   /* decorative — clicks must still reach the player */
+}
+/* Fallback avatar: keep it small and centred rather than scaled to the panel. */
+#poster.avatar { background-size: 260px auto; }
 
 /* Top info bar */
 #overlay {
@@ -37,7 +48,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .ovcat[data-catslug]:hover { color: #53fc18; text-decoration: underline; }
 
 /* Mini home screen on the idle screen: continue watching + live tiles */
-#home { position: absolute; left: 0; right: 0; bottom: 130px; z-index: 5; }
+#home { width: 1920px; }                 /* in the centred column now, not pinned */
+#idle-msg:not(.hidden) + #home { margin-top: 56px; }   /* breathing room under a message */
 .home-head { font-size: 26px; color: #9a9a9d; margin: 0 0 12px; text-align: center; }
 #home-continue { margin-bottom: 26px; }
 #home-resume-row { display: flex; justify-content: center; }
@@ -285,7 +297,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #idle {
   position: absolute; top: 0; left: 0; width: 1920px; height: 1080px;
   background: #060807; overflow: hidden;
-  display: flex; align-items: center; justify-content: center;
+  /* A single centred column: the message, then the home rows. They used to be
+     separate layers — one centred, one pinned to the bottom — which overlapped
+     as soon as both had content. */
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
 }
 /* the scanlines and tube curvature belong to the splash only, not the message
    screens, so they are scoped to #idle.splash */
