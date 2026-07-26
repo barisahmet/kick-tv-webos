@@ -757,7 +757,7 @@ function attachStream(slug, url) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;   // old stream, or not fatal, so ignore
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) onNetworkError(slug, hls);
-      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) onMediaError(slug, hls);
+      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) onMediaError(slug, hls, data.details);
       else recoverPlayback(slug);                              // nothing we can patch, reload it all
     });
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
@@ -807,8 +807,17 @@ function onNetworkError(slug, hls) {
     recoverPlayback(slug);                        // retried enough, the link probably expired, get a new one
   }
 }
-function onMediaError(slug, hls) {
+function onMediaError(slug, hls, details) {
   if (state.current !== slug) return;
+  // hls.js decides which SourceBuffers to create from the first fragment it parses. Some
+  // Kick streams begin with an audio-only segment, so it makes an audio buffer and no video
+  // one — and MSE will not let a video buffer be added afterwards. Every video fragment
+  // then fails to append forever. recoverMediaError() cannot help, because nothing is wrong
+  // with the buffer contents; the buffer set itself is wrong. Only a new MediaSource fixes
+  // it, and since the live edge keeps moving the next attempt usually lands on a segment
+  // that carries video. Measured on a stream that reproduced it: four of six attempts came
+  // up with both tracks.
+  if (details === 'bufferAppendError') { recoverPlayback(slug); return; }
   PB.mediaRetries++;
   if (PB.mediaRetries <= MAX_MEDIA_RETRY) {
     setBanner('Recovering...');
@@ -3078,11 +3087,15 @@ function attachVod(source) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;
       if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+        // A buffer that was never created cannot be recovered in place — see onMediaError.
+        if (data.details === 'bufferAppendError') { reloadVod(); }
         // in-place recovery is not free: after a few consecutive failures fall
         // through to reloadVod so its bounded retry/exit ceiling applies
-        if (state.vod) state.vod.mediaRecoveries = (state.vod.mediaRecoveries || 0) + 1;
-        if (state.vod && state.vod.mediaRecoveries > MAX_MEDIA_RETRY) reloadVod();
-        else { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
+        else {
+          if (state.vod) state.vod.mediaRecoveries = (state.vod.mediaRecoveries || 0) + 1;
+          if (state.vod && state.vod.mediaRecoveries > MAX_MEDIA_RETRY) reloadVod();
+          else { try { hls.recoverMediaError(); } catch (e) { reloadVod(); } }
+        }
       }
       else reloadVod();
     });
@@ -3676,7 +3689,7 @@ var settings = { open: false, focus: 0, items: [],
                  chatSide: 'right', chatSize: 'medium', chatWidth: 'medium', chatOpacity: 'high',
                  chatBackground: 'dark', chatFade: 40000, chatBots: 'show',
                  chatEmotes: 'images', chatTimestamps: false,
-                 alerts: 'all', saverMin: 5 };
+                 alerts: 'all', saverMin: 1 };
 var SETTINGS_IDLE_MS = 30000;
 var settingsIdleTimer = null;
 function touchSettings() {
@@ -3726,7 +3739,7 @@ function loadSettings() {
   // Alerts + burn-in guard
   settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
   var sm = parseInt(s.saverMin, 10);
-  settings.saverMin = ([0, 3, 5, 10].indexOf(sm) !== -1) ? sm : 5;
+  settings.saverMin = ([0, 1, 3, 5, 10].indexOf(sm) !== -1) ? sm : 1;
 }
 function saveSettings() {
   try {
@@ -3779,7 +3792,8 @@ function settingsBuild() {
     { kind: 'choice', key: 'alerts', label: 'Live alerts',
       values: [{ v: 'all', label: 'All' }, { v: 'pinned', label: 'Pinned only' }, { v: 'off', label: 'Off' }] },
     { kind: 'choice', key: 'saverMin', label: 'Burn-in guard',
-      values: [{ v: 3, label: '3 min' }, { v: 5, label: '5 min' }, { v: 10, label: '10 min' }, { v: 0, label: 'Off' }] }
+      values: [{ v: 1, label: '1 min' }, { v: 3, label: '3 min' }, { v: 5, label: '5 min' },
+                { v: 10, label: '10 min' }, { v: 0, label: 'Off' }] }
   ];
   // (The update entry lives as a chip in the Settings header, not a list row.)
   return items;
