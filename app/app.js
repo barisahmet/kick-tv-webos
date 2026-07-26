@@ -705,6 +705,9 @@ function attachStream(slug, url) {
   PB.userSeekUntil = 0; PB.rewound = false;
   liveWatchStartedMs = Date.now();   // a fresh live session to mark
   liveMarkLastWrite = 0;
+  liveWatchCountedMs = liveWatchStartedMs;
+  liveWatchAccumSec = 0;
+  liveWatchSeeded = false;           // re-fold the stored total on the next save
   try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
@@ -2493,11 +2496,23 @@ function resolveLiveMark(slug, list) {
   var key = vodProgressKey(slug, matched);
   var progress = loadVodProgress();
   if (progress.items[key]) { clearLiveMark(slug); return false; }   // never rewind
+  var durSec = Math.floor(vodDurationMs(matched) / 1000);
+  // Watched most of it live? Then the recording is watched, and like any finished
+  // video it keeps no resume point — a rewatch starts from the beginning.
+  if (durSec > 0 && (mark.watchedSec || 0) / durSec >= LIVEMARK_WATCHED_FRAC) {
+    progress.items[key] = {
+      position: 0, duration: durSec, updated: now,
+      name: mark.name, title: mark.title, watched: true
+    };
+    writeVodProgress(progress);
+    clearLiveMark(slug);
+    return true;
+  }
   var pos = positionForMark(mark, matched);
   if (!(pos >= 10)) { clearLiveMark(slug); return false; }          // nothing worth resuming
   progress.items[key] = {
     position: pos,
-    duration: Math.floor(vodDurationMs(matched) / 1000),
+    duration: durSec,
     updated: now,
     name: mark.name,
     title: mark.title
@@ -2506,8 +2521,26 @@ function resolveLiveMark(slug, list) {
   clearLiveMark(slug);
   return true;
 }
+var LIVEMARK_WATCHED_FRAC = 0.8;   // watched this much of the stream -> the recording is watched
+var LIVEMARK_TICK_GAP_MS = 5000;   // a longer gap than this was not viewing time
 var liveWatchStartedMs = 0;   // when the current live playback began
 var liveMarkLastWrite = 0;
+var liveWatchCountedMs = 0;   // time already counted towards the running total
+var liveWatchAccumSec = 0;    // seconds actually watched in this session
+var liveWatchSeeded = false;  // has the stored total been folded in yet
+// Called on every timeupdate, which only fires while the video is progressing.
+// Counting here rather than at write time keeps paused, hidden and asleep
+// stretches out of the total, and each step is small enough to be trustworthy.
+function tickLiveWatch() {
+  var now = Date.now();
+  if (!liveWatchStartedMs) { liveWatchCountedMs = now; return; }
+  var since = now - (liveWatchCountedMs || liveWatchStartedMs);
+  liveWatchCountedMs = now;
+  var video = document.getElementById('video');
+  if (video && !video.paused && since > 0 && since < LIVEMARK_TICK_GAP_MS) {
+    liveWatchAccumSec += since / 1000;
+  }
+}
 // Quietly remember where the viewer is in the live stream, so the recording of
 // this session can pick up there once it ends. Nothing is shown for this.
 function saveLiveMark(force) {
@@ -2525,10 +2558,18 @@ function saveLiveMark(force) {
   if (!(offsetSec >= 10)) return;
   liveMarkLastWrite = now;
   var data = loadLiveMarks();
+  // Fold in what a previous sitting already banked for this same session, once
+  // per playback, so leaving and coming back keeps adding up rather than restarting.
+  if (!liveWatchSeeded) {
+    liveWatchSeeded = true;
+    var prev = data.items[slug];
+    if (prev && prev.sessionStartedAt === c.startedAt) liveWatchAccumSec += (prev.watchedSec || 0);
+  }
   data.items[slug] = {
     sessionStartedAt: c.startedAt,
     leftAtMs: now,
     offsetSec: offsetSec,
+    watchedSec: Math.floor(liveWatchAccumSec),
     name: c.name || slug,
     title: c.title || '',
     updated: now
@@ -5552,7 +5593,7 @@ function browseCardFromEvent(e) {
   video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });
   video.addEventListener('timeupdate', function () {
     if (state.vod) saveVodProgress(false);
-    else saveLiveMark(false);
+    else { tickLiveWatch(); saveLiveMark(false); }
   });
   video.addEventListener('seeked', function () {
     hideSpinner();
