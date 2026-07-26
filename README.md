@@ -19,7 +19,7 @@ something. Use it at your own risk.
 </tr>
 <tr>
 <td align="center">Player with the read-only live chat overlay</td>
-<td align="center">Browse everything live, filter by language</td>
+<td align="center">Browse everything live, by language or category</td>
 </tr>
 <tr>
 <td width="50%"><img src="screenshots/sidebar.png" alt="Followed channels sidebar"></td>
@@ -27,7 +27,7 @@ something. Use it at your own risk.
 </tr>
 <tr>
 <td align="center">Your channels, live ones first, with pins</td>
-<td align="center">Settings: chat, low latency, auto-advance, quality</td>
+<td align="center">Settings: chat, low latency, auto-advance, dim and more</td>
 </tr>
 </table>
 
