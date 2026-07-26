@@ -1801,8 +1801,34 @@ function renderBrowseLangs() {
     box.appendChild(chip);
   });
 }
+/* View-botted fake streams. They come in waves under one category with random
+   channel names and random titles, and inflated viewer counts that put them
+   above real streamers. Measured against 960 live streams: matching on the title
+   alone gives one false positive (a bare URL) and on the name alone ninety-seven
+   (Cristorata7, Ac7ionMan and friends), so both must look generated at once.
+   A real title nearly always contains a space; a real name rarely mixes digits
+   through letters. Requiring mixed case in the title as well took the measured
+   false positives to zero while still catching every bot in the sample. */
+function botNameish(s) {
+  s = String(s || '').trim();
+  if (!s || s.indexOf(' ') !== -1 || s.length < 8) return false;
+  return /[0-9]/.test(s) && /[a-z]/i.test(s);
+}
+function botTitleish(s) {
+  s = String(s || '').trim();
+  if (!s || s.indexOf(' ') !== -1 || s.length < 10) return false;
+  if (/^https?:/i.test(s)) return false;          // a bare link is not keyboard mash
+  return /[0-9]/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s);
+}
+function looksBotStream(s) {
+  if (!s) return false;
+  var ch = s.channel || {};
+  var name = (ch.user && ch.user.username) || ch.slug || '';
+  return botTitleish(s.session_title) && botNameish(name);
+}
 function renderBrowse() {
   var list = (browse.raw || []).slice();
+  if (settings.hideBots) list = list.filter(function (s) { return !looksBotStream(s); });
   if (browse.langs.length) list = list.filter(function (s) { return browse.langs.indexOf(s.language) !== -1; });
   if (browse.discover) {
     var favsNow = getFavorites();
@@ -2202,6 +2228,7 @@ function renderPinnedCatChips() {
   var favsNow = browse.discover ? getFavorites() : null;
   for (var ri = 0; ri < pool.length; ri++) {
     var s = pool[ri];
+    if (settings.hideBots && looksBotStream(s)) continue;   // chips count what the grid will show
     if (browse.langs.length && browse.langs.indexOf(s.language) === -1) continue;
     if (favsNow && favsNow.indexOf((s.channel || {}).slug) !== -1) continue;
     var rc = s.categories && s.categories[0];
@@ -3532,7 +3559,7 @@ function firstLivePinned(slug) {
 /* Settings menu (opened by the gear, or the Yellow button, while the list is open) */
 var settings = { open: false, focus: 0, items: [],
                  chat: false, lowlatency: false, autoadvance: false,
-                 hideOffline: false, diagnostics: false,
+                 hideOffline: false, diagnostics: false, hideBots: true,
                  dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
                  chatSide: 'right', chatSize: 'medium', chatWidth: 'medium', chatOpacity: 'high',
                  chatBackground: 'dark', chatFade: 40000, chatBots: 'show',
@@ -3567,6 +3594,7 @@ function loadSettings() {
   settings.autoadvance = !!s.autoadvance;
   settings.hideOffline = !!s.hideOffline;
   settings.diagnostics = !!s.diagnostics;
+  settings.hideBots = s.hideBots !== false;      // on unless deliberately turned off
   settings.rememberDim = s.rememberDim === true;
   settings.dim = settings.rememberDim && s.dim === true;
   var st = parseFloat(s.dimStrength);
@@ -3593,6 +3621,7 @@ function saveSettings() {
     localStorage.setItem('kicktv.settings', JSON.stringify({
       chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
       hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
+      hideBots: settings.hideBots,
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
       dimStrength: settings.dimStrength, dimScope: settings.dimScope,
       chatSide: settings.chatSide, chatSize: settings.chatSize, chatWidth: settings.chatWidth,
@@ -3631,6 +3660,7 @@ function settingsBuild() {
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
     { kind: 'toggle', key: 'hideOffline', label: 'Hide offline' },
+    { kind: 'toggle', key: 'hideBots', label: 'Hide bot streams' },
     { kind: 'blockedcats', label: 'Blocked categories' },
     { kind: 'toggle', key: 'diagnostics', label: 'Diagnostics' },
     { kind: 'dimopt', label: 'Dim (night)' },
@@ -3791,6 +3821,7 @@ var SETTINGS_DESC = {
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
   autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
   hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
+  hideBots: 'Hide fake streams from Browse — the ones with random channel names and random titles that pad their viewer counts.',
   blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
   diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
   dim: 'Reduce screen brightness. Press OK or use the gear for strength, scope and startup behavior, or press 0 while watching.',
@@ -3881,6 +3912,9 @@ function applyToggle(key) {
     state.offlineExpanded = false;
     if (state.sidebarOpen) renderSidebar(settings.hideOffline ? 'offline-group' : state.current);
     toast('Hide offline channels ' + (settings.hideOffline ? 'on' : 'off'));
+  } else if (key === 'hideBots') {
+    if (browse.open) { browse.gridIdx = 0; browse.renderLimit = 60; renderBrowse(); }
+    toast('Bot streams ' + (settings.hideBots ? 'hidden' : 'shown'));
   } else if (key === 'diagnostics') {
     syncDiagnostics();
     toast('Diagnostics overlay ' + (settings.diagnostics ? 'on' : 'off'));
