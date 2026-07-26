@@ -21,25 +21,75 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: #000 center/cover no-repeat;
   pointer-events: none;   /* decorative — clicks must still reach the player */
 }
-/* Fallback avatar. Small, round and lit rather than a square stretched flat on
-   black. The pulse animates opacity only — a box-shadow or gradient animation at
-   this size makes the TV's compositor work for no reason. */
+/* Fallback avatar, shown while a stream opens and no frame has arrived yet. Round and
+   lit rather than a square stretched flat on black — and this is the one case with no
+   thumbnail to look at, so it carries the loading indicator itself: two arcs orbiting
+   outside the avatar at different radii, in opposite directions, at speeds that never
+   line up. Every animation here is transform or opacity, so the TV moves a composited
+   layer instead of repainting a gradient. It all stops the moment the poster is hidden.
+   ::before is the halo and ::after an orbit, in that order, so the crisp arcs paint on
+   top of the soft glow rather than under it. */
 #poster.avatar { display: flex; align-items: center; justify-content: center; }
+/* Frame AND avatar: a scrim knocks the frame back so the circle and its arcs stay
+   legible over a bright thumbnail, while the frame still shows what you are about to
+   watch. Slightly deeper at the edges to pull the eye to the middle. It is a static
+   gradient — painted once when the poster appears, never animated. */
+#poster.framed::before {
+  content: ''; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%,
+    rgba(0,0,0,0.62) 0%, rgba(0,0,0,0.66) 32%, rgba(0,0,0,0.82) 100%);
+}
 #poster-av { display: none; }
 #poster.avatar #poster-av {
   display: block; position: relative;
-  width: 260px; height: 260px; border-radius: 50%;
+  width: 300px; height: 300px; border-radius: 50%;
   background: #17191b center/cover no-repeat;
-  box-shadow: 0 0 0 3px rgba(83,252,24,0.45), 0 0 60px 4px rgba(0,0,0,0.6);
+  /* the avatar's own edge stays quiet so the moving arcs read as the indicator */
+  box-shadow: 0 0 0 2px rgba(83,252,24,0.3), 0 0 70px 6px rgba(0,0,0,0.65);
 }
+/* Over a frame the medallion needs its own surface — a scrim alone is not enough when
+   the thumbnail is a bright daylight scene, and the quiet edge that suits plain black
+   disappears entirely. A soft dark pool wide enough to sit under both arcs, and a firmer
+   ring. Both are one-time paints; nothing here animates. */
+#poster.framed #poster-av {
+  box-shadow: 0 0 0 3px rgba(83,252,24,0.5), 0 0 70px 110px rgba(0,0,0,0.58);
+}
+#poster.avatar #poster-av::before {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 520px; height: 520px; margin: -260px 0 0 -260px;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(83,252,24,0.26) 0%, rgba(83,252,24,0.09) 44%, rgba(83,252,24,0) 68%);
+  animation: posterglow 2.6s ease-in-out infinite;
+}
+/* Outer orbit: a bright quarter-arc plus a faint trailing one, sweeping clockwise. */
 #poster.avatar #poster-av::after {
   content: ''; position: absolute; left: 50%; top: 50%;
-  width: 460px; height: 460px; margin: -230px 0 0 -230px;
-  border-radius: 50%; pointer-events: none;
-  background: radial-gradient(circle, rgba(83,252,24,0.28) 0%, rgba(83,252,24,0.10) 42%, rgba(83,252,24,0) 68%);
-  animation: posterglow 2.4s ease-in-out infinite;
+  width: 352px; height: 352px; margin: -176px 0 0 -176px;
+  border-radius: 50%; box-sizing: border-box; pointer-events: none;
+  border: 5px solid transparent;
+  border-top-color: #53fc18;
+  border-right-color: rgba(83,252,24,0.3);
+  animation: posterorbit 1.5s linear infinite;
 }
+/* Inner counter-orbit: thinner, dimmer, slower, anticlockwise. */
+#poster.avatar #poster-orbit {
+  position: absolute; left: 50%; top: 50%;
+  width: 394px; height: 394px; margin: -197px 0 0 -197px;
+  border-radius: 50%; box-sizing: border-box; pointer-events: none;
+  border: 2px solid transparent;
+  border-bottom-color: rgba(83,252,24,0.55);
+  border-left-color: rgba(83,252,24,0.16);
+  animation: posterorbit 2.9s linear infinite reverse;
+}
+/* While the medallion is up its arcs ARE the progress indicator, so the player's regular
+   centre spinner would be a second one — and it lands inside the 300px circle, on the
+   streamer's face, 7px off centre. Suppress it for exactly as long as the arcs run.
+   #spinner is a later sibling of #poster inside #player, so a sibling combinator ties
+   the two together with no JS to keep in step. */
+#poster.avatar ~ #spinner { display: none; }
 @keyframes posterglow { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes posterorbit { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* Top info bar */
 #overlay {
@@ -161,23 +211,31 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   border-radius: 8px; border-left: 5px solid transparent;
   position: relative; cursor: pointer; overflow: hidden;
 }
-/* Softer highlight plus a dimmed green side marker, so the focused row reads
-   clearly even under night dimming without being harsh. */
-.favrow.focused { background: #48505b; border-left-color: rgba(83,252,24,0.5); }
+/* Softer highlight plus a green side marker, so the focused row reads clearly even
+   under night dimming without being harsh. The marker is full strength: .current is
+   declared after this at equal specificity, so a dimmed marker here meant a focused
+   row got a WEAKER edge than an unfocused current one. */
+.favrow.focused { background: #48505b; border-left-color: #53fc18; }
 .favrow.current { border-left-color: #53fc18; }
-.favrow.offline { opacity: 0.5; }            /* dim offline channels, and keep them dim on hover */
+/* Offline rows, and blocked ones — a blocked category's channel is still live, so it
+   keeps showing viewers, category and title, just recessed and sunk to the bottom.
+   These used to fade the whole row with opacity, which also dimmed the one piece of
+   text saying what the state IS, and .favav.off nested another 0.5 inside it, leaving
+   avatars at 0.25. Recede by colour instead, so "Offline" stays legible from a sofa. */
+.favrow.offline .favname, .favrow.blocked .favname { color: #9aa0a4; }
+.favrow.offline .favgame, .favrow.blocked .favgame { color: #868c90; }
+.favrow.offline .favview, .favrow.blocked .favview { color: #9aa0a4; }
+.favrow.offline .favav,   .favrow.blocked .favav   { opacity: 0.55; }
 .favrow.offline .pinmark { opacity: 0.45; }  /* fade the pin marker a bit more when offline */
-/* A blocked category's channel is still live — it shows viewers, category and
-   title as usual, just dimmed like an offline row and sunk to the bottom. */
-.favrow.blocked { opacity: 0.5; }
 .favrow.blocked .pinmark { opacity: 0.45; }
 .favrow.offlinegroup {
   height: 58px; color: #b9bdc0; border-left: 0; display: flex;
-  align-items: center; padding: 0 24px; box-sizing: border-box;
+  align-items: center; padding: 0 20px; box-sizing: border-box;
 }
+/* Widened so the label after it lands on the same left edge as the channel names. */
 .offline-chevron {
   width: 30px; height: 28px; color: #53fc18; display: flex;
-  align-items: center; flex: 0 0 30px;
+  align-items: center; flex: 0 0 68px;
 }
 .offline-chevron svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 3; }
 .offline-label { font-size: 24px; font-weight: 700; }
@@ -244,10 +302,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* The Add channel row at the bottom of the list. */
 .favrow.addrow { height: 64px; color: #53fc18; }
 .addplus {
-  position: absolute; left: 24px; top: 6px; font-size: 44px; color: #53fc18;
+  position: absolute; left: 20px; top: 6px; width: 52px; text-align: center;
+  font-size: 44px; color: #53fc18;
 }
 .addtext {
-  position: absolute; left: 74px; top: 14px; font-size: 27px; font-weight: 700; color: #efeff1;
+  position: absolute; left: 88px; top: 14px; font-size: 27px; font-weight: 700; color: #efeff1;
 }
 
 /* The "someone came online" note in the upper right. */
@@ -375,9 +434,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #addresults { max-height: 400px; overflow: hidden; margin-top: 20px; }
 .aresult {
   display: flex; align-items: center; padding: 12px 14px; border-radius: 10px; cursor: pointer;
-  transition: background-color 140ms ease, transform 140ms ease, box-shadow 150ms ease;
 }
-.aresult.focused { background: #2a2f33; transform: translateX(4px); }
+.aresult.focused { background: #48505b; box-shadow: inset 5px 0 0 #53fc18; }
 .aav {
   width: 48px; height: 48px; border-radius: 24px; background: #3a3d40; flex-shrink: 0;
   color: #fff; font-size: 24px; font-weight: 700; text-align: center; line-height: 48px; margin-right: 16px;
@@ -446,8 +504,17 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #browse-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
+  box-sizing: border-box;   /* without this the 3px border lands outside, off-centring the panel */
   background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
   overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+}
+/* One static gradient at the foot of each grid, so the row the panel clips reads as
+   "there is more below" instead of a card sliced against a hard bright edge. No
+   animation and no filter — it is a plain paint over an opaque panel. */
+#browse-panel::after, #vods-panel::after, #cats-panel::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 64px;
+  background: linear-gradient(rgba(12,17,13,0), #0c110d);
+  pointer-events: none;
 }
 #browse-head {
   display: flex; align-items: center;
@@ -456,7 +523,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #browse-title { font-size: 32px; font-weight: 800; color: #fff; margin-right: 22px; }
 #browse-langs { flex: 1; display: flex; flex-wrap: wrap; }
 .blang {
-  font-size: 22px; padding: 7px 18px; margin: 0 8px 4px 0; border-radius: 18px;
+  font-size: 22px; padding: 7px 18px; margin: 0 8px 0 0; border-radius: 18px;
   background: #1a201b; color: #b9bcbb; cursor: pointer; border: 2px solid transparent;
 }
 .blang.sel { background: #143206; color: #53fc18; }
@@ -483,11 +550,14 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .pcat:hover { border-color: #53fc18; }
 .pcatx { margin-left: 12px; color: #7c8084; font-weight: 700; }
 .pcatx:hover { color: #ff5f52; }
+/* The transparent border matters: .blang and #browse-cats-btn both carry one, so
+   without it these chips render 4px shorter and 4px narrower than their neighbours. */
 #browse-sort, #browse-discover, #vods-filter {
   font-size: 22px; padding: 7px 18px; margin-right: 14px; border-radius: 18px;
   background: #1a201b; color: #b9bcbb; cursor: pointer; white-space: nowrap;
+  border: 2px solid transparent;
 }
-#browse-sort:hover, #browse-discover:hover, #vods-filter:hover { color: #53fc18; }
+#browse-sort:hover, #browse-discover:hover, #vods-filter:hover { border-color: #53fc18; color: #fff; }
 #browse-discover.on, #vods-filter.on { background: #143206; color: #53fc18; }
 /* Balloon tip under the Discover chip */
 #browse-tip {
@@ -515,8 +585,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Loading card at the end of the grid: an indeterminate bar on one small
    element (transform-only animation, cheap to composite). */
+/* Matches a real card's rendered height (408x334, measured on the TV) so the row it
+   sits in does not change height when it appears. */
 .bloadcard {
-  height: 296px; display: flex; align-items: center; justify-content: center;
+  height: 334px; display: flex; align-items: center; justify-content: center;
   background: #14181a;
 }
 .loadtrack {
@@ -548,14 +620,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .catblock.on { color: #e91916; }
 .catblock .blockicon { width: 24px; height: 24px; }
 .bcard {
-  box-sizing: border-box; width: 384px; margin: 8px; border-radius: 12px; overflow: hidden;
+  box-sizing: border-box; width: 408px; margin: 8px; border-radius: 12px; overflow: hidden;
   position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
 }
 /* Highlight without lifting or fading in: no scale, no drop shadow, no transition.
    Growing a card nudges its neighbours and costs a repaint on every pointer move,
    and an animated edge lags behind the pointer. The green edge appears at once. */
 .bcard.focused { border-color: #53fc18; box-shadow: 0 0 22px rgba(83,252,24,0.25); }
-.bthumb { width: 100%; height: 212px; background: #101213 center/cover no-repeat; position: relative; }
+/* 400px of content inside the 4px border, kept at 16:9 */
+.bthumb { width: 100%; height: 225px; background: #101213 center/cover no-repeat; position: relative; }
 .bviewers {
   position: absolute; bottom: 8px; right: 8px;
   background: rgba(0,0,0,0.8); color: #fff; font-size: 19px; padding: 2px 10px; border-radius: 6px;
@@ -571,8 +644,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(0,0,0,0.7); color: #53fc18; border: 2px solid #53fc18;
 }
 .baddbtn:hover { background: #53fc18; color: #0b0e0f; }
-.baddbtn.added { color: #0b0e0f; background: #53fc18; border-color: #53fc18; }
-.bmeta { padding: 9px 13px 12px; }
+/* Quiet confirmation, not a call to action: a solid bright-green square read louder
+   than the focus ring marking the actually-focused card. '+' stays the loud one. */
+.baddbtn.added { background: rgba(0,0,0,0.55); color: #53fc18; border-color: rgba(83,252,24,0.45); font-size: 26px; }
+.bmeta { padding: 8px 14px 10px; }
 
 /* Watched progress on Past-video cards (YouTube-style) */
 .bprogtrack {
@@ -587,9 +662,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 .bcard.watched { opacity: 0.55; }
 .bcard.watched.focused { opacity: 0.9; }
-.bname { font-size: 23px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.btitle { font-size: 18px; color: #cfd0d1; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bsub { font-size: 17px; color: #9a9a9d; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bname { font-size: 25px; font-weight: 700; color: #fff; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.btitle { font-size: 21px; color: #cfd0d1; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bsub { font-size: 19px; color: #9a9a9d; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Past-video cards carry no add button, so their text has nothing to dodge. */
+#vods-grid .bname, #vods-grid .btitle, #vods-grid .bsub { margin-right: 13px; }
 #browse-status {
   position: absolute; top: 56%; left: 0; width: 100%; text-align: center;
   font-size: 28px; color: #9a9a9d; pointer-events: none;
@@ -602,6 +679,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #vods-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
+  box-sizing: border-box;
   background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
   overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
 }
@@ -641,6 +719,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #cats-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
+  box-sizing: border-box;
   background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
   overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
 }
@@ -657,7 +736,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   font-size: 28px; color: #9a9a9d; pointer-events: none;
 }
 .ccard {
-  box-sizing: border-box; width: 384px; height: 220px; margin: 8px; border-radius: 12px;
+  box-sizing: border-box; width: 408px; height: 233px; margin: 8px; border-radius: 12px;
   overflow: hidden; position: relative; background: #17191b; border: 4px solid transparent; cursor: pointer;
 }
 .ccard.focused { border-color: #53fc18; box-shadow: 0 0 22px rgba(83,252,24,0.25); }
@@ -724,7 +803,12 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #chpop-list { max-height: 720px; overflow: hidden; padding: 10px; }
 .chrow { display: flex; align-items: center; height: 74px; padding: 0 16px; border-radius: 10px; cursor: pointer; }
 .chrow.focused { background: #48505b; box-shadow: inset 3px 0 0 rgba(83,252,24,0.6); }
-.chrow.blocked { opacity: 0.5; }
+/* Same treatment as a blocked sidebar row: fading the whole row also fades the text
+   that says what the state is, and dims the avatar twice over. */
+.chrow.blocked .chname { color: #9aa0a4; }
+.chrow.blocked .chgame { color: #868c90; }
+.chrow.blocked .chview { color: #9aa0a4; }
+.chrow.blocked .chav   { opacity: 0.55; }
 .chav {
   width: 50px; height: 50px; border-radius: 25px; flex-shrink: 0; margin-right: 16px;
   background: #3a3d40 center/cover no-repeat;
@@ -823,11 +907,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Player tools, shown at the bottom-right while the sidebar is open. Quality is
    a first-class control; Settings remains a separate themed gear. */
 #player-tools {
-  position: absolute; right: 40px; bottom: 36px;
+  position: absolute; right: 40px; bottom: 40px;   /* same baseline as #cbguide */
   display: flex; align-items: center; z-index: 48;
 }
 .player-tool {
-  height: 66px; box-sizing: border-box;
+  height: 74px; box-sizing: border-box;   /* matches #cbguide's height */
   display: flex; align-items: center;
   background: linear-gradient(145deg, rgba(27,31,33,0.97), rgba(12,15,16,0.97));
   border: 2px solid #343a3e; color: #d6d9da;
@@ -838,13 +922,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   border-color: #53fc18; color: #fff;
   box-shadow: 0 8px 26px rgba(0,0,0,0.42), 0 0 0 1px rgba(83,252,24,0.16);
 }
+/* Two separate controls, not a segmented pill: each takes focus on its own, and when
+   they touch the focused one's ring runs into its neighbour. */
 #quality-button {
   min-width: 174px; padding: 0 20px 0 16px;
-  border-radius: 16px 6px 6px 16px;
+  border-radius: 16px;
 }
 #settings-button {
-  position: relative; width: 66px; justify-content: center;
-  margin-left: 8px; border-radius: 6px 16px 16px 6px;
+  position: relative; width: 74px; justify-content: center;
+  margin-left: 14px; border-radius: 16px;
 }
 .player-tool-icon {
   width: 42px; height: 42px; margin-right: 13px;
@@ -867,12 +953,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .quality-mark.qlow .quality-bar { fill: rgba(255,77,69,0.22); }
 .quality-mark.qlow .bar-1 { fill: #ff4d45; }
 .player-tool-copy { display: flex; flex-direction: column; line-height: 1.05; }
-.player-tool-name {
-  color: #8f9598; font-size: 15px; font-weight: 800;
-  letter-spacing: 1px; text-transform: uppercase;
-}
+/* The 15px eyebrow was unreadable at three metres and redundant — the bars icon
+   already says "quality". The value carries the control on its own. */
+.player-tool-name { display: none; }
 #quality-button-value {
-  color: #fff; font-size: 25px; font-weight: 800; margin-top: 4px;
+  color: #fff; font-size: 28px; font-weight: 800; margin-top: 0;
 }
 #quality-button.focused #quality-button-value { color: #53fc18; }
 #quality-button.quality-limited #quality-button-value { color: #ffd21e; }
@@ -948,7 +1033,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(0,0,0,0.35);
 }
 #settingsbox {
-  position: absolute; right: 40px; bottom: 118px; width: 380px;
+  position: absolute; right: 40px; bottom: 126px; width: 380px;
   background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
   padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
 }
@@ -968,17 +1053,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #settings-ver.hasnew:hover { background: rgba(255,210,30,0.14); border-color: #ffd21e; }
 #settings-ver.hasnew::after {
   content: 'New'; position: absolute; top: -12px; right: -12px;
-  font-size: 13px; font-weight: 800; letter-spacing: 0.4px; line-height: 1;
-  padding: 3px 6px; border-radius: 6px; background: #ffd21e; color: #0b0e0f;
+  font-size: 16px; font-weight: 800; letter-spacing: 0.4px; line-height: 1;
+  padding: 3px 8px; border-radius: 6px; background: #ffd21e; color: #0b0e0f;
   box-shadow: 0 2px 6px rgba(0,0,0,0.5);
 }
 #settings-list { max-height: 700px; overflow: hidden; }
 .srow {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 26px; font-size: 27px; color: #d6d7d8; cursor: pointer;
-  transition: background-color 140ms ease;
 }
-.srow.focused { background: #2a2f33; }
+.srow.focused { background: #48505b; box-shadow: inset 5px 0 0 #53fc18; }
 .spill {
   min-width: 58px; text-align: center; font-size: 22px; font-weight: 700;
   padding: 3px 14px; border-radius: 14px; background: #2a2d30; color: #9a9a9d;
@@ -992,7 +1076,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(0,0,0,0.35);
 }
 #qualityoptbox {
-  position: absolute; right: 40px; bottom: 118px; width: 380px;
+  position: absolute; right: 40px; bottom: 126px; width: 380px;
   box-sizing: border-box; background: #17191b;
   border: 2px solid #53fc18; border-radius: 14px;
   padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
@@ -1008,7 +1092,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   display: flex; align-items: center; padding: 11px 26px;
   color: #d6d7d8; font-size: 27px; cursor: pointer;
 }
-.qpick.focused { background: #2a2f33; }
+.qpick.focused { background: #48505b; box-shadow: inset 5px 0 0 #53fc18; }
 .qpick.selected { color: #53fc18; }
 .qpick-label { font-size: 27px; font-weight: 700; }
 .qpick-check {
@@ -1070,7 +1154,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 26px; font-size: 27px; color: #d6d7d8; cursor: pointer;
 }
-.bcatrow.focused { background: #2a2f33; }
+.bcatrow.focused { background: #48505b; box-shadow: inset 5px 0 0 #53fc18; }
 .bcatx { color: #7c8084; font-weight: 700; font-size: 24px; padding: 0 6px; }
 .bcatrow.focused .bcatx, .bcatx:hover { color: #ff5f52; }
 .bcatempty { padding: 16px 26px; font-size: 23px; color: #7c8084; }
@@ -1078,7 +1162,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    list is empty and the user has no idea where the block button lives. */
 .bcatlink { color: #9a9a9d; font-size: 24px; border-top: 1px solid #2f3438; margin-top: 6px; }
 .bcatlink .slabel { color: #9a9a9d; }
-.bcatlink.focused { background: #2a2f33; }
+.bcatlink.focused { background: #48505b; box-shadow: inset 5px 0 0 #53fc18; }
 .bcatlink.focused .slabel { color: #53fc18; }
 .bcatchev { color: #53fc18; font-weight: 700; font-size: 26px; padding: 0 6px; }
 
@@ -1169,7 +1253,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Little pop-up messages at the bottom */
 #toast {
-  position: absolute; bottom: 90px; left: 50%; margin-left: -300px; z-index: 80;
+  position: absolute; bottom: 130px; left: 50%; margin-left: -300px; z-index: 80;
   width: 600px; text-align: center;
   background: rgba(23,25,27,0.95); border: 2px solid #53fc18;
   color: #fff; font-size: 28px; padding: 18px 10px; border-radius: 10px;

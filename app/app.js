@@ -706,35 +706,36 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
    stale image never sits over the next thing that plays. */
 // isAvatar keeps a small profile picture at its own size: an avatar blown up to
 // fill 1920x1080 is a mess of pixels, whereas a stream thumbnail is meant to cover.
-function setPosterStill(url, isAvatar) {
+// Two independent layers, either of which may be null. A stream frame fills the panel.
+// The avatar goes on the inner element, which can be round and carry the orbiting loader
+// rather than being stretched flat. Given BOTH, the frame becomes a dimmed backdrop and
+// the avatar rides on top — you get context and a progress indicator at the same time.
+// With neither, the whole layer goes away.
+function setPosterStill(frameUrl, avatarUrl) {
   var el = document.getElementById('poster');
   var av = document.getElementById('poster-av');
   if (!el) return;
-  if (!url) {
+  if (!frameUrl && !avatarUrl) {
     el.className = 'hidden';
     el.style.backgroundImage = '';
     if (av) av.style.backgroundImage = '';
     return;
   }
-  // A stream frame fills the panel. An avatar goes on the inner element instead,
-  // which can be round and carry its own glow rather than being stretched flat.
-  if (isAvatar) {
-    el.style.backgroundImage = '';
-    if (av) av.style.backgroundImage = 'url(' + url + ')';
-    el.className = 'avatar';
-  } else {
-    el.style.backgroundImage = 'url(' + url + ')';
-    if (av) av.style.backgroundImage = '';
-    el.className = '';
-  }
+  el.style.backgroundImage = frameUrl ? 'url(' + frameUrl + ')' : '';
+  if (av) av.style.backgroundImage = avatarUrl ? 'url(' + avatarUrl + ')' : '';
+  // 'avatar' lights the circle and starts its arcs; 'framed' dims the frame behind them
+  el.className = avatarUrl ? (frameUrl ? 'avatar framed' : 'avatar') : '';
 }
-// A warmed stream frame if we have a recent one, otherwise the avatar, which
-// still beats a black screen.
+
+// Both, when both exist: a warmed frame as the backdrop and the avatar over it. A frame
+// alone still beats black, and the avatar alone still beats black.
 function livePoster(slug) {
   var c = previewCache[slug];
-  if (c && Date.now() - c.t < 60000) return { url: c.url, avatar: false };
   var ch = state.channels[slug];
-  return { url: (ch && ch.avatar) || null, avatar: true };
+  return {
+    frame: (c && Date.now() - c.t < 60000) ? c.url : null,
+    avatar: (ch && ch.avatar) || null
+  };
 }
 function attachStream(slug, url) {
   var video = document.getElementById('video');
@@ -747,7 +748,7 @@ function attachStream(slug, url) {
   liveWatchAccumSec = 0;
   liveWatchSeeded = false;           // re-fold the stored total on the next save
   var lp = livePoster(slug);
-  setPosterStill(lp.url, lp.avatar);
+  setPosterStill(lp.frame, lp.avatar);
   try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
@@ -1049,6 +1050,7 @@ function openSidebar() {
   if (!state.sidebarOpen) {
     state.sidebarOpen = true;
     document.getElementById('sidebar').className = 'open';
+    sidePreviewArmed = !state.vod;      // in a VOD, wait for a move or a hover
     var prefer = (state.current && state.order.indexOf(state.current) !== -1)
       ? state.current : null;
     renderSidebar(prefer);
@@ -1110,21 +1112,38 @@ function moveSide(delta) {
   var next = state.sideFocus + delta;
   if (next < 0 || next >= state.sideItems.length) return;
   state.sideFocus = next;
+  armSidePreview();          // a deliberate move is what earns the preview in a VOD
   applySideFocus();
 }
+/* Moving the highlight.
+   The obvious way is to rewrite every child's className and let the right one come out
+   focused. That dirties the style of the whole list, and the offsetTop read that follows
+   then forces a recalc and layout across all of it — on every D-pad press, and on every
+   pointer move that crosses a row. In a deep Browse grid that is hundreds of cards per
+   keypress, which is exactly where the user is holding the button down.
+   Only two elements ever change: the one losing focus and the one gaining it. These
+   helpers touch only those two. The node losing focus is remembered rather than its
+   index, because a re-render replaces the children — and a node that is no longer in
+   the container does not need clearing, which makes this self-correcting. */
+function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
+  if (prevEl && prevEl !== nextEl && prevEl.parentNode === container) prevEl.className = baseOf(prevEl);
+  if (nextEl) nextEl.className = baseOf(nextEl) + (wantFocus ? ' focused' : '');
+  return nextEl;
+}
+function scrollIntoViewport(container, el, pad) {
+  if (!el) return;
+  var top = el.offsetTop - container.offsetTop;
+  if (top < container.scrollTop) container.scrollTop = top - pad;
+  else if (top + el.offsetHeight > container.scrollTop + container.clientHeight)
+    container.scrollTop = top + el.offsetHeight - container.clientHeight + pad;
+}
+var sideFocusEl = null;
+function sideBaseOf(row) { return row.getAttribute('data-base') || 'favrow'; }
 function applySideFocus() {
   var list = document.getElementById('fav-list');
-  for (var i = 0; i < list.children.length; i++) {
-    var row = list.children[i];
-    row.className = row.getAttribute('data-base') +
-      (i === state.sideFocus && state.playerToolFocus < 0 ? ' focused' : '');
-    if (i === state.sideFocus) {
-      var top = row.offsetTop - list.offsetTop;
-      if (top < list.scrollTop) list.scrollTop = top - 8;
-      else if (top + row.offsetHeight > list.scrollTop + list.clientHeight)
-        list.scrollTop = top + row.offsetHeight - list.clientHeight + 8;
-    }
-  }
+  var row = list.children[state.sideFocus] || null;
+  sideFocusEl = swapFocus(list, sideFocusEl, row, sideBaseOf, state.playerToolFocus < 0);
+  scrollIntoViewport(list, row, 8);
   scheduleSidePreview();
 }
 /* Live thumbnail previews. A card shows the stream's current frame beside the
@@ -1241,7 +1260,16 @@ var sidePreviewCard = makePreviewCard('sidepreview',
     }
     e.style.top = Math.round(top) + 'px';
   });
-function scheduleSidePreview() { sidePreviewCard.update(); }
+/* Over a VOD the preview window lands on top of the transport controls, which ride with
+   the sidebar. So in a VOD the preview is not armed by merely opening the list — it waits
+   until the highlight actually moves or the pointer lands on a row. Live playback is
+   unaffected: there are no controls underneath to cover. */
+var sidePreviewArmed = true;
+function armSidePreview() { sidePreviewArmed = true; }
+function scheduleSidePreview() {
+  if (!sidePreviewArmed) { sidePreviewCard.cancel(); return; }
+  sidePreviewCard.update();
+}
 function renderSidebar(focusKey) {
   var prevKey = (typeof focusKey !== 'undefined' && focusKey !== null)
     ? focusKey : focusKeyOf(state.sideItems[state.sideFocus]);
@@ -1510,9 +1538,10 @@ function enterAddList() {
 function renderAddResults() {
   var box = document.getElementById('addresults');
   box.innerHTML = '';
+  var favsInResults = getFavorites();   // once per render, not once per row
   add.results.forEach(function (c, i) {
     var name = (c.user && c.user.username) || c.slug;
-    var already = getFavorites().indexOf(c.slug) !== -1;
+    var already = favsInResults.indexOf(c.slug) !== -1;
     var row = document.createElement('div');
     row.setAttribute('data-base', 'aresult' + (already ? ' added' : ''));
     row.className = 'aresult' + (already ? ' added' : '');
@@ -1539,18 +1568,15 @@ function renderAddResults() {
   });
   applyAddFocus();
 }
+var addFocusEl = null;
+// data-base carries the 'already following' state
+function addRowBaseOf(row) { return row.getAttribute('data-base') || 'aresult'; }
 function applyAddFocus() {
   var box = document.getElementById('addresults');
-  for (var i = 0; i < box.children.length; i++) {
-    var row = box.children[i];
-    row.className = (row.getAttribute('data-base') || 'aresult') + (i === add.focus ? ' focused' : '');
-    if (i === add.focus) {
-      var top = row.offsetTop - box.offsetTop;
-      if (top < box.scrollTop) box.scrollTop = top - 6;
-      else if (top + row.offsetHeight > box.scrollTop + box.clientHeight)
-        box.scrollTop = top + row.offsetHeight - box.clientHeight + 6;
-    }
-  }
+  // add.focus is -1 while the text box has focus, which clears the list highlight
+  var row = add.focus >= 0 ? (box.children[add.focus] || null) : null;
+  addFocusEl = swapFocus(box, addFocusEl, row, addRowBaseOf, true);
+  scrollIntoViewport(box, row, 6);
 }
 function addNav(delta) {
   if (!add.results.length) return;
@@ -1701,10 +1727,30 @@ function loadBrowseLangPref() {
 }
 function saveBrowseLangPref() { try { localStorage.setItem('kicktv.browselang', JSON.stringify(browse.langs)); } catch (e) {} }
 function setBrowseStatus(msg) { document.getElementById('browse-status').textContent = msg || ''; }
+// Kick ships a srcset with every thumbnail and banner, and the plain `src` is the
+// 1280-wide one. A grid card is 376px across, so that default carries about eleven
+// times the pixels it can ever show — sixty of them at a time, decoded on the main
+// thread, is most of what opening a grid costs. Take the narrowest variant that
+// still covers the card. (The preview window has always done this by hand; see
+// pickPreviewUrl.)
+var CARD_IMG_W = 400;   // .bcard and .ccard are 408px wide with a 4px border
+function pickSrcsetUrl(srcset, minWidth) {
+  var parts = String(srcset || '').split(',');
+  var best = null, bestW = 0, widest = null, widestW = -1;
+  for (var i = 0; i < parts.length; i++) {
+    var m = /(\S+)\s+(\d+)w$/.exec(parts[i].trim());
+    if (!m) continue;
+    var w = parseInt(m[2], 10);
+    if (w > widestW) { widestW = w; widest = m[1]; }
+    if (w >= minWidth && (best === null || w < bestW)) { bestW = w; best = m[1]; }
+  }
+  return best || widest;   // nothing wide enough: take the biggest on offer
+}
 function thumbUrl(s) {
   var t = s && s.thumbnail;
   if (!t) return null;
-  return t.src || t.url || (typeof t === 'string' ? t : null);
+  if (typeof t === 'string') return t;
+  return pickSrcsetUrl(t.srcset, CARD_IMG_W) || t.src || t.url || null;
 }
 function openBrowse(categorySlug, categoryName) {
   if (!state.ready) return;
@@ -1782,7 +1828,10 @@ function loadBrowseMore(initial) {
   else setBrowseLoadingCard(true);   // subsequent pages: progress card in the grid
   var pg = browse.page, ses = browse.session;
   serviceGet('/stream/livestreams/en?page=' + pg + '&limit=50&sort=desc', function (err, data) {
-    if (ses !== browse.session) return;   // response belongs to a closed/reopened session
+    // Belongs to a closed/reopened session: drop it without clearing the flag, which now
+    // guards a newer request. Anything that bumps browse.session MUST also reset
+    // browse.fetching (openBrowse does) or this flag stays true and Browse never loads.
+    if (ses !== browse.session) return;
     browse.fetching = false;
     if (!browse.open) return;
     var arr = (!err && data && data.data) ? data.data : [];
@@ -1861,6 +1910,55 @@ function looksBotStream(s) {
   var name = (ch.user && ch.user.username) || ch.slug || '';
   return botTitleish(s.session_title) && botNameish(name);
 }
+function makeBrowseCard(s, i, favs) {
+  var ch = s.channel || {}, user = ch.user || {};
+  var card = document.createElement('div');
+  card.className = 'bcard';
+  card.setAttribute('data-idx', i);
+  var url = thumbUrl(s);
+  var thumb = document.createElement('div');
+  thumb.className = 'bthumb';
+  if (url) thumb.style.backgroundImage = 'url(' + url + ')';
+  var v = document.createElement('span');
+  v.className = 'bviewers';
+  v.innerHTML = '<span class="bdot"></span>';
+  v.appendChild(document.createTextNode(fmtViewers(s.viewer_count || 0)));
+  thumb.appendChild(v);
+  var already = favs.indexOf(ch.slug) !== -1;
+  var add = document.createElement('span');
+  add.className = 'baddbtn' + (already ? ' added' : '');
+  add.setAttribute('data-act', 'badd');
+  add.setAttribute('data-slug', ch.slug || s.slug);
+  add.textContent = already ? '✓' : '+';
+  card.appendChild(thumb);
+  var meta = document.createElement('div');
+  meta.className = 'bmeta';
+  meta.innerHTML = '<div class="bname"></div><div class="btitle"></div><div class="bsub"></div>';
+  meta.children[0].textContent = user.username || ch.slug || s.slug;
+  meta.children[1].textContent = s.session_title || '';
+  meta.children[2].textContent =
+    ((s.categories && s.categories[0] && s.categories[0].name) || '') +
+    (s.language ? '  ·  ' + s.language : '');
+  card.appendChild(meta);
+  card.appendChild(add);
+  return card;
+}
+// Growing the window used to call renderBrowse(), which re-filtered and re-sorted the
+// whole raw pool and rebuilt every card in the DOM just to show forty more — a visible
+// hitch every ten rows of a deep scroll, getting worse the deeper you went. Nothing
+// above the new cards has changed, so append them and leave the rest alone.
+function extendBrowseWindow(oldLimit) {
+  var grid = document.getElementById('browse-grid');
+  var loadCard = document.getElementById('browse-loadcard');
+  var favs = getFavorites();
+  var end = Math.min(browse.renderLimit, browse.streams.length);
+  for (var i = oldLimit; i < end; i++) {
+    var card = makeBrowseCard(browse.streams[i], i, favs);
+    // the loading card is always last, so new cards go in front of it
+    if (loadCard && loadCard.parentNode === grid) grid.insertBefore(card, loadCard);
+    else grid.appendChild(card);
+  }
+}
 function renderBrowse() {
   var list = (browse.raw || []).slice();
   if (settings.hideBots) list = list.filter(function (s) { return !looksBotStream(s); });
@@ -1891,39 +1989,11 @@ function renderBrowse() {
   var grid = document.getElementById('browse-grid');
   var savedScroll = grid.scrollTop;
   grid.innerHTML = '';
-  browse.streams.slice(0, browse.renderLimit).forEach(function (s, i) {
-    var ch = s.channel || {}, user = ch.user || {};
-    var card = document.createElement('div');
-    card.className = 'bcard';
-    card.setAttribute('data-idx', i);
-    var url = thumbUrl(s);
-    var thumb = document.createElement('div');
-    thumb.className = 'bthumb';
-    if (url) thumb.style.backgroundImage = 'url(' + url + ')';
-    var v = document.createElement('span');
-    v.className = 'bviewers';
-    v.innerHTML = '<span class="bdot"></span>';
-    v.appendChild(document.createTextNode(fmtViewers(s.viewer_count || 0)));
-    thumb.appendChild(v);
-    var already = getFavorites().indexOf(ch.slug) !== -1;
-    var add = document.createElement('span');
-    add.className = 'baddbtn' + (already ? ' added' : '');
-    add.setAttribute('data-act', 'badd');
-    add.setAttribute('data-slug', ch.slug || s.slug);
-    add.textContent = already ? '✓' : '+';
-    card.appendChild(thumb);
-    var meta = document.createElement('div');
-    meta.className = 'bmeta';
-    meta.innerHTML = '<div class="bname"></div><div class="btitle"></div><div class="bsub"></div>';
-    meta.children[0].textContent = user.username || ch.slug || s.slug;
-    meta.children[1].textContent = s.session_title || '';
-    meta.children[2].textContent =
-      ((s.categories && s.categories[0] && s.categories[0].name) || '') +
-      (s.language ? '  ·  ' + s.language : '');
-    card.appendChild(meta);
-    card.appendChild(add);
-    grid.appendChild(card);
-  });
+  // read once, not once per card: getFavorites() is two localStorage reads and a parse
+  var favsInGrid = getFavorites();
+  for (var ci = 0; ci < browse.renderLimit && ci < browse.streams.length; ci++) {
+    grid.appendChild(makeBrowseCard(browse.streams[ci], ci, favsInGrid));
+  }
   grid.scrollTop = savedScroll;   // keep position while more pages append
 
   if (!browse.streams.length) {
@@ -1936,7 +2006,12 @@ function renderBrowse() {
   renderPinnedCatChips();          // keep the per-category live counts current
   applyBrowseFocus();
 }
+var browseFocusEl = null;
+// the loading card is focusable but not activatable, so it keeps its own base class
+function browseCardBaseOf(card) { return card.id === 'browse-loadcard' ? 'bcard bloadcard' : 'bcard'; }
 function applyBrowseFocus() {
+  // the eight language chips are cheap and their selected state depends on browse.langs,
+  // so they stay a full pass; only the grid is worth diffing
   var langsEl = document.getElementById('browse-langs');
   for (var i = 0; i < langsEl.children.length; i++) {
     var chip = langsEl.children[i];
@@ -1945,21 +2020,9 @@ function applyBrowseFocus() {
       (browse.zone === 'lang' && i === browse.langIdx ? ' focused' : '');
   }
   var grid = document.getElementById('browse-grid');
-  for (var j = 0; j < grid.children.length; j++) {
-    var focusedCls = (browse.zone === 'grid' && j === browse.gridIdx) ? ' focused' : '';
-    if (grid.children[j].id === 'browse-loadcard') {
-      grid.children[j].className = 'bcard bloadcard' + focusedCls;   // focusable, not activatable
-    } else {
-      grid.children[j].className = 'bcard' + focusedCls;
-    }
-  }
-  if (browse.zone === 'grid' && grid.children[browse.gridIdx]) {
-    var el = grid.children[browse.gridIdx];
-    var top = el.offsetTop - grid.offsetTop;
-    if (top < grid.scrollTop) grid.scrollTop = top - 12;
-    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
-      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
-  }
+  var card = grid.children[browse.gridIdx] || null;
+  browseFocusEl = swapFocus(grid, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
+  if (browse.zone === 'grid') scrollIntoViewport(grid, card, 12);
   scheduleBrowsePeek();
 }
 // After dwelling on a browse card, refresh its thumbnail with the channel's
@@ -2025,8 +2088,9 @@ function browseMove(dx, dy) {
   else if (dy === 1 || dx === 1) loadBrowseMore(false);
   browse.gridIdx = idx;
   if (idx >= browse.renderLimit - 2 * BROWSE_COLS && browse.renderLimit < browse.streams.length) {
+    var grewFrom = browse.renderLimit;
     browse.renderLimit += 40;          // extend the window before focus hits its edge
-    renderBrowse();
+    extendBrowseWindow(grewFrom);
   }
   applyBrowseFocus();
   // pull the next page as soon as focus reaches the last couple of rows
@@ -2066,7 +2130,10 @@ function setCatsStatus(msg) { document.getElementById('cats-status').textContent
 function catBanner(c) {
   var b = c && c.banner;
   if (!b) return null;
-  return b.url || b.src || b.responsive || (typeof b === 'string' ? b : null);
+  if (typeof b === 'string') return b;
+  // `responsive` offers 294w up to 600w; the tile is 376px. Never fall through to
+  // the raw `responsive` string — that is a srcset, not a URL.
+  return pickSrcsetUrl(b.responsive, CARD_IMG_W) || b.url || b.src || null;
 }
 function openCats() {
   if (!browse.open) return;
@@ -2175,18 +2242,13 @@ function renderCats() {
   if (cats.gridIdx >= grid.children.length) cats.gridIdx = grid.children.length - 1;
   applyCatsFocus();
 }
+var catsFocusEl = null;
+function catsCardBaseOf() { return 'ccard'; }
 function applyCatsFocus() {
   var grid = document.getElementById('cats-grid');
-  for (var j = 0; j < grid.children.length; j++) {
-    grid.children[j].className = 'ccard' + (j === cats.gridIdx ? ' focused' : '');
-  }
-  var el = grid.children[cats.gridIdx];
-  if (el) {
-    var top = el.offsetTop - grid.offsetTop;
-    if (top < grid.scrollTop) grid.scrollTop = top - 12;
-    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
-      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
-  }
+  var el = grid.children[cats.gridIdx] || null;
+  catsFocusEl = swapFocus(grid, catsFocusEl, el, catsCardBaseOf, true);
+  scrollIntoViewport(grid, el, 12);
 }
 function catsMove(dx, dy) {
   var n = document.getElementById('cats-grid').children.length;
@@ -2786,9 +2848,17 @@ function fmtVodAgo(str) {
   if (days < 365) return n(Math.floor(days / 30), 'month');
   return n(Math.floor(days / 365), 'year');
 }
-function vodThumb(v) {
+// minWidth shrinks the pick for the grid. The full-screen poster passes nothing and
+// keeps the 1280-wide `src`: a 480-wide still stretched across 1920px looks soft.
+function vodThumb(v, minWidth) {
   var t = v && v.thumbnail;
-  if (t && t.src) return t.src;
+  if (t) {
+    if (minWidth) {
+      var u = pickSrcsetUrl(t.srcset, minWidth);
+      if (u) return u;
+    }
+    if (t.src) return t.src;
+  }
   if (v && v.video && v.video.thumb && v.video.thumb.src) return v.video.thumb.src;
   return null;
 }
@@ -2850,7 +2920,7 @@ function renderVods() {
     card.setAttribute('data-idx', i);
     var thumb = document.createElement('div');
     thumb.className = 'bthumb';
-    var url = vodThumb(v);
+    var url = vodThumb(v, CARD_IMG_W);
     if (url) thumb.style.backgroundImage = 'url(' + url + ')';
     var dur = document.createElement('span');
     dur.className = 'bdur';
@@ -2890,19 +2960,14 @@ function renderVods() {
   if (vods.gridIdx >= vods.list.length) vods.gridIdx = Math.max(0, vods.list.length - 1);
   applyVodFocus();
 }
+var vodsFocusEl = null;
+// data-base carries the watched dimming, so a card must not lose it on unfocus
+function vodCardBaseOf(vcard) { return vcard.getAttribute('data-base') || 'bcard'; }
 function applyVodFocus() {
   var grid = document.getElementById('vods-grid');
-  for (var j = 0; j < grid.children.length; j++) {
-    var vcard = grid.children[j];
-    vcard.className = (vcard.getAttribute('data-base') || 'bcard') + (j === vods.gridIdx ? ' focused' : '');
-  }
-  var el = grid.children[vods.gridIdx];
-  if (el) {
-    var top = el.offsetTop - grid.offsetTop;
-    if (top < grid.scrollTop) grid.scrollTop = top - 12;
-    else if (top + el.offsetHeight > grid.scrollTop + grid.clientHeight)
-      grid.scrollTop = top + el.offsetHeight - grid.clientHeight + 12;
-  }
+  var el = grid.children[vods.gridIdx] || null;
+  vodsFocusEl = swapFocus(grid, vodsFocusEl, el, vodCardBaseOf, true);
+  scrollIntoViewport(grid, el, 12);
 }
 function vodMove(dx, dy) {
   var n = vods.list.length;
@@ -3001,6 +3066,10 @@ function attachVod(source) {
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
+      // hls.js keeps everything behind the playhead by default. On a four-hour VOD
+      // that grows until the TV's MSE quota starts force-evicting, which shows up as
+      // stalls late in a long watch. maxBufferSize only gates what is loaded ahead.
+      backBufferLength: 30,
       manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6,
       startPosition: state.vod && state.vod.resumeAt > 0 ? state.vod.resumeAt : -1
     });
@@ -3338,7 +3407,10 @@ function hlsConfig() {
   var cfg = {
     enableWorker: true, capLevelToPlayerSize: true,
     lowLatencyMode: !!settings.lowlatency,
-    backBufferLength: 90, liveBackBufferLength: 90,
+    // Nothing rewinds a live stream in this app, so 90s behind the playhead was
+    // pure retention — at a 1080p60 bitrate that is tens of megabytes on a TV that
+    // does not have them to spare.
+    backBufferLength: 30, liveBackBufferLength: 30,
     manifestLoadingMaxRetry: 4, manifestLoadingRetryDelay: 1000,
     levelLoadingMaxRetry: 4, levelLoadingRetryDelay: 1000,
     fragLoadingMaxRetry: 6, fragLoadingRetryDelay: 1000
@@ -4470,6 +4542,21 @@ function closeUpdateNotes() {
 
 /* Buffering spinner (live and VOD) and the centre play/pause button (VOD) */
 var spinnerOn = false;
+// A rebuffer that resolves in a couple of hundred milliseconds is invisible if we
+// keep quiet, and reads as a glitch if we flash a spinner at it. Wait a beat first:
+// short stalls never show anything, long ones still spin up promptly.
+var SPINNER_GRACE_MS = 300;
+var spinnerWaitTimer = null;
+function showSpinnerSoon() {
+  if (spinnerOn || spinnerWaitTimer) return;
+  spinnerWaitTimer = setTimeout(function () {
+    spinnerWaitTimer = null;
+    showSpinner();
+  }, SPINNER_GRACE_MS);
+}
+function cancelSpinnerSoon() {
+  if (spinnerWaitTimer) { clearTimeout(spinnerWaitTimer); spinnerWaitTimer = null; }
+}
 function showSpinner() {
   if (spinnerOn) return;
   if (document.getElementById('pbstatus').className.indexOf('hidden') === -1) return;  // reconnecting banner already up
@@ -4478,6 +4565,7 @@ function showSpinner() {
   hideVodPlay();
 }
 function hideSpinner() {
+  cancelSpinnerSoon();   // before the guard below: a spinner that is only pending still has to be called off
   if (!spinnerOn) return;
   spinnerOn = false;
   document.getElementById('spinner').className = 'hidden';
@@ -4559,6 +4647,7 @@ function connectChat(room) {
   disconnectChat();
   chat.want = true; chat.room = room; chat.retry = 0;
   clearChat(); showChatOverlay();
+  startChatSweep();
   openChatSocket(room);
 }
 function openChatSocket(room) {
@@ -4593,6 +4682,7 @@ function openChatSocket(room) {
 }
 function disconnectChat() {
   chat.want = false; chat.room = null;
+  stopChatSweep();
   if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
   if (chat.ws) { try { chat.ws.onclose = null; chat.ws.close(); } catch (e) {} chat.ws = null; }
   hideChatOverlay(); clearChat();
@@ -4610,6 +4700,7 @@ function appendChatContent(row, content) {
     } else {
       var img = document.createElement('img');
       img.className = 'cemote';
+      img.decoding = 'async';   // keep an unseen emote's decode off the paint that shows the message
       img.src = 'https://files.kick.com/emotes/' + m[1] + '/fullsize';
       img.alt = m[2];
       (function (name) {
@@ -4647,6 +4738,27 @@ function badgeChipsFor(sender) {
   }
   return out;
 }
+// Kick hands out some very dark identity colours — deep blue, maroon — and chat sits
+// over the black player plane, where those names are unreadable from a sofa. Lift
+// anything below a usable luminance, keeping which colour it is.
+var CHAT_NAME_MIN_LUM = 0.4;
+function chatNameColor(hex) {
+  var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+  if (!m) return '#53fc18';
+  var n = parseInt(m[1], 16);
+  var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  if (lum >= CHAT_NAME_MIN_LUM) return '#' + m[1];
+  // Blend towards white by exactly the amount that reaches the floor: blending adds
+  // (1 - lum) * t of luminance, so t falls straight out. Multiplying the channels
+  // instead cannot get a saturated blue there — blue carries 7% of luminance, so it
+  // clamps at 255 and stays dark.
+  var t = (CHAT_NAME_MIN_LUM - lum) / (1 - lum);
+  r = Math.round(r + (255 - r) * t);
+  g = Math.round(g + (255 - g) * t);
+  b = Math.round(b + (255 - b) * t);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
 function addChatMessage(d) {
   if (!d || !d.sender) return;
   if (settings.chatBots === 'hide' && isBotMessage(d)) return;
@@ -4668,21 +4780,41 @@ function addChatMessage(d) {
   var u = document.createElement('span');
   u.className = 'cuser';
   var color = d.sender.identity && d.sender.identity.color;
-  u.style.color = color || '#53fc18';
+  u.style.color = chatNameColor(color);
   u.textContent = d.sender.username || '';
   row.appendChild(u);
-  row.appendChild(document.createTextNode(' '));
+  // ': ' rather than a bare space — without it the coloured name and the white message
+  // run together into one blob at sofa distance. Kick's own chat does the same.
+  row.appendChild(document.createTextNode(': '));
   appendChatContent(row, d.content);
   box.appendChild(row);
   while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
-  // let each message fade out and drop off after a while, so the overlay does not
-  // build up into a static wall of text ('Never' / 0 keeps them until they scroll off)
-  if (settings.chatFade > 0) {
-    setTimeout(function () {
-      row.classList.add('cfade');
-      setTimeout(function () { if (row.parentNode) row.parentNode.removeChild(row); }, 800);
-    }, settings.chatFade);
-  }
+  // Stamp it and let the sweeper below handle fading, so the overlay does not build up
+  // into a static wall of text ('Never' / 0 keeps messages until they scroll off).
+  // Two timers per message does the same job but a busy channel at a 40s fade keeps
+  // hundreds of them alive at once, and each one holds the row it is going to remove —
+  // including rows CHAT_MAX already evicted above, which then cannot be collected
+  // until their timer finally fires.
+  row.setAttribute('data-t', String(Date.now()));
+}
+// One 1Hz pass over at most CHAT_MAX rows, instead of 2N pending timeouts. Fade timing
+// lands within a second of the setting, which at ten seconds and up is not visible.
+var chatSweepTimer = null;
+function startChatSweep() {
+  if (chatSweepTimer) return;
+  chatSweepTimer = setInterval(function () {
+    if (!settings.chatFade) return;
+    var box = chatEl(), now = Date.now();
+    for (var i = box.children.length - 1; i >= 0; i--) {
+      var row = box.children[i];
+      var age = now - (parseInt(row.getAttribute('data-t'), 10) || now);
+      if (age > settings.chatFade + 800) box.removeChild(row);
+      else if (age > settings.chatFade && row.className === 'cmsg') row.className = 'cmsg cfade';
+    }
+  }, 1000);
+}
+function stopChatSweep() {
+  if (chatSweepTimer) { clearInterval(chatSweepTimer); chatSweepTimer = null; }
 }
 
 /* OLED burn-in guard.
@@ -4733,6 +4865,7 @@ function chpopMove(dir) {
   chpop.persistent = false;                 // the user is here — normal auto-hide applies again
   var live = liveList();
   if (!live.length) return;                 // nothing live: do not show
+  var rebuild = true;
   if (!chpop.open) {
     chpop.open = true;
     showCursor();
@@ -4742,6 +4875,9 @@ function chpopMove(dir) {
     chpop.idx = ci >= 0 ? ci : 0;
     prefetchSidePreviews();               // warm thumbnails for the surf list too
   } else {
+    // The rows on screen belong to the previous list. Rebuild only when the live set
+    // really changed; surfing through an unchanged list just moves the highlight.
+    rebuild = chpop.list.join() !== live.join();
     chpop.list = live;
     if (chpop.idx >= live.length) chpop.idx = live.length - 1;
   }
@@ -4749,8 +4885,20 @@ function chpopMove(dir) {
   if (n < 0) n = live.length - 1;
   else if (n >= live.length) n = 0;
   chpop.idx = n;
-  renderChpop();
+  if (rebuild) renderChpop(); else applyChpopFocus();
   resetChpopTimer();
+}
+var chpopFocusEl = null;
+// data-base carries the blocked-category dimming
+function chpopRowBaseOf(row) { return row.getAttribute('data-base') || 'chrow'; }
+// Surfing channels is rapid-fire input, and rebuilding the list per press re-assigns
+// every avatar background — which a TV can visibly re-raster. Move the highlight only.
+function applyChpopFocus() {
+  var box = document.getElementById('chpop-list');
+  var el = box.children[chpop.idx] || null;
+  chpopFocusEl = swapFocus(box, chpopFocusEl, el, chpopRowBaseOf, true);
+  scrollIntoViewport(box, el, 6);
+  chpopPreviewCard.update();
 }
 function renderChpop() {
   var box = document.getElementById('chpop-list');
@@ -4758,8 +4906,9 @@ function renderChpop() {
   chpop.list.forEach(function (slug, i) {
     var c = state.channels[slug] || {};
     var row = document.createElement('div');
-    row.className = 'chrow' + (isChannelBlocked(c) ? ' blocked' : '') +
-                    (i === chpop.idx ? ' focused' : '');
+    var base = 'chrow' + (isChannelBlocked(c) ? ' blocked' : '');
+    row.className = base;
+    row.setAttribute('data-base', base);
     row.setAttribute('data-idx', i);
     var av = document.createElement('div');
     av.className = 'chav';
@@ -4779,14 +4928,7 @@ function renderChpop() {
     row.appendChild(vw);
     box.appendChild(row);
   });
-  var el = box.children[chpop.idx];
-  if (el) {
-    var top = el.offsetTop - box.offsetTop;
-    if (top < box.scrollTop) box.scrollTop = top - 6;
-    else if (top + el.offsetHeight > box.scrollTop + box.clientHeight)
-      box.scrollTop = top + el.offsetHeight - box.clientHeight + 6;
-  }
-  chpopPreviewCard.update();
+  applyChpopFocus();
 }
 function chpopActivate() {
   var slug = chpop.list[chpop.idx];
@@ -5153,7 +5295,11 @@ function browseCardFromEvent(e) {
     hideQualityHint();
     if (state.playerToolFocus >= 0) setPlayerToolFocus(-1);
     var hit = favRowFromEvent(e);
-    if (hit && hit.idx !== state.sideFocus) { state.sideFocus = hit.idx; applySideFocus(); }
+    if (hit && hit.idx !== state.sideFocus) {
+      state.sideFocus = hit.idx;
+      armSidePreview();      // pointing at a row earns it too
+      applySideFocus();
+    }
   });
   favList.addEventListener('click', function (e) {
     var hit = favRowFromEvent(e);
@@ -5243,7 +5389,11 @@ function browseCardFromEvent(e) {
     e.preventDefault();
     browseGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
     if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) {
-      if (browse.renderLimit < browse.streams.length) { browse.renderLimit += 40; renderBrowse(); }
+      if (browse.renderLimit < browse.streams.length) {
+        var grewFrom = browse.renderLimit;
+        browse.renderLimit += 40;
+        extendBrowseWindow(grewFrom);
+      }
       loadBrowseMore(false);
     }
   });
@@ -5615,7 +5765,7 @@ function browseCardFromEvent(e) {
   }
   chpopList.addEventListener('mouseover', function (e) {
     var i = chRowIdx(e);
-    if (i >= 0 && i !== chpop.idx) { chpop.idx = i; renderChpop(); resetChpopTimer(); }
+    if (i >= 0 && i !== chpop.idx) { chpop.idx = i; applyChpopFocus(); resetChpopTimer(); }
   });
   chpopList.addEventListener('click', function (e) {
     var i = chRowIdx(e);
@@ -5662,8 +5812,8 @@ function browseCardFromEvent(e) {
   // than 'playing' — drop the still at whichever arrives first.
   video.addEventListener('loadeddata', function () { setPosterStill(null); });
   // Buffering spinner for both live and VOD.
-  video.addEventListener('waiting', function () { if (!video.paused) showSpinner(); });
-  video.addEventListener('seeking', function () { showSpinner(); });
+  video.addEventListener('waiting', function () { if (!video.paused) showSpinnerSoon(); });
+  video.addEventListener('seeking', function () { showSpinnerSoon(); });
   video.addEventListener('loadedmetadata', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('durationchange', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });
@@ -5704,7 +5854,15 @@ function scheduleDownRetry() {
 
 /* Startup */
 document.addEventListener('visibilitychange', function () {
-  if (document.hidden) { saveVodProgress(true); saveLiveMark(true); pauseNotify(); return; }
+  if (document.hidden) {
+    saveVodProgress(true); saveLiveMark(true); pauseNotify();
+    // Another app owns the screen. Polling on regardless costs a Luna round trip for
+    // every channel every ninety seconds for nobody; the visible branch below already
+    // refetches on the way back, so nothing goes stale.
+    stopPlayerPoll();
+    return;
+  }
+  if (state.ready) startPlayerPoll();
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
     if (state.ready && !state.current && !state.vod) {
