@@ -316,18 +316,22 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(27,30,32,0.97);
   border: 2px solid #53fc18; border-left: 7px solid #53fc18;
   color: #fff; font-size: 28px; font-weight: 700;
-  padding: 16px 26px; border-radius: 10px;
+  padding: 18px 30px 18px 122px; border-radius: 10px;
   transform: translateX(130%); opacity: 0;
   transition: transform 240ms ease-out, opacity 240ms;
   cursor: pointer;
 }
 #notify.show { transform: translateX(0); opacity: 1; }
-#notify .ndot {
-  display: inline-block; width: 13px; height: 13px; border-radius: 7px;
-  background: #53fc18; margin-right: 12px; vertical-align: 2px;
+/* The avatar's ring is the live green the old inline dot used to carry. */
+#notify .nav {
+  position: absolute; left: 26px; top: 50%; transform: translateY(-50%);
+  width: 76px; height: 76px; border-radius: 50%;
+  background: #3a3d40 center/cover no-repeat;
+  box-shadow: 0 0 0 3px rgba(83,252,24,0.55);
+  color: #fff; font-size: 36px; font-weight: 700; text-align: center; line-height: 76px;
 }
 #notify .nhint {
-  display: block; margin: 5px 0 0 25px;
+  display: block; margin: 5px 0 0;
   color: #aeb3b6; font-size: 20px; font-weight: 600;
 }
 

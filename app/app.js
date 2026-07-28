@@ -382,8 +382,17 @@ function pumpNotify() {
   }
   if (!item) return;
   state.notifyCurrent = item;
+  var ch = state.channels[item.slug];
   var el = document.getElementById('notify');
-  el.innerHTML = '<span class="ndot"></span>';
+  el.innerHTML = '';
+  // Read the avatar now rather than off the queued item, so a channel that sat in the
+  // queue for a while still shows whatever picture the last poll saw. The green ring
+  // around it carries the "live" colour the old dot used to.
+  var av = document.createElement('span');
+  av.className = 'nav';
+  if (ch && ch.avatar) av.style.backgroundImage = 'url(' + ch.avatar + ')';
+  else av.textContent = (item.name || '?').charAt(0).toUpperCase();
+  el.appendChild(av);
   el.appendChild(document.createTextNode(item.name + ' is online'));
   var hint = document.createElement('span');
   hint.className = 'nhint';
@@ -392,7 +401,7 @@ function pumpNotify() {
   el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
   el.className = 'show';
   clearTimeout(state.notifyTimer);
-  state.notifyTimer = setTimeout(expireNotify, 5000);
+  state.notifyTimer = setTimeout(expireNotify, settings.notifySec * 1000);
 }
 // The 5s lifetime is up. If a popup slid over the alert meanwhile, requeue it
 // so it comes back visible and actionable instead of expiring unseen.
@@ -3689,7 +3698,7 @@ var settings = { open: false, focus: 0, items: [],
                  chatSide: 'right', chatSize: 'medium', chatWidth: 'medium', chatOpacity: 'high',
                  chatBackground: 'dark', chatFade: 40000, chatBots: 'show',
                  chatEmotes: 'images', chatTimestamps: false,
-                 alerts: 'all', saverMin: 1 };
+                 alerts: 'all', notifySec: 10, saverMin: 1 };
 var SETTINGS_IDLE_MS = 30000;
 var settingsIdleTimer = null;
 function touchSettings() {
@@ -3738,6 +3747,8 @@ function loadSettings() {
   settings.chatTimestamps = !!s.chatTimestamps;
   // Alerts + burn-in guard
   settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
+  var nsec = parseInt(s.notifySec, 10);
+  settings.notifySec = ([5, 10, 15, 20, 30].indexOf(nsec) !== -1) ? nsec : 10;
   var sm = parseInt(s.saverMin, 10);
   settings.saverMin = ([0, 1, 3, 5, 10].indexOf(sm) !== -1) ? sm : 1;
 }
@@ -3753,7 +3764,7 @@ function saveSettings() {
       chatOpacity: settings.chatOpacity, chatBackground: settings.chatBackground,
       chatFade: settings.chatFade, chatBots: settings.chatBots,
       chatEmotes: settings.chatEmotes, chatTimestamps: settings.chatTimestamps,
-      alerts: settings.alerts, saverMin: settings.saverMin
+      alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin
     }));
   } catch (e) {}
 }
@@ -3791,6 +3802,9 @@ function settingsBuild() {
     { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'choice', key: 'alerts', label: 'Live alerts',
       values: [{ v: 'all', label: 'All' }, { v: 'pinned', label: 'Pinned only' }, { v: 'off', label: 'Off' }] },
+    { kind: 'choice', key: 'notifySec', label: 'Alert duration',
+      values: [{ v: 5, label: '5 sec' }, { v: 10, label: '10 sec' }, { v: 15, label: '15 sec' },
+                { v: 20, label: '20 sec' }, { v: 30, label: '30 sec' }] },
     { kind: 'choice', key: 'saverMin', label: 'Burn-in guard',
       values: [{ v: 1, label: '1 min' }, { v: 3, label: '3 min' }, { v: 5, label: '5 min' },
                 { v: 10, label: '10 min' }, { v: 0, label: 'Off' }] }
@@ -3951,8 +3965,9 @@ var SETTINGS_DESC = {
   blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
   diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
   dim: 'Reduce screen brightness. Press OK or use the gear for strength, scope and startup behavior, or press 0 while watching.',
-  alerts: 'Choose which followed channels may show a five-second live alert.',
-  saverMin: 'Dim a still screen after this much idle time. Any remote or pointer input wakes it.'
+  alerts: 'Choose which followed channels may show a live alert when they come online.',
+  notifySec: 'How long a live alert stays on screen before it slides away. Press OK while it is up to jump straight to that channel.',
+  saverMin: 'Dim a still screen after this much idle time. It clears by itself once something moves again, and any remote or pointer input wakes it.'
 };
 var DIMOPT_DESC = [
   'Turn night dimming on or off.',
@@ -4836,7 +4851,7 @@ function stopChatSweep() {
    for a while and the screen is showing something static (an idle message or a
    paused frame), we heavily dim the whole panel so nothing stays lit and bright.
    Any remote or pointer activity wakes it back up. */
-var saver = { on: false, timer: null };
+var saver = { on: false, timer: null, staticSince: 0 };
 function markInput() {
   state.lastInput = Date.now();
   if (saver.on) wakeSaver();
@@ -4855,8 +4870,24 @@ function isStaticScreen() {
   return (!state.current && !state.vod) || (v && v.paused);
 }
 function checkSaver() {
-  if (!state.ready || saver.on || state.notifyCurrent || !settings.saverMin) return; // 0 = guard off
-  if (Date.now() - state.lastInput > settings.saverMin * 60000 && isStaticScreen()) showSaver();
+  if (!state.ready || !settings.saverMin) return;   // 0 = guard off
+  // A screen that starts moving again ends the guard by itself, without waiting for a
+  // keypress. Auto-advance is the case this exists for: a stream ends while you are
+  // away, the guard fires during the gap where the video is paused, and the next
+  // channel then plays on behind a dim overlay nobody is there to dismiss.
+  if (!isStaticScreen()) {
+    saver.staticSince = 0;
+    if (saver.on) wakeSaver();
+    return;
+  }
+  if (saver.on) return;
+  var now = Date.now();
+  if (!saver.staticSince) saver.staticSince = now;
+  if (state.notifyCurrent) return;
+  // Both clocks have to run out: no input, and the screen actually still for that long.
+  // So a short pause between two streams cannot trip the guard on its way past.
+  var idle = settings.saverMin * 60000;
+  if (now - state.lastInput > idle && now - saver.staticSince > idle) showSaver();
 }
 function showSaver() { saver.on = true; document.getElementById('saver').className = 'on'; }
 function wakeSaver() { saver.on = false; document.getElementById('saver').className = ''; }
