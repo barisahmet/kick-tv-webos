@@ -833,6 +833,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #vodplay:hover { background: rgba(0,0,0,0.72); }
 #vodplay svg { width: 60px; height: 60px; }
+/* Play and pause are two stacked glyphs that cross-fade, since a path's d cannot
+   be tweened here. Centred with margins, not transform, so the swap keeps the
+   scale to itself — same reason as #spinner below. The incoming glyph overshoots
+   slightly: this is the answer to a button press, and it should feel like one. */
+#vodplay .vpglyph {
+  position: absolute; top: 50%; left: 50%; margin: -30px 0 0 -30px;
+  opacity: 0; transform: scale(0.55);
+  transition: opacity 140ms ease, transform 240ms cubic-bezier(.2,1.35,.4,1);
+}
+#vodplay .vpglyph.on { opacity: 1; transform: scale(1); }
 
 /* -30 / +30 skip buttons flanking the play/pause button */
 #vodback, #vodfwd {
@@ -858,6 +868,46 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(0,0,0,0.55); color: #fff;
   font-size: 34px; font-weight: 500; padding: 8px 24px; border-radius: 14px;
 }
+
+/* Bringing the player controls up is one gesture, not five separate fades. The
+   button you pressed answers first, the skips follow it, and the seek bar and
+   title bar arrive last from the two edges — an outward ripple from whatever you
+   touched. Only opacity and transform carry the stagger: a focus ring must never
+   lag behind the D-pad, so the border and glow keep their own undelayed timing.
+   Dismissal is uniform and quicker, because nobody waits to stop looking at
+   something.
+   The .hidden rules have to hand back a display value. Global .hidden is
+   display:none !important and display cannot be transitioned, so the element
+   would snap; an id + class selector outranks it and keeps the fade. */
+#vodplay {
+  transition: opacity 200ms ease, transform 300ms cubic-bezier(.19,.9,.3,1),
+              background-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
+}
+#vodback, #vodfwd {
+  transition: opacity 200ms ease 45ms, transform 300ms cubic-bezier(.19,.9,.3,1) 45ms,
+              background-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
+}
+#vodbar {
+  transition: opacity 200ms ease 70ms, transform 300ms cubic-bezier(.19,.9,.3,1) 70ms,
+              border-color 160ms ease, box-shadow 160ms ease;
+}
+#overlay {
+  transition: opacity 200ms ease 70ms, transform 300ms cubic-bezier(.19,.9,.3,1) 70ms;
+}
+#seekpop {
+  transition: opacity 160ms ease, transform 220ms cubic-bezier(.2,1.3,.4,1);
+}
+#overlay.hidden, #vodbar.hidden, #vodplay.hidden,
+#vodback.hidden, #vodfwd.hidden, #seekpop.hidden {
+  opacity: 0; pointer-events: none;
+  transition: opacity 150ms ease, transform 190ms ease;
+}
+#overlay.hidden { display: block !important; transform: translateY(-100%); }
+#vodbar.hidden  { display: flex !important;  transform: translateX(-50%) translateY(20px); }
+#vodplay.hidden, #vodback.hidden, #vodfwd.hidden {
+  display: flex !important; transform: translate(-50%,-50%) scale(0.8);
+}
+#seekpop.hidden { display: block !important; transform: translateX(-50%) scale(0.9); }
 
 /* Buffering spinner (live and VOD). Centred with margins, not transform, so the
    spin animation (which sets transform) does not knock it off-centre. */

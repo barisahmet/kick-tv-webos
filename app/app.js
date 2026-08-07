@@ -39,6 +39,8 @@ var state = {
   ready: false,          // false until the first load finishes; the splash ignores input until then
   quitArmed: false,      // set after the first Back press, so the next Back exits
   quitTimer: null,
+  backOpenedSidebar: false,  // Back brought the channel list up, so Back again arms the exit
+
   tempChannel: null,     // a browsed channel that is playing but not in the follow list
   lastFetch: 0,          // when favorites were last refreshed (to avoid redundant fetches)
   vod: null,             // set to a past-video descriptor while a VOD is playing
@@ -1088,6 +1090,7 @@ function closeSidebar() {
   clearTimeout(state.idleTimer);
   if (!state.sidebarOpen) return;
   state.sidebarOpen = false;
+  state.backOpenedSidebar = false;   // however this list closed, the exit is no longer armed
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
   clearTimeout(overlayTimer);
@@ -4600,9 +4603,14 @@ function hideSpinner() {
   document.getElementById('spinner').className = 'hidden';
   if (state.vod && document.getElementById('overlay').className.indexOf('hidden') === -1) showVodPlay();
 }
+// Two stacked glyphs cross-fade rather than one path changing its d: Chromium 87
+// cannot tween path data, and this swap is the whole acknowledgement for the press,
+// so it has to read as movement. An SVG element's className is read-only here —
+// setAttribute is the only way to class it.
 function vodPlayIcon() {
   var paused = document.getElementById('video').paused;
-  document.getElementById('vodplay-icon').setAttribute('d', paused ? 'M8 5v14l11-7z' : 'M6 5h4v14H6zM14 5h4v14h-4z');
+  document.getElementById('vodplay-play').setAttribute('class', 'vpglyph' + (paused ? ' on' : ''));
+  document.getElementById('vodplay-pause').setAttribute('class', 'vpglyph' + (paused ? '' : ' on'));
 }
 function showVodPlay() {
   if (!state.vod || spinnerOn) return;
@@ -4869,6 +4877,10 @@ function isStaticScreen() {
   // a VOD is moving video too, so only an idle screen or a paused frame counts
   return (!state.current && !state.vod) || (v && v.paused);
 }
+/* Runs once a second, not on a lazy beat. staticSince is stamped on the first tick that
+   sees a still screen, so the tick period lands on top of the setting twice over — once
+   waiting to notice, once waiting to fire. At 20s that made a 1-minute guard arrive at
+   about 80. The body is a handful of flag reads, so a 1s beat is free; keep it there. */
 function checkSaver() {
   if (!state.ready || !settings.saverMin) return;   // 0 = guard off
   // A screen that starts moving again ends the guard by itself, without waiting for a
@@ -4887,7 +4899,7 @@ function checkSaver() {
   // Both clocks have to run out: no input, and the screen actually still for that long.
   // So a short pause between two streams cannot trip the guard on its way past.
   var idle = settings.saverMin * 60000;
-  if (now - state.lastInput > idle && now - saver.staticSince > idle) showSaver();
+  if (now - state.lastInput >= idle && now - saver.staticSince >= idle) showSaver();
 }
 function showSaver() { saver.on = true; document.getElementById('saver').className = 'on'; }
 function wakeSaver() { saver.on = false; document.getElementById('saver').className = ''; }
@@ -5078,7 +5090,10 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.BACK || k === KEY.STOP) armOrExit();
     return;
   }
-  if (k !== KEY.BACK && k !== KEY.STOP) state.quitArmed = false; // anything but Back cancels a pending exit
+  // Anything but Back cancels a pending exit. That covers the stream -> list -> exit
+  // ladder too: once you have started moving around the list, Back means "close the
+  // list" again, so browsing it can never drop you out of the app by surprise.
+  if (k !== KEY.BACK && k !== KEY.STOP) { state.quitArmed = false; state.backOpenedSidebar = false; }
   if (cats.open) {
     var csearch = document.getElementById('cats-search');
     if (document.activeElement === csearch) {          // typing in the search box
@@ -5233,7 +5248,14 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
     else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
     else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar();   // either side tucks the list away
-    else if (k === KEY.BACK) closeSidebarWithGrace();
+    else if (k === KEY.BACK) {
+      // Back is what put this list on screen, so Back again carries on up and out —
+      // through the same "press again to exit" confirmation the exit uses everywhere
+      // else, never straight out. Opened any other way (Left/Right, the pointer),
+      // Back still just tucks the list away.
+      if (state.backOpenedSidebar) armOrExit();
+      else closeSidebarWithGrace();
+    }
     return;
   }
   if (state.vod && vodFocus === 'buttons') {             // transport buttons have focus
@@ -5273,7 +5295,18 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.DOWN) { focusVodBar(); return; }
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
     if (k === KEY.PLAY) { playVideo(video); return; }
-    if (k === KEY.OK) { showVodOverlay(); return; }
+    // OK lands on the play/pause button and takes the action in the same press —
+    // one press pauses, the next resumes. The rest of the controls come up around
+    // it, so the press after that can be a seek without hunting for the ladder.
+    if (k === KEY.OK) { focusVodButtons(); toggleVodPlay(); return; }
+    return;
+  }
+  // While a live stream is playing, Back steps up to the channel list rather than
+  // straight at the exit; the next Back leaves. On the idle screen there is nothing
+  // to step up to, so Back still arms the exit there, and STOP always means stop.
+  if (k === KEY.BACK && state.current) {
+    openSidebar();
+    if (state.sidebarOpen) state.backOpenedSidebar = true;
     return;
   }
   if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
@@ -6124,7 +6157,7 @@ function bootChoiceSuperseded() {
   loadAppVersion();                           // populate the version chip in Settings promptly
   setTimeout(checkForUpdate, 3000);           // check GitHub for a newer release, once the app has settled
   state.lastInput = Date.now();
-  setInterval(checkSaver, 20000);             // burn-in guard checks in every 20s
+  setInterval(checkSaver, 1000);              // burn-in guard checks in every second — see checkSaver
   showState('splash');
   // The quick start goes onto the Luna bus FIRST (its single request must not
   // queue behind the favorites pool); the full refresh follows right behind
