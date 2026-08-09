@@ -332,10 +332,11 @@ function setNetDown(down) { state.netDown = down; }
 // first load just records who is live, so channels that were already on when
 // you opened the app do not all pop up at once.
 function detectOnline(favs) {
-  var newly = [];
+  var newly = [], liveNow = [];
   favs.forEach(function (slug) {
     var c = state.channels[slug];
     if (!c) return;
+    if (c.live) liveNow.push(slug);
     if (state.baselineSet && c.live && state.wasLive[slug] === false) {
       // respect the Live alerts setting: All, Pinned only, or Off
       if (settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(slug))) {
@@ -344,6 +345,7 @@ function detectOnline(favs) {
     }
     state.wasLive[slug] = c.live;
   });
+  noteLive(liveNow);              // one write per poll, not one per channel
   state.baselineSet = true;
   if (newly.length) notifyOnline(newly);
 }
@@ -1146,6 +1148,53 @@ function moveSide(delta) {
    helpers touch only those two. The node losing focus is remembered rather than its
    index, because a re-render replaces the children — and a node that is no longer in
    the container does not need clearing, which makes this self-correcting. */
+/* Chromium 87 has no string-valued text-overflow, so the trailing dots are done by
+   hand — and doing it by hand also fills the box exactly, instead of the browser
+   dropping a whole character to make room for a "…". Measuring on a canvas keeps
+   it off the layout path; thirty-eight rows measured twice would otherwise be a
+   reflow apiece. */
+var textMeasureCtx = null;
+function measureTextWidth(s, font) {
+  if (!textMeasureCtx) textMeasureCtx = document.createElement('canvas').getContext('2d');
+  textMeasureCtx.font = font;
+  return textMeasureCtx.measureText(s).width;
+}
+function clipWithDots(text, font, maxPx) {
+  text = String(text == null ? '' : text);
+  if (maxPx <= 0 || measureTextWidth(text, font) <= maxPx) return text;
+  var dots = '..';
+  var budget = maxPx - measureTextWidth(dots, font);
+  if (budget <= 0) return dots;
+  var lo = 0, hi = text.length;                  // longest prefix that still fits
+  while (lo < hi) {
+    var mid = (lo + hi + 1) >> 1;
+    if (measureTextWidth(text.slice(0, mid), font) <= budget) lo = mid; else hi = mid - 1;
+  }
+  return text.slice(0, lo).replace(/[\s·]+$/, '') + dots;
+}
+// One layout read for the shared box width, then a pure-canvas pass over the rows.
+// The untruncated string lives in data-full so a re-clip never eats its own output.
+function clipSidebarText() {
+  var list = document.getElementById('fav-list');
+  var probe = list.querySelector('.favname');
+  if (!probe) return;
+  var w = probe.clientWidth;
+  if (w <= 0) return;
+  var groups = [['.favname', null], ['.favgame', null]];
+  for (var gi = 0; gi < groups.length; gi++) {
+    var sel = groups[gi][0];
+    var first = list.querySelector(sel);
+    if (!first) continue;
+    var cs = getComputedStyle(first);
+    var font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    var els = list.querySelectorAll(sel);
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], full = el.getAttribute('data-full');
+      if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
+      el.textContent = clipWithDots(full, font, w);
+    }
+  }
+}
 function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
   if (prevEl && prevEl !== nextEl && prevEl.parentNode === container) prevEl.className = baseOf(prevEl);
   if (nextEl) nextEl.className = baseOf(nextEl) + (wantFocus ? ' focused' : '');
@@ -1224,8 +1273,16 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
     if (!tEl) return;
     var c = state.channels[slug];
     var title = (c && c.title) || '';
-    tEl.textContent = title;
     tEl.style.display = title ? '' : 'none';
+    if (!title) { tEl.textContent = ''; return; }
+    // Same hand-rolled ".." as the channel list, so the two never disagree. The
+    // card has to be visible for clientWidth to read, hence the fallback.
+    var cs = getComputedStyle(tEl);
+    var w = tEl.clientWidth -
+            (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    tEl.textContent = w > 0
+      ? clipWithDots(title, cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily, w)
+      : title;
   }
   function present(slug, url) {
     if (slugShowing !== slug || currentSlugFn() !== slug) return;   // focus moved meanwhile
@@ -1383,7 +1440,7 @@ function renderSidebar(focusKey) {
     mid.children[0].textContent = c.name;
     mid.children[1].textContent = c.live
       ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
-      : 'Offline';
+      : offlineLabel(slug);
     row.appendChild(mid);
 
     var info = document.createElement('div');
@@ -1407,6 +1464,8 @@ function renderSidebar(focusKey) {
 
     list.appendChild(row);
   });
+
+  clipSidebarText();          // hand-rolled ".." instead of the CSS "…"
 
   var idx = -1;
   for (var i = 0; i < state.sideItems.length; i++) {
@@ -1661,10 +1720,11 @@ var BROWSE_LANGS = [
 ];
 var BROWSE_COLS = 4;
 var BROWSE_MAX_AUTO_PAGES = 12;   // ceiling for the automatic sparse-filter chain below
+var BROWSE_MEMORY_MS = 60000;     // reopen inside this window and the loaded pool is reused
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
-               category: null, categoryName: '', session: 0,
-               sort: 'viewers', discover: false, renderLimit: 60 };
+               cats: [], session: 0, closedAt: 0, scrollTop: 0, langMenuOpen: false,
+               sort: 'viewers', discover: false, hideBlocked: true, renderLimit: 60 };
 var BROWSE_SORTS = [
   { key: 'viewers', label: 'Top' },
   { key: 'newest',  label: 'New' },
@@ -1707,6 +1767,26 @@ function toggleBrowseDiscover() {
   browse.renderLimit = 60;
   renderBrowse();
   toast(browse.discover ? 'Hiding channels you follow' : 'Showing all channels');
+}
+/* "Hide Blocked": drop streams whose category you have blocked out of the grid.
+   Blocking already sinks and greys a followed channel in your list, so seeing
+   the same categories while browsing is noise — this one defaults ON. Picking a
+   category on purpose still shows it (see renderBrowse). */
+function loadBrowseHideBlockedPref() {
+  try { return localStorage.getItem('kicktv.browsehideblocked') !== '0'; } catch (e) { return true; }
+}
+function renderBrowseHideBlocked() {
+  var el = document.getElementById('browse-hideblocked');
+  if (el) el.className = browse.hideBlocked ? 'on' : '';
+}
+function toggleBrowseHideBlocked() {
+  browse.hideBlocked = !browse.hideBlocked;
+  try { localStorage.setItem('kicktv.browsehideblocked', browse.hideBlocked ? '1' : '0'); } catch (e) {}
+  renderBrowseHideBlocked();
+  browse.gridIdx = 0;
+  browse.renderLimit = 60;
+  renderBrowse();
+  toast(browse.hideBlocked ? 'Hiding blocked categories' : 'Showing blocked categories');
 }
 // Skeleton cards shimmer in the grid while the first page loads.
 function renderBrowseSkeletons() {
@@ -1781,18 +1861,40 @@ function openBrowse(categorySlug, categoryName) {
   pausePlaybackForBrowse();
   document.getElementById('browse').className = '';
   loadBrowseLangPref();
-  renderBrowseLangs();
+  browse.langMenuOpen = false;      // never reopen straight into the dropdown
+  renderBrowseLangBtn();
+  renderBrowseLangMenu();
+  // Reopened within the memory window: the directory pool we already hold is good
+  // enough, so skip the skeletons and the refetch and put the grid back as it was.
+  // Counts and live/offline state can be up to BROWSE_MEMORY_MS stale — that is the
+  // trade. An explicit category runs its own deeper page chain, so it always loads
+  // fresh rather than being refiltered out of this pool.
+  if (!categorySlug && browse.raw.length && (Date.now() - browse.closedAt) < BROWSE_MEMORY_MS) {
+    browse.session++;            // orphan anything still in flight from the last opening
+    browse.fetching = false;     // ...and clear the flag it guards, or Browse never loads again
+    browse.zone = 'grid';
+    renderBrowseSort();
+    renderBrowseDiscover();
+    renderBrowseHideBlocked();
+    updateBrowseTitle();
+    renderPinnedCatChips();
+    renderBrowse();              // ends in applyBrowseFocus, which scrolls the focused card in
+    var g = document.getElementById('browse-grid');
+    if (g) g.scrollTop = browse.scrollTop;   // ...so restore the exact position after it
+    return;
+  }
   browse.zone = 'grid'; browse.gridIdx = 0;
   // optionally open pre-filtered (the clickable category in the top bar)
-  browse.category = categorySlug || null;
-  browse.categoryName = categorySlug ? (categoryName || '') : '';
+  browse.cats = categorySlug ? [{ slug: categorySlug, name: categoryName || categorySlug }] : [];
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   browse.renderLimit = 60;
   browse.sort = 'viewers';
   browse.discover = loadBrowseDiscoverPref();
+  browse.hideBlocked = loadBrowseHideBlockedPref();
   renderBrowseSort();
   renderBrowseDiscover();
+  renderBrowseHideBlocked();
   renderPinnedCatChips();
   renderBrowseSkeletons();
   updateBrowseTitle();
@@ -1802,10 +1904,16 @@ function openBrowse(categorySlug, categoryName) {
 // selected chip already show which filter is active.
 function updateBrowseTitle() {
   var btn = document.getElementById('browse-cats-btn');
-  if (btn) btn.className = browse.category ? 'on' : '';
+  if (btn) btn.className = browse.cats.length ? 'on' : '';
 }
 function closeBrowse() {
   browse.open = false;
+  closeBrowseLangMenu();
+  // Remember where we were. The pool stays in memory; openBrowse decides whether
+  // it is still fresh enough to reuse.
+  var grid = document.getElementById('browse-grid');
+  browse.scrollTop = grid ? grid.scrollTop : 0;
+  browse.closedAt = Date.now();
   document.getElementById('browse').className = 'hidden';
   document.getElementById('browse-tip').className = 'hidden';
   resumePlaybackAfterBrowse();
@@ -1889,22 +1997,60 @@ function loadBrowseMore(initial) {
     // hard ceiling or it walks the entire directory. hasMore stays true, so moving
     // or scrolling to the end still fetches more on demand — only the automatic
     // chain is bounded.
-    var filtersActive = !!(browse.category || browse.discover || browse.langs.length);
+    var filtersActive = !!(browse.cats.length || browse.discover || browse.langs.length ||
+                           (browse.hideBlocked && getBlockedCats().length));
     var sparse = filtersActive && browse.streams.length < 24 && browse.page <= BROWSE_MAX_AUTO_PAGES;
-    if ((initial && browse.page <= (browse.category ? 8 : 3)) || sparse) loadBrowseMore(true);
+    if ((initial && browse.page <= (browse.cats.length ? 8 : 3)) || sparse) loadBrowseMore(true);
     if (!browse.fetching) setBrowseLoadingCard(false);   // no follow-up came: done
   });
 }
-function renderBrowseLangs() {
-  var box = document.getElementById('browse-langs');
+/* Languages live behind one button in the top-right corner rather than eight
+   chips across the header: the row was 1152px wide and left nothing for anything
+   else. The button carries the count, the dropdown carries the checkboxes. */
+function renderBrowseLangBtn() {
+  var el = document.getElementById('browse-langbtn');
+  if (!el) return;
+  var n = browse.langs.length;
+  el.textContent = n ? ('Languages (' + n + ')') : 'Languages';
+  el.className = (n ? 'on' : '') +
+                 (browse.zone === 'lang' && !browse.langMenuOpen ? ' focused' : '');
+}
+function renderBrowseLangMenu() {
+  var box = document.getElementById('browse-langmenu');
+  if (!box) return;
+  box.className = browse.langMenuOpen ? '' : 'hidden';
+  if (!browse.langMenuOpen) { box.innerHTML = ''; return; }
   box.innerHTML = '';
-  BROWSE_LANGS.forEach(function (l, i) {
-    var chip = document.createElement('span');
-    chip.className = 'blang';
-    chip.setAttribute('data-idx', i);
-    chip.textContent = l.label;
-    box.appendChild(chip);
-  });
+  for (var i = 0; i < BROWSE_LANGS.length; i++) {
+    var l = BROWSE_LANGS[i];
+    // "All languages" is the empty selection rather than a value of its own.
+    var on = (i === 0) ? !browse.langs.length : browse.langs.indexOf(l.value) !== -1;
+    var row = document.createElement('div');
+    row.className = 'blangrow' + (on ? ' on' : '') + (i === browse.langIdx ? ' focused' : '');
+    row.setAttribute('data-idx', i);
+    var cb = document.createElement('span');
+    cb.className = 'blangbox';
+    cb.textContent = on ? '✓' : '';
+    row.appendChild(cb);
+    row.appendChild(document.createTextNode(i === 0 ? 'All languages' : l.label));
+    box.appendChild(row);
+  }
+}
+function openBrowseLangMenu() {
+  browse.langMenuOpen = true;
+  browse.zone = 'lang';
+  if (!(browse.langIdx >= 0 && browse.langIdx < BROWSE_LANGS.length)) browse.langIdx = 0;
+  renderBrowseLangMenu();
+  renderBrowseLangBtn();
+}
+function closeBrowseLangMenu() {
+  if (!browse.langMenuOpen) return;
+  browse.langMenuOpen = false;
+  renderBrowseLangMenu();
+  renderBrowseLangBtn();
+}
+function toggleBrowseLangMenu() {
+  if (browse.langMenuOpen) closeBrowseLangMenu(); else openBrowseLangMenu();
 }
 /* View-botted fake streams. They come in waves under one category with random
    channel names and random titles, and inflated viewer counts that put them
@@ -1980,6 +2126,47 @@ function extendBrowseWindow(oldLimit) {
     else grid.appendChild(card);
   }
 }
+/* Selected categories. An array rather than a single slug so Browse can hold
+   several at once; pick order is preserved so the status line reads the way you
+   built it. hasBrowseCat is asked once per stream per render, but the list is a
+   handful of entries, so a linear scan beats maintaining a map. */
+function hasBrowseCat(slug) {
+  if (!slug) return false;
+  for (var i = 0; i < browse.cats.length; i++) if (browse.cats[i].slug === slug) return true;
+  return false;
+}
+function browseCatLabel() {
+  var out = [];
+  for (var i = 0; i < browse.cats.length; i++) out.push(browse.cats[i].name || browse.cats[i].slug);
+  return out.join(' / ');
+}
+// Everything that has to catch up once the selection changes. The Categories
+// popup stays open while you pick, so its ticks re-render too.
+function afterBrowseCatChange() {
+  browse.gridIdx = 0;
+  browse.renderLimit = 60;
+  updateBrowseTitle();
+  renderPinnedCatChips();
+  renderBrowse();
+  if (cats.open) renderCats();
+  if (browse.cats.length) loadBrowseMore(true);   // pull more pages to fill a filtered grid
+}
+function toggleBrowseCat(slug, name) {
+  if (!slug) return;
+  var out = [], found = false;
+  for (var i = 0; i < browse.cats.length; i++) {
+    if (browse.cats[i].slug === slug) found = true;
+    else out.push(browse.cats[i]);
+  }
+  if (!found) out.push({ slug: slug, name: name || slug });
+  browse.cats = out;
+  afterBrowseCatChange();
+}
+function clearBrowseCats() {
+  if (!browse.cats.length) return;
+  browse.cats = [];
+  afterBrowseCatChange();
+}
 function renderBrowse() {
   var list = (browse.raw || []).slice();
   if (settings.hideBots) list = list.filter(function (s) { return !looksBotStream(s); });
@@ -1988,9 +2175,21 @@ function renderBrowse() {
     var favsNow = getFavorites();
     list = list.filter(function (s) { return favsNow.indexOf((s.channel || {}).slug) === -1; });
   }
-  if (browse.category) list = list.filter(function (s) {
-    return s.categories && s.categories[0] && s.categories[0].slug === browse.category;
-  });
+  // An explicit selection of any size beats Hide Blocked: asking for a category
+  // by name — including a blocked one you pinned — has to show it, or the grid
+  // comes back empty and the chip looks broken. getBlockedCats() is memoized, so
+  // an empty block list makes the other branch a cheap walk.
+  if (browse.cats.length) {
+    list = list.filter(function (s) {
+      var c0 = s.categories && s.categories[0];
+      return !!(c0 && hasBrowseCat(c0.slug));
+    });
+  } else if (browse.hideBlocked) {
+    list = list.filter(function (s) {
+      var c0 = s.categories && s.categories[0];
+      return !(c0 && isCatBlocked(c0.slug));
+    });
+  }
   if (browse.sort === 'small') {
     list.sort(function (a, b) { return (a.viewer_count || 0) - (b.viewer_count || 0); });
   } else if (browse.sort === 'newest') {
@@ -2019,7 +2218,7 @@ function renderBrowse() {
 
   if (!browse.streams.length) {
     setBrowseStatus(browse.fetching ? 'Loading...' :
-      (browse.category ? 'No ' + browse.categoryName + ' streams in the top live list' :
+      (browse.cats.length ? 'No ' + browseCatLabel() + ' streams in the top live list' :
        (!browse.langs.length ? 'Nothing live right now' : 'No live channels in these languages yet')));
   } else setBrowseStatus('');
 
@@ -2031,15 +2230,8 @@ var browseFocusEl = null;
 // the loading card is focusable but not activatable, so it keeps its own base class
 function browseCardBaseOf(card) { return card.id === 'browse-loadcard' ? 'bcard bloadcard' : 'bcard'; }
 function applyBrowseFocus() {
-  // the eight language chips are cheap and their selected state depends on browse.langs,
-  // so they stay a full pass; only the grid is worth diffing
-  var langsEl = document.getElementById('browse-langs');
-  for (var i = 0; i < langsEl.children.length; i++) {
-    var chip = langsEl.children[i];
-    chip.className = 'blang' +
-      ((i === 0 ? !browse.langs.length : browse.langs.indexOf(BROWSE_LANGS[i].value) !== -1) ? ' sel' : '') +
-      (browse.zone === 'lang' && i === browse.langIdx ? ' focused' : '');
-  }
+  // one button instead of eight chips, so this is a single cheap write
+  renderBrowseLangBtn();
   var grid = document.getElementById('browse-grid');
   var card = grid.children[browse.gridIdx] || null;
   browseFocusEl = swapFocus(grid, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
@@ -2086,16 +2278,23 @@ function toggleBrowseLang(idx) {
   saveBrowseLangPref();
   browse.gridIdx = 0;
   browse.renderLimit = 60;
+  renderBrowseLangBtn();
+  renderBrowseLangMenu();    // the menu stays open so several can be picked at once
   renderBrowse();            // just re-filter what we already fetched
 }
 function browseMove(dx, dy) {
-  if (browse.zone === 'lang') {
-    if (dy === 1) { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
-    if (dx !== 0) {
-      var n = browse.langIdx + dx;
-      if (n >= 0 && n < BROWSE_LANGS.length) { browse.langIdx = n; applyBrowseFocus(); }  // move focus only; OK toggles
+  // Inside the dropdown Up/Down walks the list and OK ticks a box; Left/Right and
+  // Back get you out. Nothing else on the page moves while it is open.
+  if (browse.langMenuOpen) {
+    if (dy !== 0) {
+      var ln = browse.langIdx + dy;
+      if (ln >= 0 && ln < BROWSE_LANGS.length) { browse.langIdx = ln; renderBrowseLangMenu(); }
     }
     return;
+  }
+  if (browse.zone === 'lang') {
+    if (dy === 1) { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
+    return;                    // the Languages button is the only thing up here now
   }
   var count = browseFocusCount();
   if (dy === -1 && browse.gridIdx < BROWSE_COLS) { browse.zone = 'lang'; applyBrowseFocus(); return; }
@@ -2118,7 +2317,8 @@ function browseMove(dx, dy) {
   if (browse.gridIdx >= browse.streams.length - 2 * BROWSE_COLS) loadBrowseMore(false);
 }
 function browseActivate() {
-  if (browse.zone === 'lang') { toggleBrowseLang(browse.langIdx); return; }  // OK toggles the chip; Down enters the grid
+  if (browse.langMenuOpen) { toggleBrowseLang(browse.langIdx); return; }     // OK ticks a box, menu stays open
+  if (browse.zone === 'lang') { openBrowseLangMenu(); return; }              // OK opens it; Down enters the grid
   var s = browse.streams[browse.gridIdx];
   if (s && s.channel && s.channel.slug) {
     browse.open = false;
@@ -2226,7 +2426,9 @@ function renderCats() {
   grid.innerHTML = '';
   var allTile = document.createElement('div');   // index 0 clears the filter
   allTile.className = 'ccard'; allTile.setAttribute('data-idx', '-1');
-  allTile.innerHTML = '<div class="cbanner"></div><div class="cname">All categories</div>';
+  allTile.innerHTML = '<div class="cbanner">' +
+    (browse.cats.length ? '' : '<span class="catsel">✓</span>') +
+    '</div><div class="cname">All categories</div>';
   grid.appendChild(allTile);
   displayedCats().forEach(function (c, i) {
     var card = document.createElement('div');
@@ -2253,6 +2455,14 @@ function renderCats() {
     block.setAttribute('title', 'Block category');
     block.innerHTML = blockIcon();
     banner.appendChild(block);
+    // Only drawn when the category is in the Browse filter, so unselected tiles
+    // stay uncluttered. Purely an indicator — the whole tile is the toggle.
+    if (hasBrowseCat(c.slug)) {
+      var tick = document.createElement('span');
+      tick.className = 'catsel';
+      tick.textContent = '✓';
+      banner.appendChild(tick);
+    }
     var name = document.createElement('div');
     name.className = 'cname';
     name.textContent = c.name || c.slug;
@@ -2284,21 +2494,12 @@ function catsMove(dx, dy) {
   applyCatsFocus();
   if (!cats.results && cats.gridIdx >= (cats.list.length + 1) - 2 * CATS_COLS) loadCatsMore(false);
 }
+// OK toggles and the popup stays up, so several categories can be picked in one
+// visit. Back is what closes it.
 function catsActivate() {
-  if (cats.gridIdx === 0) { selectCategory(null, ''); return; }   // the All tile
+  if (cats.gridIdx === 0) { clearBrowseCats(); return; }   // the All tile
   var c = displayedCats()[cats.gridIdx - 1];
-  if (c) selectCategory(c.slug, c.name || c.slug);
-}
-function selectCategory(slug, name) {
-  browse.category = slug || null;
-  browse.categoryName = name || '';
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
-  closeCats();
-  updateBrowseTitle();
-  renderPinnedCatChips();
-  renderBrowse();
-  if (slug) loadBrowseMore(true);   // pull more pages to better fill the filtered grid
+  if (c) toggleBrowseCat(c.slug, c.name || c.slug);
 }
 
 /* Pinned categories: starred in the Categories popup (Green, or the pin icon),
@@ -2353,13 +2554,13 @@ function renderPinnedCatChips() {
     if (rc && rc.slug) counts[rc.slug] = (counts[rc.slug] || 0) + 1;
   }
   var all = document.createElement('span');
-  all.className = 'pcat' + (browse.category ? '' : ' sel');
+  all.className = 'pcat' + (browse.cats.length ? '' : ' sel');
   all.textContent = 'All';
   all.setAttribute('data-cslug', '');
   box.appendChild(all);
   for (var i = 0; i < l.length; i++) {
     var chip = document.createElement('span');
-    chip.className = 'pcat' + (browse.category === l[i].slug ? ' sel' : '');
+    chip.className = 'pcat' + (hasBrowseCat(l[i].slug) ? ' sel' : '');
     chip.setAttribute('data-cslug', l[i].slug);
     chip.setAttribute('data-cname', l[i].name);
     chip.appendChild(document.createTextNode(l[i].name + (counts[l[i].slug] ? ' · ' + counts[l[i].slug] : '')));
@@ -2430,8 +2631,74 @@ function applyBlockedChange() {
   if (state.sidebarOpen) renderSidebar();
   if (chpop.open) refreshChpopList();
   renderPinnedCatChips();          // blocking may have removed a pin
+  if (browse.open) renderBrowse(); // the grid hides blocked categories, so the set moved under it
   if (cats.open) renderCats();
   if (settings.open) renderSettings();
+}
+
+/* When we last saw each followed channel live, and when this install first ran.
+   Both only ever feed the offline line in the channel list. Two honest limits:
+   the baseline is stamped the first time this build runs, not the real install
+   date, and the elapsed time is measured from when WE last saw the channel live —
+   a channel that streamed while the TV was off reads longer than it truly was.
+   Reading it from Kick instead would cost one request per offline channel and
+   returns nothing once old recordings are pruned. */
+var LASTLIVE_KEY = 'kicktv.lastlive';
+var FIRSTRUN_KEY = 'kicktv.firstrun';
+var LASTLIVE_LIMIT = 200;   // bounded by the follow list in practice; this is just insurance
+var lastLiveMemo = null;
+function getLastLive() {
+  if (lastLiveMemo) return lastLiveMemo;
+  var v = null;
+  try { v = JSON.parse(localStorage.getItem(LASTLIVE_KEY)); } catch (e) {}
+  lastLiveMemo = (v && typeof v === 'object' &&
+                  Object.prototype.toString.call(v) !== '[object Array]') ? v : {};
+  return lastLiveMemo;
+}
+function noteLive(slugs) {
+  if (!slugs || !slugs.length) return;
+  var m = getLastLive(), now = Date.now(), i;
+  for (i = 0; i < slugs.length; i++) m[slugs[i]] = now;
+  var keys = Object.keys(m);
+  if (keys.length > LASTLIVE_LIMIT) {
+    keys.sort(function (a, b) { return m[a] - m[b]; });      // oldest first
+    while (keys.length > LASTLIVE_LIMIT) delete m[keys.shift()];
+  }
+  try { localStorage.setItem(LASTLIVE_KEY, JSON.stringify(m)); } catch (e) {}
+}
+function getFirstRun() {
+  var v = 0;
+  try { v = parseInt(localStorage.getItem(FIRSTRUN_KEY), 10); } catch (e) {}
+  if (!isFinite(v) || v <= 0) {
+    v = Date.now();
+    try { localStorage.setItem(FIRSTRUN_KEY, String(v)); } catch (e) {}
+  }
+  return v;
+}
+var MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// toLocaleDateString is not dependable on this build, so format by hand.
+function fmtShortDate(ms) {
+  var d = new Date(ms);
+  return d.getDate() + ' ' + MONTHS_SHORT[d.getMonth()];
+}
+function fmtOfflineFor(ms) {
+  var days = Math.floor(ms / 86400000);
+  if (days < 60) return days + (days === 1 ? ' day' : ' days');
+  var months = Math.floor(days / 30);
+  return months + (months === 1 ? ' month' : ' months');
+}
+// Under a day reads plain "Offline" — nobody needs telling a channel has been off
+// since this morning. The never-seen line drops the "Offline · " prefix: with it,
+// the text overran the row and ellipsised away the very date it exists to show.
+function offlineLabel(slug) {
+  var ts = getLastLive()[slug];
+  if (ts) {
+    var ago = Date.now() - ts;
+    if (ago < 86400000) return 'Offline';
+    return 'Offline for ' + fmtOfflineFor(ago);
+  }
+  return 'Never live since ' + fmtShortDate(getFirstRun());
 }
 
 /* Past videos (VOD) popup and playback.
@@ -5125,7 +5392,9 @@ document.addEventListener('keydown', function (e) {
   }
   if (browse.open) {
     e.preventDefault();
-    if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
+    // the dropdown swallows Back and Left first, so neither closes Browse under it
+    if (browse.langMenuOpen && (k === KEY.BACK || k === KEY.LEFT || k === KEY.RIGHT)) closeBrowseLangMenu();
+    else if (k === KEY.BLUE || k === KEY.BACK) closeBrowse();
     else if (k === KEY.YELLOW) openCats();               // yellow opens the categories picker
     else if (k === KEY.LEFT) browseMove(-1, 0);
     else if (k === KEY.RIGHT) browseMove(1, 0);
@@ -5447,13 +5716,29 @@ function browseCardFromEvent(e) {
     if (state.mode === 'player') openAdd();
   });
   // Browse popup pointer
-  document.getElementById('browse-langs').addEventListener('click', function (e) {
+  document.getElementById('browse-langbtn').addEventListener('click', function (e) {
+    e.stopPropagation();
+    browse.zone = 'lang';
+    toggleBrowseLangMenu();
+  });
+  var langMenu = document.getElementById('browse-langmenu');
+  langMenu.addEventListener('click', function (e) {
+    e.stopPropagation();
     var el = e.target;
-    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-idx') !== null && el.getAttribute('data-idx') !== undefined)) el = el.parentNode;
-    if (el && el !== this && el.getAttribute('data-idx') != null) {
-      browse.zone = 'lang';
-      toggleBrowseLang(parseInt(el.getAttribute('data-idx'), 10));
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (el && el !== this) toggleBrowseLang(parseInt(el.getAttribute('data-idx'), 10));
+  });
+  langMenu.addEventListener('mouseover', function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
+    if (el && el !== this) {
+      var i = parseInt(el.getAttribute('data-idx'), 10);
+      if (i !== browse.langIdx) { browse.langIdx = i; renderBrowseLangMenu(); }
     }
+  });
+  // Anywhere else in Browse dismisses the dropdown, the way a menu should.
+  document.getElementById('browse').addEventListener('click', function () {
+    if (browse.langMenuOpen) closeBrowseLangMenu();
   });
   var browseGrid = document.getElementById('browse-grid');
   browseGrid.addEventListener('mouseover', function (e) {
@@ -5491,6 +5776,11 @@ function browseCardFromEvent(e) {
     showTip('Hides channels you already follow, so Browse only shows new finds.', this);
   });
   document.getElementById('browse-discover').addEventListener('mouseleave', hideTip);
+  document.getElementById('browse-hideblocked').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseHideBlocked(); });
+  document.getElementById('browse-hideblocked').addEventListener('mouseenter', function () {
+    showTip('Hides streams in categories you have blocked. Picking one of those categories still shows it.', this);
+  });
+  document.getElementById('browse-hideblocked').addEventListener('mouseleave', hideTip);
   document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
   // The x on the diagnostics panel switches the overlay off.
   document.getElementById('diag-close').addEventListener('click', function (e) {
@@ -5535,7 +5825,8 @@ function browseCardFromEvent(e) {
     if (!el || el === this) return;
     e.stopPropagation();
     var cslug = el.getAttribute('data-cslug');
-    selectCategory(cslug || null, el.getAttribute('data-cname') || '');
+    if (cslug) toggleBrowseCat(cslug, el.getAttribute('data-cname') || '');
+    else clearBrowseCats();
   });
   // Categories popup pointer
   var catsGrid = document.getElementById('cats-grid');
@@ -6150,6 +6441,7 @@ function bootChoiceSuperseded() {
   setMode('player');
   loadQualityPref();
   loadSettings();
+  getFirstRun();      // stamp the baseline before any offline row can render
   loadChannelCache();                         // instant sidebar/home data while the real fetch runs
   applyDim();
   applyChatStyle();                           // set the chat overlay's side/size/width/opacity
