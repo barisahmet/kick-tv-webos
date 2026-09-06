@@ -527,8 +527,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #browse-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;   /* without this the 3px border lands outside, off-centring the panel */
-  background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+  background: #0c110d; border: 3px solid #303735; border-radius: 20px;
+  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
 }
 /* One static gradient at the foot of each grid, so the row the panel clips reads as
    "there is more below" instead of a card sliced against a hard bright edge. No
@@ -721,8 +721,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(0,0,0,0.82); color: #e7e9ea;
   font-size: 20px; font-weight: 700; padding: 4px 12px; border-radius: 8px;
 }
-.bcard.watched { opacity: 0.55; }
-.bcard.watched.focused { opacity: 0.9; }
+.vodthumb-image { position: absolute; inset: 0; background: #101213 center/cover no-repeat; }
+.bcard.watched .vodthumb-image { opacity: 0.5; }
+.bcard.watched.focused .vodthumb-image { opacity: 0.8; }
+.bresume { margin-left: 12px; color: #b5e5a4; font-weight: 600; }
 .bname { font-size: 25px; font-weight: 700; color: #fff; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .btitle { font-size: 21px; color: #cfd0d1; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bsub { font-size: 19px; color: #9a9a9d; margin-top: 3px; margin-right: 52px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -741,8 +743,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vods-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;
-  background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+  background: #0c110d; border: 3px solid #303735; border-radius: 20px;
+  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
 }
 #vods-head {
   display: flex; align-items: center;
@@ -768,7 +770,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* The "Categories" button in the Browse header */
 #browse-cats-btn {
   font-size: 22px; padding: 7px 18px; margin: 0 16px 0 4px; border-radius: 18px;
-  background: #143206; color: #53fc18; cursor: pointer; border: 2px solid transparent; white-space: nowrap;
+  background: #1a201b; color: #b9bcbb; cursor: pointer; border: 2px solid transparent; white-space: nowrap;
 }
 #browse-cats-btn:hover { border-color: #53fc18; color: #fff; }
 #browse-cats-btn.on { background: #53fc18; color: #0b0e0f; }
@@ -781,8 +783,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #cats-panel {
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;
-  background: #0c110d; border: 3px solid #53fc18; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 0 60px rgba(83,252,24,0.18);
+  background: #0c110d; border: 3px solid #303735; border-radius: 20px;
+  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
 }
 #cats-head { display: flex; align-items: center; padding: 20px 26px; border-bottom: 1px solid #26302a; }
 #cats-title { font-size: 32px; font-weight: 800; color: #fff; flex: 1; }
@@ -881,7 +883,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .chview { font-size: 23px; color: #efeff1; margin-left: 14px; white-space: nowrap; }
 .chview .chdot { display: inline-block; width: 11px; height: 11px; border-radius: 6px; background: #e91916; margin-right: 7px; vertical-align: 1px; }
 
-/* Centre play/pause button for past videos (shows with the overlay) */
+/* VOD transport buttons sit in the centre; Up focuses this row. */
 #vodplay {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
   width: 116px; height: 116px; border-radius: 58px;
@@ -911,7 +913,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodback { left: calc(50% - 200px); }
 #vodfwd  { left: calc(50% + 200px); }
 #vodback:hover, #vodfwd:hover { background: rgba(0,0,0,0.72); }
-/* Up from the seek bar focuses these; Left and Right move between them. */
+/* Pointer hover and the last remote action highlight the active control. */
 #vodplay.focused, #vodback.focused, #vodfwd.focused {
   background: rgba(0,0,0,0.72);
   box-shadow: 0 0 0 3px #53fc18, 0 0 22px rgba(83,252,24,0.35);
@@ -921,9 +923,33 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Accumulated-seek chip: "+60s" while rapid presses are being collected */
 #seekpop {
-  position: absolute; left: 50%; top: calc(50% - 150px); transform: translateX(-50%);
-  background: rgba(0,0,0,0.55); color: #fff;
-  font-size: 34px; font-weight: 500; padding: 8px 24px; border-radius: 14px;
+  position: absolute; left: 50%; top: calc(50% - 200px); transform: translateX(-50%);
+  background: rgba(12,18,12,0.88); color: #53fc18;
+  border: 1px solid rgba(83,252,24,0.3);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.3);
+  font-size: 36px; font-weight: 700; padding: 12px 28px 16px; border-radius: 18px;
+  min-width: 100px; text-align: center; font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+#seekpop .seekvalue {
+  position: relative; display: inline-block;
+  animation: seekstep 240ms cubic-bezier(.2,.8,.3,1) both;
+}
+#seekpop .seekvalue::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: -7px;
+  height: 3px; border-radius: 2px; background: #53fc18;
+  transform-origin: left center;
+  animation: seekcountdown var(--seek-wait, 1000ms) linear forwards;
+}
+.seekdestination { display: block; margin-top: 16px; font-size: 22px; font-weight: 500; color: #d3dbd1; }
+@keyframes seekstep {
+  0% { opacity: 0.45; transform: translateY(6px) scale(0.82); }
+  45% { opacity: 1; transform: translateY(-2px) scale(1.12); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes seekcountdown {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
 }
 
 /* Bringing the player controls up is one gesture, not five separate fades. The
@@ -960,7 +986,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   transition: opacity 150ms ease, transform 190ms ease;
 }
 #overlay.hidden { display: block !important; transform: translateY(-100%); }
-#vodbar.hidden  { display: flex !important;  transform: translateX(-50%) translateY(20px); }
+#vodbar.hidden  { display: flex !important; transform: translateY(16px); }
 #vodplay.hidden, #vodback.hidden, #vodfwd.hidden {
   display: flex !important; transform: translate(-50%,-50%) scale(0.8);
 }
@@ -985,22 +1011,42 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   transition: opacity 3s ease, background-color 1s ease;
 }
 
-/* VOD seek bar. Fixed, centred width so it never resizes when the sidebar
-   opens/closes, and stays clear of the 470px sidebar. Same 900px width as
-   #cbguide below it, sitting a bit closer to the guide than to the centre
-   play/pause button (~194px above, ~95px below). */
-#vodbar {
-  position: absolute; left: 50%; transform: translateX(-50%); bottom: 210px;
-  width: 900px; box-sizing: border-box;
-  display: flex; align-items: center;
-  padding: 12px 30px; border-radius: 20px;
-  border: 2px solid transparent;   /* reserved, so focus does not shift the contents */
-  background: rgba(9,12,13,0.6); box-shadow: 0 8px 30px rgba(0,0,0,0.45);
+/* A single gradient supports the VOD title, transport row and timeline. */
+#vod-scrim {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 430px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.7) 45%, rgba(0,0,0,0.94));
+  pointer-events: none; transition: opacity 200ms ease;
 }
-/* Down gives the bar focus: Left and Right scrub instead of opening the sidebar. */
+#vod-scrim.hidden { display: block !important; opacity: 0; }
+#player[data-vod] #overlay {
+  top: auto; bottom: 244px; left: var(--vod-left, 60px) !important;
+  width: calc(100% - var(--vod-left, 60px) - 430px) !important;
+  height: 88px; padding: 0 0 0 86px; background: none;
+  font-size: 23px; text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+}
+#player[data-vod] #overlay.hidden { transform: translateY(16px); }
+#player[data-vod] #ov-avatar { left: 0; width: 64px; height: 64px; font-size: 30px; line-height: 64px; }
+#player[data-vod] #ov-name {
+  display: inline-block; max-width: calc(100% - 170px); vertical-align: bottom;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 23px; font-weight: 600; color: #d3d7d4; margin-right: 18px;
+}
+#player[data-vod] #ov-viewers { font-size: 21px; color: #9ba69e; margin-right: 0; }
+#player[data-vod] #ov-title {
+  font-size: 32px; line-height: 42px; font-weight: 700; color: #fff; margin-top: 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#vodbar {
+  position: absolute; left: var(--vod-left, 60px); bottom: 140px;
+  width: calc(100% - var(--vod-left, 60px) - 60px); box-sizing: border-box;
+  display: flex; align-items: center;
+  padding: 10px 20px; border-radius: 12px;
+  border: 2px solid transparent;   /* reserved, so focus does not shift the contents */
+  background: rgba(9,12,13,0.2);
+}
+/* The focus ring follows Up/Down and seeking; the controls retain their key map. */
 #vodbar.focused {
-  border: 2px solid #53fc18;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.45), 0 0 0 3px rgba(83,252,24,0.18);
+  border-color: rgba(83,252,24,0.35);
 }
 #vodbar.focused #vodbar-handle { fill: #53fc18; }
 #vodbar-cur, #vodbar-dur {
@@ -1014,6 +1060,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodbar-remain { stroke: rgba(255,255,255,0.45); stroke-width: 4; stroke-linecap: round; }
 #vodbar-played { stroke: #53fc18; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 #vodbar-handle { fill: #fff; }
+#vodbar-origin { stroke: rgba(255,255,255,0.55); stroke-width: 3; stroke-dasharray: 4 4; }
 
 /* Player tools, shown at the bottom-right while the sidebar is open. Quality is
    a first-class control; Settings remains a separate themed gear. */

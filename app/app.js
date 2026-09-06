@@ -648,6 +648,7 @@ function teardownVideo() {
   hideVodBar();
   hideSpinner();
   hideVodPlay();
+  document.getElementById('player').removeAttribute('data-vod');
   stopWatchdog();
   if (PB.reconnectTimer) { clearTimeout(PB.reconnectTimer); PB.reconnectTimer = null; }
   var video = document.getElementById('video');
@@ -1111,6 +1112,7 @@ function closeSidebarWithGrace() {
 function resetIdle() {
   clearTimeout(state.idleTimer);
   if (!state.sidebarOpen) return;
+  if (state.vod && (vodPointerHover || vodDragging)) return;
   if (!getFavorites().length) return;   // onboarding: keep the menu up until they add a channel
   state.idleTimer = setTimeout(function () {
     if (state.mode === 'player') { closeSidebar(); hideCursor(); }
@@ -1719,12 +1721,12 @@ var BROWSE_LANGS = [
   { label: 'Russian',  value: 'Russian' }
 ];
 var BROWSE_COLS = 4;
-var BROWSE_MAX_AUTO_PAGES = 12;   // ceiling for the automatic sparse-filter chain below
 var BROWSE_MEMORY_MS = 60000;     // reopen inside this window and the loaded pool is reused
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                cats: [], session: 0, closedAt: 0, scrollTop: 0, langMenuOpen: false,
-               sort: 'viewers', discover: false, hideBlocked: true, renderLimit: 60 };
+               sort: 'viewers', discover: false, hideBlocked: true, renderLimit: 60,
+               fillTimer: null, retryTimer: null, retryCount: 0 };
 var BROWSE_SORTS = [
   { key: 'viewers', label: 'Top' },
   { key: 'newest',  label: 'New' },
@@ -1855,6 +1857,7 @@ function thumbUrl(s) {
 }
 function openBrowse(categorySlug, categoryName) {
   if (!state.ready) return;
+  cancelBrowseFill();
   browse.open = true;
   showCursor();
   closeSidebar();
@@ -1887,7 +1890,7 @@ function openBrowse(categorySlug, categoryName) {
   // optionally open pre-filtered (the clickable category in the top bar)
   browse.cats = categorySlug ? [{ slug: categorySlug, name: categoryName || categorySlug }] : [];
   browse.session++;               // orphan any request still in flight from a previous opening
-  browse.raw = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
+  browse.raw = []; browse.streams = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   browse.renderLimit = 60;
   browse.sort = 'viewers';
   browse.discover = loadBrowseDiscoverPref();
@@ -1898,7 +1901,7 @@ function openBrowse(categorySlug, categoryName) {
   renderPinnedCatChips();
   renderBrowseSkeletons();
   updateBrowseTitle();
-  loadBrowseMore(true);
+  loadBrowseMore();
 }
 // The title stays "Live now" — the highlighted Categories button and the
 // selected chip already show which filter is active.
@@ -1908,6 +1911,9 @@ function updateBrowseTitle() {
 }
 function closeBrowse() {
   browse.open = false;
+  cancelBrowseFill();
+  browse.session++;
+  browse.fetching = false;
   closeBrowseLangMenu();
   // Remember where we were. The pool stays in memory; openBrowse decides whether
   // it is still fresh enough to reuse.
@@ -1918,8 +1924,38 @@ function closeBrowse() {
   document.getElementById('browse-tip').className = 'hidden';
   resumePlaybackAfterBrowse();
 }
-// Fetch one page of the live directory and append it. `initial` chains a few
-// pages on open to fill the grid; scrolling to the bottom pulls more.
+function cancelBrowseFill() {
+  clearTimeout(browse.fillTimer);
+  clearTimeout(browse.retryTimer);
+  browse.fillTimer = null;
+  browse.retryTimer = null;
+  browse.retryCount = 0;
+}
+// Count complete rows of real cards, excluding a partial row and the loader.
+// The first card of the last two full rows must be entirely below the viewport.
+function browseNeedsMoreRows() {
+  var grid = document.getElementById('browse-grid');
+  var fullRows = Math.floor(Math.min(browse.renderLimit, browse.streams.length) / BROWSE_COLS);
+  if (fullRows < 2) return true;
+  var card = grid.children[(fullRows - 2) * BROWSE_COLS];
+  return !card || card.getBoundingClientRect().top < grid.getBoundingClientRect().bottom;
+}
+function scheduleBrowseFill() {
+  if (!browse.open || browse.fillTimer !== null || browse.retryTimer !== null) return;
+  var ses = browse.session;
+  browse.fillTimer = setTimeout(function () {
+    browse.fillTimer = null;
+    if (!browse.open || ses !== browse.session) return;
+    // Use already-fetched matches before asking Kick for another page.
+    while (browseNeedsMoreRows() && browse.renderLimit < browse.streams.length) {
+      var oldLimit = browse.renderLimit;
+      browse.renderLimit += 40;
+      extendBrowseWindow(oldLimit);
+    }
+    if (browseNeedsMoreRows() && browse.hasMore) loadBrowseMore();
+    else if (!browse.fetching) setBrowseLoadingCard(false);
+  }, 0);
+}
 // A card at the end of the grid with an indeterminate bar, shown while more
 // pages are on their way. Re-renders wipe it; each fetch re-appends it.
 function setBrowseLoadingCard(on) {
@@ -1947,11 +1983,9 @@ function browseFocusCount() {
   var card = document.getElementById('browse-loadcard');
   return browse.streams.length + (card && card.parentNode ? 1 : 0);
 }
-// No page cap: the directory's own end (an empty page) is the terminator, the
-// sparse auto-chain stops at a healthy grid, and closing Browse cancels via
-// the session token.
-function loadBrowseMore(initial) {
-  if (browse.fetching || !browse.hasMore) return;
+// One serialized request at a time, until two spare rows or the directory's end.
+function loadBrowseMore() {
+  if (!browse.open || browse.fetching || !browse.hasMore || browse.retryTimer !== null) return;
   browse.fetching = true;
   if (!browse.raw.length) setBrowseStatus('Loading...');
   else setBrowseLoadingCard(true);   // subsequent pages: progress card in the grid
@@ -1963,11 +1997,22 @@ function loadBrowseMore(initial) {
     if (ses !== browse.session) return;
     browse.fetching = false;
     if (!browse.open) return;
-    var arr = (!err && data && data.data) ? data.data : [];
+    if (err || !data || !Array.isArray(data.data)) {
+      browse.retryCount++;
+      setBrowseStatus('Could not reach Kick. Retrying...');
+      setBrowseLoadingCard(true);
+      browse.retryTimer = setTimeout(function () {
+        browse.retryTimer = null;
+        if (browse.open && ses === browse.session) scheduleBrowseFill();
+      }, Math.min(15000, 1000 * Math.pow(2, Math.min(browse.retryCount - 1, 4))));
+      return;
+    }
+    browse.retryCount = 0;
+    var arr = data.data;
     if (!arr.length) {
       browse.hasMore = false;
       setBrowseLoadingCard(false);
-      if (!browse.raw.length) setBrowseStatus('Could not reach Kick'); else renderBrowse();
+      renderBrowse(true);
       return;
     }
     // Keep only the fields the app uses — deep scans can hold thousands of
@@ -1986,22 +2031,8 @@ function loadBrowseMore(initial) {
     }
     browse.raw = browse.raw.concat(arr);
     browse.page = pg + 1;
-    // Beyond the rendered window a repaint per page is wasted work; every
-    // third page keeps the chip counts and loading card fresh enough.
-    if (browse.streams.length < browse.renderLimit || pg % 3 === 0) renderBrowse();
-    // Chain more pages while filling. Filters (category, Discover, languages)
-    // thin each page out, so keep pulling until the grid has a healthy count —
-    // no more one-page-per-scroll crawling to find anything.
-    // The sparse chain keeps pulling until the filtered grid looks healthy, but a
-    // filter whose whole population is under 24 can never get there, so it needs a
-    // hard ceiling or it walks the entire directory. hasMore stays true, so moving
-    // or scrolling to the end still fetches more on demand — only the automatic
-    // chain is bounded.
-    var filtersActive = !!(browse.cats.length || browse.discover || browse.langs.length ||
-                           (browse.hideBlocked && getBlockedCats().length));
-    var sparse = filtersActive && browse.streams.length < 24 && browse.page <= BROWSE_MAX_AUTO_PAGES;
-    if ((initial && browse.page <= (browse.cats.length ? 8 : 3)) || sparse) loadBrowseMore(true);
-    if (!browse.fetching) setBrowseLoadingCard(false);   // no follow-up came: done
+    renderBrowse(true);
+    if (browseNeedsMoreRows() && browse.hasMore) setBrowseLoadingCard(true);
   });
 }
 /* Languages live behind one button in the top-right corner rather than eight
@@ -2011,7 +2042,16 @@ function renderBrowseLangBtn() {
   var el = document.getElementById('browse-langbtn');
   if (!el) return;
   var n = browse.langs.length;
-  el.textContent = n ? ('Languages (' + n + ')') : 'Languages';
+  var labels = [];
+  for (var i = 0; i < n; i++) {
+    var label = browse.langs[i];
+    for (var j = 1; j < BROWSE_LANGS.length; j++) {
+      if (BROWSE_LANGS[j].value === browse.langs[i]) { label = BROWSE_LANGS[j].label; break; }
+    }
+    labels.push(label);
+  }
+  el.textContent = n ? labels[0] + (n > 1 ? ' +' + (n - 1) : '') : 'All languages';
+  el.title = n ? 'Languages: ' + labels.join(', ') : 'Filter by language';
   el.className = (n ? 'on' : '') +
                  (browse.zone === 'lang' && !browse.langMenuOpen ? ' focused' : '');
 }
@@ -2149,7 +2189,6 @@ function afterBrowseCatChange() {
   renderPinnedCatChips();
   renderBrowse();
   if (cats.open) renderCats();
-  if (browse.cats.length) loadBrowseMore(true);   // pull more pages to fill a filtered grid
 }
 function toggleBrowseCat(slug, name) {
   if (!slug) return;
@@ -2167,7 +2206,7 @@ function clearBrowseCats() {
   browse.cats = [];
   afterBrowseCatChange();
 }
-function renderBrowse() {
+function renderBrowse(preserveScroll) {
   var list = (browse.raw || []).slice();
   if (settings.hideBots) list = list.filter(function (s) { return !looksBotStream(s); });
   if (browse.langs.length) list = list.filter(function (s) { return browse.langs.indexOf(s.language) !== -1; });
@@ -2225,6 +2264,7 @@ function renderBrowse() {
   if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
   renderPinnedCatChips();          // keep the per-category live counts current
   applyBrowseFocus();
+  if (preserveScroll) grid.scrollTop = savedScroll;
 }
 var browseFocusEl = null;
 // the loading card is focusable but not activatable, so it keeps its own base class
@@ -2237,6 +2277,7 @@ function applyBrowseFocus() {
   browseFocusEl = swapFocus(grid, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
   if (browse.zone === 'grid') scrollIntoViewport(grid, card, 12);
   scheduleBrowsePeek();
+  scheduleBrowseFill();
 }
 // After dwelling on a browse card, refresh its thumbnail with the channel's
 // current frame (the directory image can be minutes old).
@@ -2298,14 +2339,13 @@ function browseMove(dx, dy) {
   }
   var count = browseFocusCount();
   if (dy === -1 && browse.gridIdx < BROWSE_COLS) { browse.zone = 'lang'; applyBrowseFocus(); return; }
-  if (!count) return;
+  if (!count) { scheduleBrowseFill(); return; }
   var idx = browse.gridIdx;
   if (dx === 1 && idx < count - 1) idx++;
   else if (dx === -1 && idx > 0) idx--;
   else if (dy === 1 && idx + BROWSE_COLS < count) idx += BROWSE_COLS;
   else if (dy === 1 && Math.floor(idx / BROWSE_COLS) < Math.floor((count - 1) / BROWSE_COLS)) idx = count - 1;  // partial last row
   else if (dy === -1 && idx - BROWSE_COLS >= 0) idx -= BROWSE_COLS;
-  else if (dy === 1 || dx === 1) loadBrowseMore(false);
   browse.gridIdx = idx;
   if (idx >= browse.renderLimit - 2 * BROWSE_COLS && browse.renderLimit < browse.streams.length) {
     var grewFrom = browse.renderLimit;
@@ -2313,16 +2353,13 @@ function browseMove(dx, dy) {
     extendBrowseWindow(grewFrom);
   }
   applyBrowseFocus();
-  // pull the next page as soon as focus reaches the last couple of rows
-  if (browse.gridIdx >= browse.streams.length - 2 * BROWSE_COLS) loadBrowseMore(false);
 }
 function browseActivate() {
   if (browse.langMenuOpen) { toggleBrowseLang(browse.langIdx); return; }     // OK ticks a box, menu stays open
   if (browse.zone === 'lang') { openBrowseLangMenu(); return; }              // OK opens it; Down enters the grid
   var s = browse.streams[browse.gridIdx];
   if (s && s.channel && s.channel.slug) {
-    browse.open = false;
-    document.getElementById('browse').className = 'hidden';
+    closeBrowse();
     play(s.channel.slug);   // starts fresh, so no need to resume the paused stream
   }
 }
@@ -3082,7 +3119,8 @@ function vodWatchedInfo(slug, v, items) {
   var ppos = entry ? parseFloat(entry.position) : 0;
   var frac = (pdur > 0 && isFinite(ppos) && ppos > 0) ? Math.min(1, ppos / pdur) : 0;
   var watched = !!(entry && entry.watched) || frac >= 0.9;
-  return { watched: watched, frac: watched ? 1 : frac };
+  return { watched: watched, frac: watched ? 1 : frac,
+           position: !watched && isFinite(ppos) && ppos >= 10 ? Math.floor(ppos) : 0 };
 }
 function loadVodHideWatchedPref() {
   try { return localStorage.getItem('kicktv.vodhidewatched') === '1'; } catch (e) { return false; }
@@ -3209,7 +3247,10 @@ function renderVods() {
     var thumb = document.createElement('div');
     thumb.className = 'bthumb';
     var url = vodThumb(v, CARD_IMG_W);
-    if (url) thumb.style.backgroundImage = 'url(' + url + ')';
+    var thumbImage = document.createElement('div');
+    thumbImage.className = 'vodthumb-image';
+    if (url) thumbImage.style.backgroundImage = 'url(' + url + ')';
+    thumb.appendChild(thumbImage);
     var dur = document.createElement('span');
     dur.className = 'bdur';
     // The stream still running is in this list too, with a duration of 0. Saying
@@ -3242,6 +3283,12 @@ function renderVods() {
     meta.children[0].textContent = v.session_title || 'Untitled';
     meta.children[1].textContent = (v.categories && v.categories[0] && v.categories[0].name) || '';
     meta.children[2].textContent = fmtVodAgo(v.created_at);
+    if (w.position > 0) {
+      var resume = document.createElement('span');
+      resume.className = 'bresume';
+      resume.textContent = 'Resume · ' + fmtClock(w.position);
+      meta.children[2].appendChild(resume);
+    }
     card.appendChild(meta);
     grid.appendChild(card);
   });
@@ -3401,6 +3448,7 @@ function attachVod(source) {
 }
 function reloadVod() {
   if (!state.vod) return;
+  resetVodRecovery();
   var video = document.getElementById('video');
   if (isFinite(video.currentTime) && video.currentTime > 0) state.vod.resumeAt = Math.max(0, video.currentTime - 1);
   state.vod.retries = (state.vod.retries || 0) + 1;
@@ -3408,6 +3456,29 @@ function reloadVod() {
   if (state.vod.retries > 4) { toast('Playback error'); exitVod(); return; }
   setBanner('Reconnecting...');
   attachVod(state.vod.source);
+}
+function resetVodRecovery() {
+  if (!state.vod) return;
+  state.vod.recoveryTime = null;
+  state.vod.recoveryAt = 0;
+  state.vod.healthySeconds = 0;
+}
+// A 'playing' event alone can precede another immediate failure. Renew the
+// consecutive-failure budget only after ten seconds of actual playback progress.
+function trackVodRecovery() {
+  var vod = state.vod, video = document.getElementById('video');
+  if (!vod || !vod.retries) return;
+  if (video.paused || video.seeking || !isFinite(video.currentTime)) { resetVodRecovery(); return; }
+  var now = Date.now(), pos = video.currentTime;
+  var elapsed = (now - vod.recoveryAt) / 1000;
+  var advanced = pos - vod.recoveryTime;
+  if (typeof vod.recoveryTime === 'number' && elapsed > 0 && elapsed <= 2 &&
+      advanced > 0 && advanced <= elapsed * (video.playbackRate || 1) + 0.5) {
+    vod.healthySeconds += Math.min(elapsed, advanced);
+  } else vod.healthySeconds = 0;
+  vod.recoveryTime = pos;
+  vod.recoveryAt = now;
+  if (vod.healthySeconds >= 10) { vod.retries = 0; resetVodRecovery(); }
 }
 function exitVod() {
   var back = state.vodReturn;
@@ -3424,7 +3495,20 @@ function exitVod() {
    a short pause, YouTube-style. Nothing actually seeks until the timeout, so
    the skip buttons stay on screen while you keep pressing. */
 var seekAccum = { delta: 0, timer: null, baseTime: null };
-var SEEK_APPLY_MS = 1200;
+var SEEK_APPLY_MS = 1000;
+var vodSeekKey = { key: 0, started: 0, last: 0 };
+function seekVodKey(key, repeat) {
+  var now = Date.now();
+  if (!repeat || vodSeekKey.key !== key) {
+    vodSeekKey.key = key;
+    vodSeekKey.started = now;
+  } else if (now - vodSeekKey.last < 150) return;
+  vodSeekKey.last = now;
+  var held = now - vodSeekKey.started;
+  var step = held >= 3000 ? 120 : (held >= 1000 ? 60 : 30);
+  focusVodBar();
+  seekVod(key === KEY.LEFT ? -step : step);
+}
 function seekVod(delta) {
   var video = document.getElementById('video');
   var d = video.duration;
@@ -3432,7 +3516,18 @@ function seekVod(delta) {
   if (seekAccum.baseTime === null) seekAccum.baseTime = video.currentTime || 0;
   seekAccum.delta += delta;
   var el = document.getElementById('seekpop');
-  el.textContent = (seekAccum.delta >= 0 ? '+' : '-') + Math.abs(seekAccum.delta) + 's';
+  // A fresh value restarts the small pulse without forcing a layout read.
+  var amount = document.createElement('span');
+  amount.className = 'seekvalue';
+  amount.textContent = (seekAccum.delta >= 0 ? '+' : '-') + Math.abs(seekAccum.delta) + 's';
+  el.textContent = '';
+  el.appendChild(amount);
+  var destination = document.createElement('span');
+  destination.className = 'seekdestination';
+  var target = Math.max(0, Math.min(d - 1, seekAccum.baseTime + seekAccum.delta));
+  destination.textContent = 'Jump to ' + fmtClock(target);
+  el.appendChild(destination);
+  el.style.setProperty('--seek-wait', SEEK_APPLY_MS + 'ms');
   el.className = '';   // dim handling comes from applyDimAwareUi, same as the buttons
   clearTimeout(seekAccum.timer);
   seekAccum.timer = setTimeout(applySeekAccum, SEEK_APPLY_MS);
@@ -3453,14 +3548,20 @@ function applySeekAccum() {
   showVodOverlay();
 }
 function resetSeekAccum() {
+  vodSeekKey.key = 0;
   clearTimeout(seekAccum.timer);
   seekAccum.timer = null;
   seekAccum.delta = 0; seekAccum.baseTime = null;
   var el = document.getElementById('seekpop');
   if (el) el.className = 'hidden';
+  document.getElementById('vodbar-origin').setAttribute('visibility', 'hidden');
 }
 function showVodOverlay() {
   if (!state.vod) return;
+  var player = document.getElementById('player');
+  player.setAttribute('data-vod', '1');
+  player.style.setProperty('--vod-left', state.sidebarOpen ? '530px' : '60px');
+  document.getElementById('vod-scrim').className = '';
   var ov = document.getElementById('overlay');
   var vc = state.channels[state.vod.slug];
   setOverlayAvatar(vc && vc.avatar, state.vod.name);
@@ -3468,28 +3569,27 @@ function showVodOverlay() {
   document.getElementById('ov-live').style.display = 'none';
   document.getElementById('ov-viewers').textContent = 'Past video';
   document.getElementById('ov-title').textContent = state.vod.title;
-  // start at the sidebar's right edge when it is open, like the live overlay,
-  // so the info is never hidden behind the sidebar panel
-  ov.style.left = state.sidebarOpen ? '470px' : '0';
-  ov.style.width = state.sidebarOpen ? '1450px' : '1920px';
   ov.className = '';
   showVodBar();
   showVodPlay();
+  armVodOverlayHide();
+}
+function armVodOverlayHide() {
   clearTimeout(overlayTimer);
+  if (vodPointerHover || vodDragging) return;
   overlayTimer = setTimeout(function () {
     if (state.sidebarOpen) return;   // sidebar is up: the whole UI hides together when it closes
     hideVodControls();
   }, 4000);
 }
-// The seek bar: a wavy line for the played part, a flat line for the rest, and a
-// vertical handle at the play head. Redrawn a couple of times a second while up.
+// Redraw the timeline and any pending seek preview a couple of times a second.
 var vodbarTimer = null;
 var vodDragging = false;
-/* VOD control focus. A two-rung ladder above the video: the seek bar, and the
-   transport buttons above it. Up and Down move between them, Left and Right do
-   whatever the focused rung does. Cleared in hideVodBar and nowhere else, so
-   focus cannot outlive the controls. */
+var vodPointerHover = '';    // only actual pointer interaction holds the controls open
+/* Up explicitly enters transport navigation. Pointer hover and a quick OK still
+   highlight controls without taking Left/Right away from direct seeking. */
 var vodFocus = '';           // '', 'bar' or 'buttons'
+var vodButtonNav = false;
 var vodBtnIdx = 1;           // 0 rewind, 1 play/pause, 2 forward
 var VOD_BTN_IDS = ['vodback', 'vodplay', 'vodfwd'];
 function applyVodCtrlFocus() {
@@ -3505,6 +3605,7 @@ function applyVodCtrlFocus() {
 }
 function focusVodBar() {
   if (!state.vod) return;
+  vodButtonNav = false;
   vodFocus = 'bar';
   showVodOverlay();          // shows the bar and buttons, resets the hide timer
   applyVodCtrlFocus();
@@ -3519,6 +3620,7 @@ function focusVodButtons(idx) {
   applyVodCtrlFocus();
 }
 function blurVodFocus() {
+  vodButtonNav = false;
   vodFocus = '';
   applyVodCtrlFocus();
 }
@@ -3534,26 +3636,23 @@ function vodBtnActivate() {
   else if (vodBtnIdx === 2) seekVod(30);
   else toggleVodPlay();
 }
-// Showing at all, focused or not. Back dismisses the controls whenever they are
-// up, and only exits the video once they are gone.
+// Showing at all, focused or not.
 function vodBarVisible() {
   var el = document.getElementById('vodbar');
   return !!el && el.className.indexOf('hidden') === -1;
 }
-// Dismiss the whole VOD control set. Shared by the overlay timeout and by Back.
+// Dismiss the whole VOD control set when the overlay times out.
 function hideVodControls() {
   document.getElementById('overlay').className = 'hidden';
   hideVodPlay();
   hideVodBar();              // clears vodFocus
 }
 function fmtClock(sec) { return fmtDuration((sec || 0) * 1000); }
-function drawVodBar(cur, dur) {
+function drawVodBar(cur, dur, origin) {
   var W = 1500, mid = 20;
   var prog = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
   var px = prog * W;
-  // A focused bar gets a chunkier play head. The viewBox is 1500 wide against a
-  // ~840px element with preserveAspectRatio="none", so horizontal units compress
-  // by about 0.56 — 14 here renders as roughly 8px on screen.
+  // A focused bar gets a chunkier play head.
   var hw = vodFocus === 'bar' ? 14 : 8;
   var hh = vodFocus === 'bar' ? 38 : 30;
   var hy = vodFocus === 'bar' ? 1 : 5;
@@ -3564,10 +3663,18 @@ function drawVodBar(cur, dur) {
   handle.setAttribute('height', hh);
   handle.setAttribute('y', hy);
   handle.setAttribute('x', (px - hw / 2).toFixed(1));
+  var originEl = document.getElementById('vodbar-origin');
+  var pending = typeof origin === 'number' && isFinite(origin) && dur > 0;
+  originEl.setAttribute('visibility', pending ? 'visible' : 'hidden');
+  if (pending) {
+    var ox = (Math.max(0, Math.min(1, origin / dur)) * W).toFixed(1);
+    originEl.setAttribute('x1', ox);
+    originEl.setAttribute('x2', ox);
+  }
   document.getElementById('vodbar-cur').textContent = fmtClock(cur);
   document.getElementById('vodbar-dur').textContent = fmtClock(dur);
 }
-// The bar is a fixed, centred width now (see CSS), so nothing to reposition.
+// CSS positions the title and timeline together, leaving room for the sidebar.
 function placeVodBar() {}
 function drawVodBarNow() {
   var v = document.getElementById('video');
@@ -3583,7 +3690,7 @@ function drawVodBarNow() {
   // rather than a transient 0:00.
   else if (state.vod.resumeAt > 0 && !state.vod.resumeApplied && cur < state.vod.resumeAt) cur = state.vod.resumeAt;
   placeVodBar();
-  drawVodBar(cur, dur);
+  drawVodBar(cur, dur, seekAccum.baseTime);
 }
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
@@ -3604,8 +3711,12 @@ function seekVodFrac(frac) {
   showVodOverlay();
 }
 function hideVodBar() {
+  vodPointerHover = '';
+  vodDragging = false;
+  vodButtonNav = false;
   vodFocus = '';                         // focus must never outlive the controls
   document.getElementById('vodbar').className = 'hidden';
+  document.getElementById('vod-scrim').className = 'hidden';
   placeDiagnostics();
   if (vodbarTimer) { clearInterval(vodbarTimer); vodbarTimer = null; }
 }
@@ -3849,7 +3960,7 @@ function placeDiagnostics() {
   var chatOnLeft = settings.chatSide === 'left' && chatBox.classList.contains('on');
   el.style.left = chatOnLeft ? 'auto' : (state.sidebarOpen ? '500px' : '30px');
   el.style.right = chatOnLeft ? '30px' : 'auto';
-  el.style.bottom = vodControls ? '300px' : (state.sidebarOpen ? '150px' : '30px');   // above the raised seek bar
+  el.style.bottom = vodControls ? '380px' : (state.sidebarOpen ? '150px' : '30px');   // above the VOD title and timeline
 }
 function drawDiagnostics() {
   var el = document.getElementById('diagnostics');
@@ -4839,7 +4950,7 @@ function closeUpdateNotes() {
   if (settings.open) applySettingsFocus();
 }
 
-/* Buffering spinner (live and VOD) and the centre play/pause button (VOD) */
+/* Buffering spinner (live and VOD) and VOD play/pause button */
 var spinnerOn = false;
 // A rebuffer that resolves in a couple of hundred milliseconds is invisible if we
 // keep quiet, and reads as a glitch if we flash a spinner at it. Wait a beat first:
@@ -5357,6 +5468,11 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.BACK || k === KEY.STOP) armOrExit();
     return;
   }
+  if (state.vod && vodPointerHover) {
+    vodPointerHover = '';     // remote input resumes timed hiding, even under a parked cursor
+    if (vodBarVisible()) armVodOverlayHide();
+    if (state.sidebarOpen) resetIdle();
+  }
   // Anything but Back cancels a pending exit. That covers the stream -> list -> exit
   // ladder too: once you have started moving around the list, Back means "close the
   // list" again, so browsing it can never drop you out of the app by surprise.
@@ -5503,7 +5619,7 @@ document.addEventListener('keydown', function (e) {
     if (isChUp(k)) { chpopMove(-1); return; }          // channel up/down surf the live list
     if (isChDown(k)) { chpopMove(1); return; }
   }
-  if (k === KEY.OK && state.notifyCurrent) { activateNotify(); return; }
+  if (k === KEY.OK && state.notifyCurrent && !state.vod) { activateNotify(); return; }
   if (k === KEY.REW) { if (state.vod) seekVod(-60); return; }
   if (k === KEY.FF) { if (state.vod) seekVod(60); return; }
   if (state.sidebarOpen) {
@@ -5527,41 +5643,33 @@ document.addEventListener('keydown', function (e) {
     }
     return;
   }
-  if (state.vod && vodFocus === 'buttons') {             // transport buttons have focus
-    if (k === KEY.LEFT)  { vodBtnMove(-1); return; }     // rewind · pause · forward
-    if (k === KEY.RIGHT) { vodBtnMove(1); return; }
-    if (k === KEY.DOWN)  { focusVodBar(); return; }      // step back down to the bar
-    if (k === KEY.UP)    { showVodOverlay(); return; }   // top of the ladder; keep it alive
-    if (k === KEY.OK)    { vodBtnActivate(); return; }
-    // Back, PLAY, PAUSE, REW, FF and STOP fall through to the shared VOD keys
-  }
-  if (state.vod && vodFocus === 'bar') {                  // seek bar has focus
-    if (k === KEY.LEFT)  { seekVod(-30); return; }
-    if (k === KEY.RIGHT) { seekVod(30); return; }
-    if (k === KEY.UP)    { focusVodButtons(); return; }   // step up to the buttons
-    if (k === KEY.DOWN)  { showVodOverlay(); return; }    // bottom of the ladder; keep it alive
-    if (k === KEY.OK) {
-      // Commit a queued jump, and otherwise do nothing but keep the controls up.
-      // Pause has its own button one rung above, so OK here must never toggle
-      // playback — pressing it twice to confirm a seek would otherwise pause.
-      if (seekAccum.baseTime !== null) applySeekAccum();
-      else showVodOverlay();
-      return;
-    }
-    // Back, PLAY, PAUSE, REW, FF and STOP fall through to the shared VOD keys
-  }
   if (state.vod) {                                       // watching a past video
     if (k === KEY.STOP) { exitVod(); return; }           // stop always means stop
     if (k === KEY.BACK) {
-      // Undo before dismiss before exit: a queued jump is cancelled first, so
-      // Back always means "take back the last thing I did".
-      if (seekAccum.baseTime !== null) { resetSeekAccum(); showVodOverlay(); return; }
-      if (vodBarVisible()) { hideVodControls(); return; }
-      exitVod(); return;
+      var dismissVodControls = vodBarVisible() || seekAccum.baseTime !== null;
+      resetSeekAccum();
+      vodButtonNav = false;
+      if (dismissVodControls) {
+        clearTimeout(overlayTimer);
+        hideVodControls();
+        state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;
+        hideCursor();
+      } else openSidebar();
+      return;
     }
-    if (k === KEY.LEFT || k === KEY.RIGHT) { openSidebar(); return; }
-    if (k === KEY.UP) { focusVodBar(); return; }         // either arrow grabs the seek bar
+    if (k === KEY.UP) {
+      if (!vodButtonNav || vodFocus !== 'buttons') focusVodButtons();
+      else showVodOverlay();
+      vodButtonNav = true;
+      return;
+    }
     if (k === KEY.DOWN) { focusVodBar(); return; }
+    if (vodButtonNav && vodFocus === 'buttons') {
+      if (k === KEY.LEFT) { vodBtnMove(-1); return; }
+      if (k === KEY.RIGHT) { vodBtnMove(1); return; }
+      if (k === KEY.OK) { vodBtnActivate(); return; }
+    }
+    if (k === KEY.LEFT || k === KEY.RIGHT) { seekVodKey(k, e.repeat); return; }
     if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
     if (k === KEY.PLAY) { playVideo(video); return; }
     // OK lands on the play/pause button and takes the action in the same press —
@@ -5586,6 +5694,10 @@ document.addEventListener('keydown', function (e) {
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
   else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
   else if (k === KEY.PLAY) { playVideo(video); }
+});
+
+document.addEventListener('keyup', function (e) {
+  if (e.keyCode === vodSeekKey.key) vodSeekKey.key = 0;
 });
 
 /* Pointer, both mouse and the magic remote */
@@ -5627,7 +5739,8 @@ function browseCardFromEvent(e) {
       }
     }
   });
-  // Moving the pointer opens the sidebar, which then hides itself after a few idle seconds.
+  // Live keeps its full sidebar reveal. VOD reveals playback controls first;
+  // reaching the left edge opens the sidebar as well.
   var lastX = -1, lastY = -1;
   playerEl.addEventListener('mousemove', function (e) {
     if (diagDrag) return;                 // dragging the diagnostics window, not browsing
@@ -5636,8 +5749,22 @@ function browseCardFromEvent(e) {
     lastX = e.clientX; lastY = e.clientY;
     showCursor();      // a real move brings the pointer back
     if (!state.sidebarOpen && Date.now() < state.suppressNudgeUntil) return;   // click-to-hide grace
-    nudgeSidebar();
-    if (state.vod) showVodOverlay();               // reveal the VOD seek bar
+    if (state.vod) {
+      if (browse.open || vods.open || cats.open || chpop.open || settings.open ||
+          qualityopt.open || dimopt.open || chatopt.open || blockedcats.open || updateopen || saver.on) return;
+      if (vodDragging) return;
+      var target = e.target;
+      vodPointerHover = '';
+      while (target && target !== playerEl) {
+        if (target.id === 'vodbar' || VOD_BTN_IDS.indexOf(target.id) !== -1) {
+          vodPointerHover = target.id;
+          break;
+        }
+        target = target.parentNode;
+      }
+      if (state.sidebarOpen || e.clientX <= 48) nudgeSidebar();
+      showVodOverlay();
+    } else nudgeSidebar();
   });
   document.getElementById('side-refresh').addEventListener('click', function (e) {
     e.stopPropagation();
@@ -5758,15 +5885,9 @@ function browseCardFromEvent(e) {
     if (!browse.open) return;
     e.preventDefault();
     browseGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
-    if (browseGrid.scrollTop + browseGrid.clientHeight >= browseGrid.scrollHeight - 500) {
-      if (browse.renderLimit < browse.streams.length) {
-        var grewFrom = browse.renderLimit;
-        browse.renderLimit += 40;
-        extendBrowseWindow(grewFrom);
-      }
-      loadBrowseMore(false);
-    }
+    scheduleBrowseFill();
   });
+  browseGrid.addEventListener('scroll', scheduleBrowseFill);
   document.getElementById('browse-close').addEventListener('click', function () { closeBrowse(); });
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
@@ -5938,6 +6059,7 @@ function browseCardFromEvent(e) {
     if (!state.vod) return;
     vodDragging = true;
     clearTimeout(overlayTimer);                 // keep the bar visible while dragging
+    clearTimeout(state.idleTimer);
     document.getElementById('vodbar').className = '';
     vodPreview(e);
     e.preventDefault();
@@ -5946,7 +6068,11 @@ function browseCardFromEvent(e) {
     if (vodDragging) vodPreview(e);
   });
   document.addEventListener('mouseup', function (e) {
-    if (vodDragging) { vodDragging = false; seekVodFrac(vodTrackFrac(e)); }
+    if (vodDragging) {
+      vodDragging = false;
+      seekVodFrac(vodTrackFrac(e));
+      if (state.sidebarOpen) resetIdle();
+    }
   });
   // Dedicated player tools: stream quality and Settings stay separate.
   var settingsButton = document.getElementById('settings-button');
@@ -6049,14 +6175,30 @@ function browseCardFromEvent(e) {
     var slug = el.getAttribute('data-slug');
     if (state.channels[slug] && state.channels[slug].live) { closeSidebar(); play(slug); }
   });
-  // VOD centre play/pause button and the -30/+30 skip buttons beside it
+  // VOD play/pause button and the -30/+30 skip buttons beside it
   // Hovering moves focus, the same way the sidebar and the grids behave, so the
   // pointer and the D-pad share one highlight rather than having two of their own.
-  document.getElementById('vodbar').addEventListener('mouseenter', function () { focusVodBar(); });
+  function hoverVodControl(id) {
+    if (!state.vod) return;
+    vodPointerHover = id;
+    if (state.sidebarOpen) resetIdle();
+  }
+  function leaveVodControl() {
+    if (!state.vod || vodPointerHover !== this.id) return;
+    vodPointerHover = '';
+    if (vodBarVisible()) armVodOverlayHide();
+    if (state.sidebarOpen) resetIdle();
+  }
+  document.getElementById('vodbar').addEventListener('mouseenter', function () {
+    hoverVodControl(this.id);
+    focusVodBar();
+  });
+  document.getElementById('vodbar').addEventListener('mouseleave', leaveVodControl);
   for (var vb = 0; vb < VOD_BTN_IDS.length; vb++) {
     (function (i) {
       document.getElementById(VOD_BTN_IDS[i])
-        .addEventListener('mouseenter', function () { focusVodButtons(i); });
+        .addEventListener('mouseenter', function () { hoverVodControl(this.id); focusVodButtons(i); });
+      document.getElementById(VOD_BTN_IDS[i]).addEventListener('mouseleave', leaveVodControl);
     })(vb);
   }
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
@@ -6188,13 +6330,13 @@ function browseCardFromEvent(e) {
   // than 'playing' — drop the still at whichever arrives first.
   video.addEventListener('loadeddata', function () { setPosterStill(null); });
   // Buffering spinner for both live and VOD.
-  video.addEventListener('waiting', function () { if (!video.paused) showSpinnerSoon(); });
-  video.addEventListener('seeking', function () { showSpinnerSoon(); });
+  video.addEventListener('waiting', function () { resetVodRecovery(); if (!video.paused) showSpinnerSoon(); });
+  video.addEventListener('seeking', function () { resetVodRecovery(); showSpinnerSoon(); });
   video.addEventListener('loadedmetadata', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('durationchange', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });
   video.addEventListener('timeupdate', function () {
-    if (state.vod) saveVodProgress(false);
+    if (state.vod) { trackVodRecovery(); saveVodProgress(false); }
     else { tickLiveWatch(); saveLiveMark(false); }
   });
   video.addEventListener('seeked', function () {
@@ -6204,7 +6346,7 @@ function browseCardFromEvent(e) {
   // Keep the VOD play/pause icon in sync with the actual state.
   video.addEventListener('play', function () { if (state.vod) vodPlayIcon(); });
   video.addEventListener('pause', function () {
-    if (state.vod) { saveVodProgress(true); vodPlayIcon(); hideSpinner(); }
+    if (state.vod) { resetVodRecovery(); saveVodProgress(true); vodPlayIcon(); hideSpinner(); }
   });
 })();
 
