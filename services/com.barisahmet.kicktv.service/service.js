@@ -83,6 +83,75 @@ function kickGet(path, cb) {
   req.setTimeout(10000, function () { req.abort(); });
 }
 
+// Projection is opt-in and limited to endpoints whose payloads the app consumes.
+// Keep absent properties absent, nulls null, and wrapper/array shapes unchanged.
+// Image descriptors stay intact: their srcset/responsive variants matter on TV.
+function selectFields(value, fields, nested) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  var out = {}, i, key;
+  for (i = 0; i < fields.length; i++) {
+    key = fields[i];
+    if (Object.prototype.hasOwnProperty.call(value, key)) out[key] = value[key];
+  }
+  for (key in nested) if (Object.prototype.hasOwnProperty.call(nested, key) && Object.prototype.hasOwnProperty.call(value, key)) {
+    out[key] = nested[key](value[key]);
+  }
+  return out;
+}
+function mapItems(value, project) { return Array.isArray(value) ? value.map(project) : value; }
+function projectUser(value) { return selectFields(value, ['id', 'username', 'profile_pic'], {}); }
+function projectCategory(value) {
+  return selectFields(value, ['id', 'name', 'slug', 'banner', 'viewers', 'viewer_count', 'livestreams_count'], {});
+}
+function projectCategories(value) { return mapItems(value, projectCategory); }
+function projectStream(value) {
+  return selectFields(value, ['id', 'slug', 'is_live', 'viewer_count', 'language', 'session_title', 'created_at', 'thumbnail'], {
+    categories: projectCategories,
+    channel: function (channel) { return selectFields(channel, ['id', 'slug'], { user: projectUser }); }
+  });
+}
+function projectChannel(value) {
+  return selectFields(value, ['id', 'slug', 'playback_url', 'followers_count', 'followersCount', 'isLive', 'is_live'], {
+    user: projectUser,
+    livestream: projectStream,
+    chatroom: function (room) { return selectFields(room, ['id'], {}); }
+  });
+}
+function projectVod(value) {
+  return selectFields(value, ['id', 'uuid', 'source', 'duration', 'created_at', 'session_title', 'is_live', 'views', 'thumbnail'], {
+    categories: projectCategories,
+    // Nested ids anchor resume progress; thumb.src is the fallback poster.
+    video: function (video) { return selectFields(video, ['id', 'uuid', 'thumb'], {}); }
+  });
+}
+function projectEnvelope(value, field, project) {
+  if (Array.isArray(value)) return mapItems(value, project);
+  if (!value || typeof value !== 'object') return value;
+  var out = {}, key;
+  // Preserve pagination metadata and unfamiliar wrappers rather than invent a
+  // different response contract when Kick adds fields around a known list.
+  for (key in value) if (Object.prototype.hasOwnProperty.call(value, key)) out[key] = value[key];
+  if (Object.prototype.hasOwnProperty.call(value, field)) out[field] = mapItems(value[field], project);
+  return out;
+}
+function compactResponse(path, body) {
+  var endpoint = path.split('?')[0], project = null;
+  if (/^\/api\/v2\/channels\/[^/]+\/videos$/.test(endpoint)) {
+    project = function (value) { return projectEnvelope(value, 'data', projectVod); };
+  } else if (/^\/api\/v[12]\/channels\/[^/]+$/.test(endpoint)) project = projectChannel;
+  else if (/^\/stream\/livestreams\/[^/]+$/.test(endpoint)) {
+    project = function (value) { return projectEnvelope(value, 'data', projectStream); };
+  } else if (endpoint === '/api/v1/subcategories') {
+    project = function (value) { return projectEnvelope(value, 'data', projectCategory); };
+  } else if (endpoint === '/api/search') {
+    project = function (value) {
+      return projectEnvelope(projectEnvelope(value, 'channels', projectChannel), 'categories', projectCategory);
+    };
+  }
+  if (!project) return body;
+  try { return JSON.stringify(project(JSON.parse(body))); } catch (e) { return body; }
+}
+
 // The app calls this over the Luna bus with a kick.com path, either a channel
 // lookup (/api/v2/channels/name) or the live directory (/stream/livestreams/...).
 service.register('fetch', function (message) {
@@ -93,7 +162,8 @@ service.register('fetch', function (message) {
   }
   kickGet(path, function (err, status, body) {
     if (err) message.respond({ ok: false, error: err });
-    else message.respond({ ok: true, status: status, body: body });
+    else message.respond({ ok: true, status: status,
+      body: message.payload.compact === true && status === 200 ? compactResponse(path, body) : body });
   });
 });
 
