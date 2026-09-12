@@ -11,7 +11,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 
 /* Player and video */
 #player { background: #000; position: relative; }
-#video { width: 1920px; height: 1080px; background: #000; }
+#video { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; background: #000; object-fit: contain; }
 /* Still frame held over the video plane until real frames arrive, so switching
    channels does not flash black. The plane is composited by the TV, not the
    browser, so a <video poster> never shows — this has to be its own layer.
@@ -184,7 +184,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(27,30,32,0.97);
   border-right: 2px solid #2f3438;
   transform: translateX(-472px);
-  transition: transform 180ms ease-out;
+  transition: transform 100ms ease-out;
 }
 #sidebar.open { transform: translateX(0); }
 #side-head {
@@ -284,7 +284,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   position: absolute; right: 18px; top: 0; height: 76px;
   padding-top: 26px; text-align: right; white-space: nowrap;
 }
-.favrow.focused .favinfo { display: none; }
+.favrow.focused .favinfo { visibility: hidden; }
 .pinmark { color: #53fc18; margin-right: 8px; }
 .pinicon { display: inline-block; pointer-events: none; vertical-align: middle; }
 .pinmark .pinicon { width: 20px; height: 20px; }
@@ -296,10 +296,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .favview { font-size: 23px; color: #efeff1; }
 /* Pin and remove buttons, shown when a row is focused or hovered. */
 .favactions {
-  display: none;
+  visibility: hidden;
   position: absolute; right: 14px; top: 0; height: 76px; padding-top: 16px;
 }
-.favrow.focused .favactions { display: block; }
+.favrow.focused .favactions { visibility: visible; }
 .favrow.addrow .favactions { display: none; }
 .actbtn {
   display: inline-block; width: 44px; height: 44px; line-height: 44px;
@@ -830,8 +830,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   background: rgba(11,14,15,0.82); border: 1px solid #2f3438;
 }
 .cbitem {
-  display: flex; align-items: center; font-size: 28px; color: #d6d7d8;
-  margin-right: 14px; padding: 8px 16px; border-radius: 10px; white-space: nowrap; cursor: pointer;
+  display: flex; align-items: center; font-size: 25px; color: #d6d7d8;
+  margin-right: 10px; padding: 8px 10px; border-radius: 10px; white-space: nowrap; cursor: pointer;
 }
 .cbitem:last-child { margin-right: 0; }
 .cbitem:hover { background: #2a2f33; color: #fff; }
@@ -1280,18 +1280,65 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Live chat options popup, opened from the gear on the Settings "Live chat" row */
 #chatoptmodal {
   position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; z-index: 78;
-  background: rgba(0,0,0,0.35);
+  background: transparent;
 }
 #chatoptbox {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 460px;
-  background: #17191b; border: 2px solid #53fc18; border-radius: 14px;
-  padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
+  position: absolute; top: 50%; left: 80px; transform: translateY(-50%); width: 540px;
+  background: #11181d; border: 1px solid #4b5961; border-radius: 22px;
+  padding: 14px 0; box-shadow: 0 12px 38px rgba(0,0,0,0.5);
 }
 #chatopt-head {
-  font-size: 26px; font-weight: 800; color: #fff;
-  padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 30px; font-weight: 700; color: #f5f8fa;
+  padding: 2px 24px 12px; margin-bottom: 6px; border-bottom: 1px solid #2a363e;
 }
-#chatopt-list { max-height: 610px; overflow: hidden; }
+#chatopt-note { margin: 10px 24px 0; padding: 12px 14px; border: 1px solid #665631; border-radius: 10px; background: #29251b; color: #e2c88e; font-size: 18px; line-height: 1.4; }
+#chatopt-list { max-height: 710px; overflow-x: hidden; overflow-y: auto; }
+#chatopt-list::-webkit-scrollbar { width: 4px; }
+#chatopt-list::-webkit-scrollbar-thumb { background: #53616a; border-radius: 2px; }
+#chatopt-list .srow {
+  margin: 4px 12px; padding: 12px 16px; border: 1px solid transparent;
+  border-radius: 12px; font-size: 24px; color: #e5ebef; box-shadow: none;
+}
+#chatopt-list .srow.focused { background: #23322c; border-color: #5d8265; }
+#chatopt-list .slabel { color: inherit; }
+#chatopt-list .spill {
+  padding: 6px 12px; font-size: 19px; font-weight: 600;
+  color: #c7d2d9; border: 0; border-radius: 8px; background: #26323a;
+}
+#chatopt-list .chat-toggle {
+  position: relative; width: 52px; height: 28px; box-sizing: border-box;
+  padding: 0; font-size: 0; border-radius: 16px; background: #43515b;
+}
+#chatopt-list .chat-toggle::after {
+  content: ''; position: absolute; top: 4px; left: 4px; width: 20px; height: 20px;
+  border-radius: 50%; background: #dae3e8;
+}
+#chatopt-list .chat-toggle.on { background: #53fc18; }
+#chatopt-list .chat-toggle.on::after { left: 28px; background: #122016; }
+.chat-colors { display: flex; }
+.chat-color {
+  display: flex; align-items: center; margin-left: 6px; padding: 7px 10px;
+  border-radius: 8px; border: 1px solid #43515b; background: #1b252c;
+  color: #c7d2d9; font: 500 19px 'Helvetica Neue', Helvetica, Arial, sans-serif; cursor: pointer;
+}
+.chat-color::before { content: ''; width: 12px; height: 12px; margin-right: 6px; border: 1px solid #84929c; border-radius: 50%; background: #000; }
+.chat-color[data-chat-color="white"]::before { background: #fff; }
+.chat-color.selected { border-color: #53fc18; color: #f5f8fa; background: #2c3b30; }
+#chatopt-list .chat-range-row { flex-wrap: wrap; }
+
+.chat-setting-slider {
+  -webkit-appearance: none; appearance: none; flex: 0 0 100%; width: 100%;
+  height: 36px; margin: 8px 0 0; padding: 0; border: 0; outline: none;
+  background-color: transparent; background-size: 100% 6px;
+  background-position: center; background-repeat: no-repeat; cursor: pointer;
+}
+.chat-setting-slider::-webkit-slider-runnable-track { height: 6px; background: transparent; border-radius: 3px; }
+.chat-setting-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 26px; height: 26px; margin-top: -10px;
+  border-radius: 50%; background: #53fc18; border: 3px solid #17191b;
+}
+
 
 /* Blocked categories popup, opened from the Settings row. */
 #blockedcatsmodal {
@@ -1355,36 +1402,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   border-right: 14px solid #17191b;
 }
 
-/* Read-only chat overlay on the right edge */
-#chat {
-  position: absolute; right: 0; top: 0; width: 452px; height: 1080px;
-  box-sizing: border-box; padding: 0 24px 30px 24px;
-  display: none; flex-direction: column; justify-content: flex-end;
-  pointer-events: none;
-}
-#chat.on { display: flex; }
-/* Chat overlay options (side / width / opacity / text size) set from Settings.
-   Backgrounds are uniform — they cover the whole column with no fading. */
-#chat.side-left { right: auto; left: 0; }
-#chat.cbg-off   { background: none; }
-#chat.cbg-light { background: rgba(0,0,0,0.34); }
-#chat.cbg-dark  { background: rgba(0,0,0,0.62); }
-#chat.cwidth-narrow { width: 360px; }
-#chat.cwidth-medium { width: 452px; }
-#chat.cwidth-wide   { width: 580px; }
-#chat.copacity-low    { opacity: 0.5; }
-#chat.copacity-medium { opacity: 0.75; }
-#chat.copacity-high   { opacity: 1; }
+/* Chat message styling; floating-window layout lives in chat-window.css. */
 .cmsg {
   font-size: 24px; line-height: 1.32; margin-top: 10px; color: #e9e9ea;
   word-wrap: break-word; text-shadow: 0 1px 3px rgba(0,0,0,0.95);
-  transition: opacity 0.8s ease-out;
 }
 #chat.csize-small  .cmsg { font-size: 20px; }
 #chat.csize-medium .cmsg { font-size: 24px; }
 #chat.csize-large  .cmsg { font-size: 30px; }
 .cmsg .ctime { color: #8a8d90; font-weight: 600; font-size: 0.82em; margin-right: 4px; }
-.cmsg.cfade { opacity: 0; }
 .cmsg .cuser { font-weight: 800; }
 .cmsg .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }
 .cmsg .cbadge {

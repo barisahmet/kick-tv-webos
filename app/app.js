@@ -267,6 +267,7 @@ function fetchFavorites(done, liveOnly) {
   runFetchFavorites(function () {
     fetchInFlight = false;
     done();
+    prepareSidebarSoon();
     var queued = fetchFollowUp;
     fetchFollowUp = null;
     if (queued && queued.length) {
@@ -660,6 +661,7 @@ function returnToIdle() {
   teardownVideo();
   state.current = null;
   state.vod = null; state.vodReturn = null;
+  applyStreamerChatPreferences();
   state.tempChannel = null;
   PB.slug = null;
   setBanner('');
@@ -674,6 +676,7 @@ function play(slug, preserveLastVod, prefetchedRaw) {
   state.vod = null; state.vodReturn = null;   // leaving any past-video playback
   setMode('player');
   state.current = slug;
+  applyStreamerChatPreferences();
   state.preserveLastVodDuringLive = !!preserveLastVod;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
   state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
@@ -1174,32 +1177,45 @@ function clipWithDots(text, font, maxPx) {
   }
   return text.slice(0, lo).replace(/[\s·]+$/, '') + dots;
 }
-// One layout read for the shared box width, then a pure-canvas pass over the rows.
-// The untruncated string lives in data-full so a re-clip never eats its own output.
+var sideTextStyle = null;
+// The sidebar has a fixed width and fonts. Measure those once, and only clip text
+// whose full value changed. Keep the original so refreshing never clips its own dots.
 function clipSidebarText() {
   var list = document.getElementById('fav-list');
-  var probe = list.querySelector('.favname');
-  if (!probe) return;
-  var w = probe.clientWidth;
-  if (w <= 0) return;
-  var groups = [['.favname', null], ['.favgame', null]];
+  var groups = ['.favname', '.favgame'];
+  if (!sideTextStyle) {
+    var probe = list.querySelector('.favname');
+    if (!probe || probe.clientWidth <= 0) return;
+    sideTextStyle = { width: probe.clientWidth, fonts: [] };
+    // Finish reading styles before writing any text.
+    for (var g = 0; g < groups.length; g++) {
+      var cs = getComputedStyle(list.querySelector(groups[g]));
+      sideTextStyle.fonts[g] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    }
+  }
   for (var gi = 0; gi < groups.length; gi++) {
-    var sel = groups[gi][0];
-    var first = list.querySelector(sel);
-    if (!first) continue;
-    var cs = getComputedStyle(first);
-    var font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
-    var els = list.querySelectorAll(sel);
+    var font = sideTextStyle.fonts[gi], w = sideTextStyle.width;
+    var els = list.querySelectorAll(groups[gi]);
     for (var i = 0; i < els.length; i++) {
       var el = els[i], full = el.getAttribute('data-full');
       if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
-      el.textContent = clipWithDots(full, font, w);
+      var key = JSON.stringify([full, font, w]);
+      if (el._sideClipKey === key) continue;
+      var clipped = clipWithDots(full, font, w);
+      if (el.textContent !== clipped) el.textContent = clipped;
+      el._sideClipKey = key;
     }
   }
 }
 function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
-  if (prevEl && prevEl !== nextEl && prevEl.parentNode === container) prevEl.className = baseOf(prevEl);
-  if (nextEl) nextEl.className = baseOf(nextEl) + (wantFocus ? ' focused' : '');
+  if (prevEl && prevEl !== nextEl && prevEl.parentNode === container) {
+    var prevClass = baseOf(prevEl);
+    if (prevEl.className !== prevClass) prevEl.className = prevClass;
+  }
+  if (nextEl) {
+    var nextClass = baseOf(nextEl) + (wantFocus ? ' focused' : '');
+    if (nextEl.className !== nextClass) nextEl.className = nextClass;
+  }
   return nextEl;
 }
 function scrollIntoViewport(container, el, pad) {
@@ -1210,13 +1226,37 @@ function scrollIntoViewport(container, el, pad) {
     container.scrollTop = top + el.offsetHeight - container.clientHeight + pad;
 }
 var sideFocusEl = null;
+var sideLayout = null;
+// Row sizes do not change on focus or metadata refresh. Read their positions in
+// one batch after membership/order changes, before the focus styles are written.
+function measureSideLayout(list) {
+  var height = list.clientHeight;
+  if (!height) { sideLayout = null; return; }
+  var origin = list.offsetTop, rows = [];
+  for (var i = 0; i < list.children.length; i++) {
+    var row = list.children[i];
+    rows.push({ top: row.offsetTop - origin, height: row.offsetHeight });
+  }
+  sideLayout = { height: height, maxScroll: Math.max(0, list.scrollHeight - height), rows: rows };
+}
 function sideBaseOf(row) { return row.getAttribute('data-base') || 'favrow'; }
 function applySideFocus() {
   var list = document.getElementById('fav-list');
   var row = list.children[state.sideFocus] || null;
+  if (!sideLayout) measureSideLayout(list);
+  var pos = sideLayout && sideLayout.rows[state.sideFocus];
+  // Read scrollTop before changing either row's style; wheel scrolling remains
+  // the source of truth without remeasuring every row on each keypress.
+  var scroll = list.scrollTop, nextScroll = scroll;
+  if (pos) {
+    if (pos.top < scroll) nextScroll = pos.top - 8;
+    else if (pos.top + pos.height > scroll + sideLayout.height)
+      nextScroll = pos.top + pos.height - sideLayout.height + 8;
+    nextScroll = Math.max(0, Math.min(sideLayout.maxScroll, nextScroll));
+  }
   sideFocusEl = swapFocus(list, sideFocusEl, row, sideBaseOf, state.playerToolFocus < 0);
-  scrollIntoViewport(list, row, 8);
-  scheduleSidePreview();
+  if (nextScroll !== scroll) list.scrollTop = nextScroll;
+  if (state.sidebarOpen) scheduleSidePreview();
 }
 /* Live thumbnail previews. A card shows the stream's current frame beside the
    focused list row — used by the sidebar and the quick-switch popup. The window
@@ -1350,6 +1390,29 @@ function scheduleSidePreview() {
   if (!sidePreviewArmed) { sidePreviewCard.cancel(); return; }
   sidePreviewCard.update();
 }
+var sideRows = Object.create(null);
+var sidePrepareTimer = null;
+function prepareSidebarSoon() {
+  if (sidePrepareTimer || !state.ready || document.hidden || state.sidebarOpen) return;
+  // Let startup/playback and the refresh callbacks finish before preparing UI.
+  sidePrepareTimer = setTimeout(function () {
+    sidePrepareTimer = null;
+    if (!document.hidden && !state.sidebarOpen) renderSidebar();
+  }, 500);
+}
+function setSideText(el, full) {
+  full = String(full == null ? '' : full);
+  if (el.getAttribute('data-full') === full) return false;
+  el.setAttribute('data-full', full);
+  el.textContent = full;
+  el._sideClipKey = null;
+  return true;
+}
+window.addEventListener('resize', function () {
+  sideTextStyle = null;
+  sideLayout = null;
+  if (state.ready) renderSidebar();
+});
 function renderSidebar(focusKey) {
   var prevKey = (typeof focusKey !== 'undefined' && focusKey !== null)
     ? focusKey : focusKeyOf(state.sideItems[state.sideFocus]);
@@ -1378,96 +1441,106 @@ function renderSidebar(focusKey) {
   state.sideItems.push({ type: 'add' });
 
   var cc = document.getElementById('side-count');
-  if (state.netDown) { cc.textContent = 'Connection lost'; cc.className = 'neterr'; }
-  else {
-    cc.className = '';
-    cc.textContent = state.order.length ? (liveCount() + ' / ' + state.order.length + ' live') : '';
-  }
+  var countText = state.netDown ? 'Connection lost' :
+    (state.order.length ? (liveCount() + ' / ' + state.order.length + ' live') : '');
+  var countClass = state.netDown ? 'neterr' : '';
+  if (cc.textContent !== countText) cc.textContent = countText;
+  if (cc.className !== countClass) cc.className = countClass;
 
   var list = document.getElementById('fav-list');
-  list.innerHTML = '';
-  state.sideItems.forEach(function (item) {
+  var nextRows = Object.create(null), structureChanged = !sideLayout, textChanged = false;
+  state.sideItems.forEach(function (item, index) {
+    var key = item.type + ':' + (item.slug || '');
+    var row = sideRows[key];
     if (item.type === 'offline-group') {
-      var grow = document.createElement('div');
-      grow.setAttribute('data-base', 'favrow offlinegroup');
-      grow.setAttribute('data-type', 'offline-group');
-      grow.className = 'favrow offlinegroup';
-      var chev = document.createElement('span');
-      chev.className = 'offline-chevron';
-      chev.innerHTML = state.offlineExpanded
-        ? '<svg viewBox="0 0 24 24"><path d="M4 8l8 8 8-8"/></svg>'
-        : '<svg viewBox="0 0 24 24"><path d="M8 4l8 8-8 8"/></svg>';
-      var glabel = document.createElement('span');
-      glabel.className = 'offline-label';
-      glabel.textContent = 'Offline channels';
-      var count = document.createElement('span');
-      count.className = 'offline-count';
-      count.textContent = String(item.count);
-      grow.appendChild(chev);
-      grow.appendChild(glabel);
-      grow.appendChild(count);
-      list.appendChild(grow);
-      return;
-    }
-    if (item.type === 'add') {
-      var arow = document.createElement('div');
-      arow.setAttribute('data-base', 'favrow addrow');
-      arow.setAttribute('data-type', 'add');
-      arow.className = 'favrow addrow';
-      arow.innerHTML = '<span class="addplus">+</span><span class="addtext">Add channel</span>';
-      list.appendChild(arow);
-      return;
-    }
-    var isTemp = item.type === 'temp';
-    var slug = item.slug, c = state.channels[slug], pinned = !isTemp && isPinned(slug);
-    // A blocked row keeps all its live information and is merely dimmed.
-    var blocked = isChannelBlocked(c);
-    var base = 'favrow' + (isTemp ? ' temp' : '') + (c.live ? '' : ' offline') +
-               (blocked ? ' blocked' : '') +
-               (slug === state.current ? ' current' : '') + (pinned ? ' pinned' : '');
-    var row = document.createElement('div');
-    row.setAttribute('data-base', base);
-    row.setAttribute('data-slug', slug);
-    row.className = base;
-
-    var av = document.createElement('div');
-    av.className = 'favav' + (c.live ? '' : ' off');
-    if (c.avatar) av.style.backgroundImage = 'url(' + c.avatar + ')';
-    else av.textContent = (c.name || slug).charAt(0).toUpperCase();
-    row.appendChild(av);
-
-    var mid = document.createElement('div');
-    mid.className = 'favmid';
-    mid.innerHTML = '<div class="favname"></div><div class="favgame"></div>';
-    mid.children[0].textContent = c.name;
-    mid.children[1].textContent = c.live
-      ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
-      : offlineLabel(slug);
-    row.appendChild(mid);
-
-    var info = document.createElement('div');
-    info.className = 'favinfo';
-    var infoHtml = '';
-    if (pinned) infoHtml += '<span class="pinmark">' + pinIcon() + '</span>';
-    if (c.live) infoHtml += '<span class="livedot"></span><span class="favview">' + fmtViewers(c.viewers) + '</span>';
-    info.innerHTML = infoHtml;
-    row.appendChild(info);
-
-    var act = document.createElement('div');
-    act.className = 'favactions';
-    if (isTemp) {
-      act.innerHTML = '<span class="actbtn addbtn" data-act="addfav" title="Add to your channels">+</span>';
+      if (!row) {
+        row = document.createElement('div');
+        row.setAttribute('data-base', 'favrow offlinegroup');
+        row.setAttribute('data-type', 'offline-group');
+        row.className = 'favrow offlinegroup';
+        row.innerHTML = '<span class="offline-chevron"></span><span class="offline-label">Offline channels</span><span class="offline-count"></span>';
+      }
+      if (row._sideExpanded !== state.offlineExpanded) {
+        row.children[0].innerHTML = state.offlineExpanded
+          ? '<svg viewBox="0 0 24 24"><path d="M4 8l8 8 8-8"/></svg>'
+          : '<svg viewBox="0 0 24 24"><path d="M8 4l8 8-8 8"/></svg>';
+        row._sideExpanded = state.offlineExpanded;
+      }
+      if (row.children[2].textContent !== String(item.count)) row.children[2].textContent = String(item.count);
+    } else if (item.type === 'add') {
+      if (!row) {
+        row = document.createElement('div');
+        row.setAttribute('data-base', 'favrow addrow');
+        row.setAttribute('data-type', 'add');
+        row.className = 'favrow addrow';
+        row.innerHTML = '<span class="addplus">+</span><span class="addtext">Add channel</span>';
+      }
     } else {
-      act.innerHTML =
-        '<span class="actbtn pinbtn' + (pinned ? ' on' : '') + '" data-act="pin">' + pinIcon() + '</span>' +
-        '<span class="actbtn rmbtn" data-act="remove">✕</span>';
+      var isTemp = item.type === 'temp';
+      var slug = item.slug, c = state.channels[slug], pinned = !isTemp && isPinned(slug);
+      // A blocked row keeps all its live information and is merely dimmed.
+      var blocked = isChannelBlocked(c);
+      var base = 'favrow' + (isTemp ? ' temp' : '') + (c.live ? '' : ' offline') +
+                 (blocked ? ' blocked' : '') +
+                 (slug === state.current ? ' current' : '') + (pinned ? ' pinned' : '');
+      if (!row) {
+        row = document.createElement('div');
+        row.setAttribute('data-slug', slug);
+        row.innerHTML = '<div class="favav"></div><div class="favmid"><div class="favname"></div><div class="favgame"></div></div><div class="favinfo"></div><div class="favactions"></div>';
+      }
+      if (row.getAttribute('data-base') !== base) {
+        row.setAttribute('data-base', base);
+        row.className = base + (row === sideFocusEl && state.playerToolFocus < 0 ? ' focused' : '');
+      }
+
+      var av = row.children[0], avClass = 'favav' + (c.live ? '' : ' off');
+      if (av.className !== avClass) av.className = avClass;
+      var avatar = c.avatar || '';
+      if (row._sideAvatar !== avatar) {
+        av.style.backgroundImage = avatar ? 'url(' + avatar + ')' : '';
+        row._sideAvatar = avatar;
+      }
+      var initial = avatar ? '' : (c.name || slug).charAt(0).toUpperCase();
+      if (av.textContent !== initial) av.textContent = initial;
+
+      var mid = row.children[1];
+      if (setSideText(mid.children[0], c.name)) textChanged = true;
+      var subtitle = c.live
+        ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
+        : offlineLabel(slug);
+      if (setSideText(mid.children[1], subtitle)) textChanged = true;
+
+      var info = row.children[2];
+      var infoHtml = '';
+      if (pinned) infoHtml += '<span class="pinmark">' + pinIcon() + '</span>';
+      if (c.live) infoHtml += '<span class="livedot"></span><span class="favview">' + fmtViewers(c.viewers) + '</span>';
+      if (row._sideInfo !== infoHtml) { info.innerHTML = infoHtml; row._sideInfo = infoHtml; }
+
+      var act = row.children[3], actHtml;
+      if (isTemp) {
+        actHtml = '<span class="actbtn addbtn" data-act="addfav" title="Add to your channels">+</span>';
+      } else {
+        actHtml =
+          '<span class="actbtn pinbtn' + (pinned ? ' on' : '') + '" data-act="pin">' + pinIcon() + '</span>' +
+          '<span class="actbtn rmbtn" data-act="remove">✕</span>';
+      }
+      if (row._sideActions !== actHtml) { act.innerHTML = actHtml; row._sideActions = actHtml; }
     }
-    row.appendChild(act);
 
-    list.appendChild(row);
+    nextRows[key] = row;
+    if (list.children[index] !== row) {
+      list.insertBefore(row, list.children[index] || null);
+      structureChanged = true;
+    }
   });
+  while (list.children.length > state.sideItems.length) {
+    list.removeChild(list.lastChild);
+    structureChanged = true;
+  }
+  sideRows = nextRows;
 
-  clipSidebarText();          // hand-rolled ".." instead of the CSS "…"
+  if (textChanged || !sideTextStyle) clipSidebarText();
+  if (structureChanged) measureSideLayout(list);
 
   var idx = -1;
   for (var i = 0; i < state.sideItems.length; i++) {
@@ -1485,10 +1558,12 @@ function renderSidebar(focusKey) {
   // Show the plus in the header only when the list is long enough to scroll,
   // because then the Add row down at the bottom is out of sight.
   var addBtn = document.getElementById('side-add');
-  if (addBtn) addBtn.className = (list.scrollHeight > list.clientHeight + 2) ? '' : 'hidden';
+  var addClass = sideLayout && sideLayout.maxScroll > 2 ? '' : 'hidden';
+  if (addBtn && addBtn.className !== addClass) addBtn.className = addClass;
   // Nothing to refresh when there are no channels, so hide that button.
   var refBtn = document.getElementById('side-refresh');
-  if (refBtn) { if (state.order.length) refBtn.classList.remove('hidden'); else refBtn.classList.add('hidden'); }
+  if (refBtn && refBtn.classList.contains('hidden') !== !state.order.length)
+    refBtn.classList.toggle('hidden', !state.order.length);
 }
 function activateSide() {
   var item = state.sideItems[state.sideFocus];
@@ -3355,6 +3430,7 @@ function playVod(v, queue, queueIndex, slug) {
                 key: progressKey, resumeAt: resumeAt, resumeApplied: false,
                 knownDuration: knownDuration,
                 progressReady: false, completed: false, ending: false, retries: 0 };
+  applyStreamerChatPreferences();
   saveLastVod(vodSlug, v, state.vod.name);
   PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = '';
   setBanner('');
@@ -3489,7 +3565,7 @@ function exitVod() {
   state.vodReturn = null;
   setBanner('');
   if (back && state.channels[back] && state.channels[back].live) play(back);
-  else { state.current = null; updateGear(); showNothing(); }
+  else { state.current = null; applyStreamerChatPreferences(); updateGear(); showNothing(); }
 }
 /* Rapid seek presses accumulate (+30, +60, +90...) and apply as one jump after
    a short pause, YouTube-style. Nothing actually seeks until the timeout, so
@@ -3957,7 +4033,7 @@ function placeDiagnostics() {
   var vodbar = document.getElementById('vodbar');
   var vodControls = state.vod && vodbar.className.indexOf('hidden') === -1;
   var chatBox = document.getElementById('chat');
-  var chatOnLeft = settings.chatSide === 'left' && chatBox.classList.contains('on');
+  var chatOnLeft = ChatWindow.side() === 'left' && chatBox.classList.contains('on');
   el.style.left = chatOnLeft ? 'auto' : (state.sidebarOpen ? '500px' : '30px');
   el.style.right = chatOnLeft ? '30px' : 'auto';
   el.style.bottom = vodControls ? '380px' : (state.sidebarOpen ? '150px' : '30px');   // above the VOD title and timeline
@@ -4071,19 +4147,98 @@ function firstLivePinned(slug) {
   return null;
 }
 
-/* Settings menu (opened by the gear, or the Yellow button, while the list is open) */
+/* Settings menu (opened by the gear or the Red button) */
 var settings = { open: false, focus: 0, items: [],
                  chat: false, lowlatency: false, autoadvance: false,
                  hideOffline: false, diagnostics: false, hideBots: true,
                  dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
-                 chatSide: 'right', chatSize: 'medium', chatWidth: 'medium', chatOpacity: 'high',
-                 chatBackground: 'dark', chatFade: 40000, chatBots: 'show',
-                 chatEmotes: 'images', chatTimestamps: false,
+                 chatSize: 'medium', chatOpacity: 'high', chatSeparate: false,
+                 chatBackground: 'black', chatTransparency: 84, chatBots: 'show',
+                 chatEmotes: 'images', chatTimestamps: false, chatDelay: 0,
                  alerts: 'all', notifySec: 10, saverMin: 1 };
+// Chat choices belong to the watched streamer. The previous shared choices
+// become a fixed starting point for streamers without a saved profile.
+var CHAT_PREF_KEY = 'kicktv.chatprefs';
+var CHAT_PREF_FIELDS = ['chat', 'chatSeparate', 'chatSize', 'chatOpacity', 'chatBackground',
+  'chatTransparency', 'chatBots', 'chatEmotes', 'chatTimestamps', 'chatDelay'];
+var chatPreferences = { defaults: null, profiles: Object.create(null), order: [], active: '' };
+function chatStreamerSlug() { return state.current || (state.vod && state.vod.slug) || ''; }
+function chatOptionsFrom(source, fallback) {
+  var s = {}, input = source && typeof source === 'object' ? source : {};
+  CHAT_PREF_FIELDS.forEach(function (key) {
+    s[key] = Object.prototype.hasOwnProperty.call(input, key) ? input[key] : (fallback && fallback[key]);
+  });
+  var transparency = parseInt(s.chatTransparency, 10);
+  var oldTransparency = { off: 100, light: 84, dark: 68, black: 0, white: 0 };
+  var delay = parseInt(s.chatDelay, 10);
+  return {
+    chat: s.chat === true, chatSeparate: s.chatSeparate === true,
+    chatSize: pickEnum(s.chatSize, ['small', 'medium', 'large'], 'medium'),
+    chatOpacity: pickEnum(s.chatOpacity, ['low', 'medium', 'high'], 'high'),
+    chatBackground: s.chatBackground === 'white' ? 'white' : 'black',
+    chatTransparency: transparency >= 0 && transparency <= 100 ? transparency :
+      (Object.prototype.hasOwnProperty.call(oldTransparency, s.chatBackground) ? oldTransparency[s.chatBackground] : 84),
+    chatBots: pickEnum(s.chatBots, ['show', 'hide'], 'show'),
+    chatEmotes: pickEnum(s.chatEmotes, ['images', 'text'], 'images'),
+    chatTimestamps: s.chatTimestamps === true,
+    chatDelay: delay >= 0 && delay <= 60 ? delay : 0
+  };
+}
+function writeChatPreferences() {
+  try { localStorage.setItem(CHAT_PREF_KEY, JSON.stringify({ version: 1, defaults: chatPreferences.defaults,
+    profiles: chatPreferences.profiles, order: chatPreferences.order })); } catch (e) {}
+}
+function useChatOptions(options) {
+  CHAT_PREF_FIELDS.forEach(function (key) { settings[key] = options[key]; });
+}
+function loadChatPreferences(legacy) {
+  var stored = null;
+  try { stored = JSON.parse(localStorage.getItem(CHAT_PREF_KEY)); } catch (e) {}
+  var valid = stored && stored.version === 1 && stored.defaults && stored.profiles;
+  chatPreferences.defaults = chatOptionsFrom(valid ? stored.defaults : legacy);
+  chatPreferences.defaults.chat = false; // New streamers always start with chat closed.
+  chatPreferences.profiles = Object.create(null); chatPreferences.order = [];
+  if (valid) {
+    (Array.isArray(stored.order) ? stored.order : Object.keys(stored.profiles)).slice(-100).forEach(function (slug) {
+      if (typeof slug !== 'string' || !slug || !Object.prototype.hasOwnProperty.call(stored.profiles, slug) ||
+          !stored.profiles[slug] || typeof stored.profiles[slug] !== 'object' || chatPreferences.order.indexOf(slug) !== -1) return;
+      chatPreferences.profiles[slug] = chatOptionsFrom(stored.profiles[slug], chatPreferences.defaults);
+      chatPreferences.order.push(slug);
+    });
+  }
+  chatPreferences.active = chatStreamerSlug();
+  useChatOptions(chatPreferences.profiles[chatPreferences.active] || chatPreferences.defaults);
+  if (!valid || stored.defaults.chat !== false) writeChatPreferences();
+}
+function rememberChatPreferences() {
+  var slug = chatPreferences.active;
+  if (!slug || !chatPreferences.defaults) return;
+  chatPreferences.profiles[slug] = chatOptionsFrom(settings);
+  var idx = chatPreferences.order.indexOf(slug);
+  if (idx !== -1) chatPreferences.order.splice(idx, 1);
+  chatPreferences.order.push(slug);
+  while (chatPreferences.order.length > 100) delete chatPreferences.profiles[chatPreferences.order.shift()];
+  writeChatPreferences();
+}
+function selectChatPreferences() {
+  var slug = chatStreamerSlug();
+  if (slug === chatPreferences.active) return false;
+  rememberChatPreferences();             // also keep a slider preview if the channel changes mid-drag
+  chatPreferences.active = slug;
+  useChatOptions(chatPreferences.profiles[slug] || chatPreferences.defaults);
+  return true;
+}
+function applyStreamerChatPreferences() {
+  if (!selectChatPreferences()) return;
+  disconnectChat();                      // discard the previous room's delayed messages and reconnect timer
+  applyChatStyle();
+  if (chatopt.open) renderChatOpt();
+  if (settings.open) renderSettings();
+}
 var SETTINGS_IDLE_MS = 30000;
 var settingsIdleTimer = null;
 function touchSettings() {
-  if (!settings.open && !(qualityopt && qualityopt.open)) return;
+  if (!settings.open && !(qualityopt && qualityopt.open) && !(chatopt && chatopt.open)) return;
   clearTimeout(settingsIdleTimer);
   settingsIdleTimer = setTimeout(closeSettingsStack, SETTINGS_IDLE_MS);
 }
@@ -4104,7 +4259,6 @@ function pickEnum(v, allowed, def) { for (var i = 0; i < allowed.length; i++) if
 function loadSettings() {
   var s = {};
   try { s = JSON.parse(localStorage.getItem('kicktv.settings')) || {}; } catch (e) {}
-  settings.chat = !!s.chat;
   settings.lowlatency = !!s.lowlatency;
   settings.autoadvance = !!s.autoadvance;
   settings.hideOffline = !!s.hideOffline;
@@ -4115,17 +4269,7 @@ function loadSettings() {
   var st = parseFloat(s.dimStrength);
   settings.dimStrength = (st >= 0.1 && st <= 0.98) ? st : 0.8;
   settings.dimScope = (s.dimScope === 'all') ? 'all' : 'video';
-  // Chat overlay look & filters
-  settings.chatSide = pickEnum(s.chatSide, ['right', 'left'], 'right');
-  settings.chatSize = pickEnum(s.chatSize, ['small', 'medium', 'large'], 'medium');
-  settings.chatWidth = pickEnum(s.chatWidth, ['narrow', 'medium', 'wide'], 'medium');
-  settings.chatOpacity = pickEnum(s.chatOpacity, ['low', 'medium', 'high'], 'high');
-  settings.chatBackground = pickEnum(s.chatBackground, ['off', 'light', 'dark'], 'dark');
-  var cf = parseInt(s.chatFade, 10);
-  settings.chatFade = ([0, 10000, 20000, 40000].indexOf(cf) !== -1) ? cf : 40000;
-  settings.chatBots = pickEnum(s.chatBots, ['show', 'hide'], 'show');
-  settings.chatEmotes = pickEnum(s.chatEmotes, ['images', 'text'], 'images');
-  settings.chatTimestamps = !!s.chatTimestamps;
+  loadChatPreferences(s);
   // Alerts + burn-in guard
   settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
   var nsec = parseInt(s.notifySec, 10);
@@ -4134,17 +4278,14 @@ function loadSettings() {
   settings.saverMin = ([0, 1, 3, 5, 10].indexOf(sm) !== -1) ? sm : 1;
 }
 function saveSettings() {
+  if (chatPreferences.active === chatStreamerSlug()) rememberChatPreferences();
   try {
     localStorage.setItem('kicktv.settings', JSON.stringify({
-      chat: settings.chat, lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
+      lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
       hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
       hideBots: settings.hideBots,
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
       dimStrength: settings.dimStrength, dimScope: settings.dimScope,
-      chatSide: settings.chatSide, chatSize: settings.chatSize, chatWidth: settings.chatWidth,
-      chatOpacity: settings.chatOpacity, chatBackground: settings.chatBackground,
-      chatFade: settings.chatFade, chatBots: settings.chatBots,
-      chatEmotes: settings.chatEmotes, chatTimestamps: settings.chatTimestamps,
       alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin
     }));
   } catch (e) {}
@@ -4198,6 +4339,7 @@ function firstFocusableSetting() {
   return 0;
 }
 function openSettings() {
+  applyStreamerChatPreferences();
   if (!state.ready || settings.open) return;
   hideQualityHint();
   settings.open = true;
@@ -4301,6 +4443,8 @@ function settingsActivate() {
     toast('Dim ' + (settings.dim ? 'on' : 'off'));
     renderSettings();
   } else if (it.kind === 'chatopt') {
+    if (!chatStreamerSlug()) { toast('Choose a streamer first'); return; }
+    applyStreamerChatPreferences();
     settings.chat = !settings.chat;            // the row itself just toggles chat on/off
     saveSettings();
     applyToggle('chat');
@@ -4338,7 +4482,7 @@ function cycleChoice(it, dir) {
 /* A short description of the focused setting, shown in the detached context
    card used by the original Settings layout. */
 var SETTINGS_DESC = {
-  chat: 'Show read-only Kick chat. Press OK or use the gear for layout, background and message options.',
+  chat: 'Green toggles live chat. Drag anywhere to move, use any corner to resize, or release at an edge to dock. Each streamer remembers all chat settings and its layout.',
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
   autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
   hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
@@ -4367,7 +4511,7 @@ function descForSettingItem(it) {
 function showSettingDesc(id, text, target) {
   var el = document.getElementById(id);
   if (!el) return;
-  if (!text || !target || !settings.open || updateopen || (qualityopt && qualityopt.open)) {
+  if (!text || !target || (!settings.open && !chatopt.open) || updateopen || (qualityopt && qualityopt.open)) {
     el.className = 'hidden';
     return;
   }
@@ -4718,50 +4862,94 @@ function dimQuickKey() {
   if (settings.open) renderSettings();     // keep the Dim row's On/Off in sync if it's showing
 }
 
-/* Live chat options popup, opened from the gear on the Settings "Live chat" row.
-   Each row toggles (Chat, Timestamps) or cycles through a set of values. */
+/* Live chat options popup, opened from the chat toolbar or Settings. */
 var chatopt = { open: false, focus: 0 };
 var CHATOPT_ROWS = [
-  { key: 'chat',           label: 'Chat',         bool: true, desc: 'Turn the read-only chat overlay on or off.' },
-  { key: 'chatSide',       label: 'Side',         vals: [['right', 'Right'], ['left', 'Left']], desc: 'Which side of the screen chat sits on.' },
+  { key: 'chat',           label: 'Chat',         bool: true, desc: 'Green toggles live chat. The latest 160 messages stay until replaced by newer ones or you leave the channel.' },
+  { key: 'chatSeparate',   label: 'Separate chat', bool: true, desc: 'Fit the stream beside chat when docked left or right. Drag the inside edge to adjust the width. Floating chat stays over the stream.' },
+  { key: 'chatBackground', label: 'Background color', vals: [['black', 'Black'], ['white', 'White']], desc: 'Choose black or white, then adjust its transparency below. Text adapts to a light or dark background.' },
+  { key: 'chatTransparency', label: 'Background transparency', range: { id: 'chat-transparency', max: 100, remoteStep: 5 }, desc: 'Drag the slider for any value from 0% (solid) to 100% (clear). Left and Right adjust by 5%. The message text keeps its own opacity.' },
   { key: 'chatSize',       label: 'Text size',    vals: [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], desc: 'Font size of chat messages.' },
-  { key: 'chatWidth',      label: 'Width',        vals: [['narrow', 'Narrow'], ['medium', 'Medium'], ['wide', 'Wide']], desc: 'How wide the chat column is.' },
-  { key: 'chatOpacity',    label: 'Opacity',      vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'How see-through the chat overlay is.' },
-  { key: 'chatBackground', label: 'Background',   vals: [['off', 'Off'], ['light', 'Light'], ['dark', 'Dark']], desc: 'Choose how much dark background sits behind chat messages.' },
-  { key: 'chatFade',       label: 'Fade after',   vals: [[10000, '10s'], [20000, '20s'], [40000, '40s'], [0, 'Never']], desc: 'How long a message stays before it fades out. Never keeps it until it scrolls off.' },
+  { key: 'chatOpacity',    label: 'Text opacity', vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'Adjust message transparency. Controls stay fully visible when you point at chat.' },
+  { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', max: 60, remoteStep: 1 }, desc: 'Delay new messages from Off to 60 seconds to match the video and avoid spoilers. Left and Right adjust by 1 second. Changing this adjusts messages still waiting to appear.' },
   { key: 'chatBots',       label: 'Bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
   { key: 'chatEmotes',     label: 'Emotes',       vals: [['images', 'Images'], ['text', 'Text']], desc: 'Show emotes as their real images, or just their names as text.' },
-  { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' }
+  { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' },
+  { key: 'chatReset',      label: 'Reset this layout', action: true, desc: 'Restore the default size and position for this channel. Other channels and message options stay the same.' }
 ];
 function chatoptValLabel(row) {
+  if (row.action) return 'Reset';
+  if (row.key === 'chatDelay') return settings.chatDelay ? settings.chatDelay + 's' : 'Off';
+  if (row.range) return settings[row.key] + '%';
   if (row.bool) return settings[row.key] ? 'On' : 'Off';
   for (var i = 0; i < row.vals.length; i++) if (row.vals[i][0] === settings[row.key]) return row.vals[i][1];
   return '';
 }
 function openChatOpt() {
+  if (!chatStreamerSlug()) { toast('Choose a streamer first'); return; }
+  applyStreamerChatPreferences();
   chatopt.open = true; chatopt.focus = 0;
+  document.getElementById('chatoptbox').style.left = ChatWindow.side() === 'right' ? '80px' : '1300px';
   document.getElementById('chatoptmodal').className = '';
   renderChatOpt();
   touchSettings();
 }
 function closeChatOpt() {
+  saveSettings();
   chatopt.open = false;
   document.getElementById('chatoptmodal').className = 'hidden';
   if (settings.open) renderSettings();     // refresh the Live chat On/Off pill behind it
+  else {
+    clearTimeout(settingsIdleTimer); settingsIdleTimer = null;
+    document.getElementById('settings-desc').className = 'hidden';
+  }
 }
 function renderChatOpt() {
+  var slug = chatStreamerSlug(), channel = state.channels[slug];
+  var name = channel && channel.name || (state.vod && state.vod.slug === slug && state.vod.name) || slug;
+  document.getElementById('chatopt-note').textContent = 'These settings apply only to ' + name + '.';
   var list = document.getElementById('chatopt-list');
   list.innerHTML = '';
   CHATOPT_ROWS.forEach(function (row, i) {
     var el = document.createElement('div');
-    el.className = 'srow' + (i === chatopt.focus ? ' focused' : '');
+    el.className = 'srow' + (row.range ? ' chat-range-row' : '') + (i === chatopt.focus ? ' focused' : '');
     el.setAttribute('data-idx', i);
     var on = !!(row.bool && settings[row.key]);
     var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = row.label;
-    var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = chatoptValLabel(row);
-    el.appendChild(lab); el.appendChild(pill);
+    var pill = document.createElement('span');
+    pill.className = 'spill' + (row.bool ? ' chat-toggle' : '') + (on ? ' on' : '');
+    pill.textContent = chatoptValLabel(row);
+    el.appendChild(lab);
+    if (row.key === 'chatBackground') {
+      var colors = document.createElement('div'); colors.className = 'chat-colors';
+      ['black', 'white'].forEach(function (color) {
+        var choice = document.createElement('button'); choice.type = 'button'; choice.tabIndex = -1;
+        choice.className = 'chat-color' + (settings.chatBackground === color ? ' selected' : '');
+        choice.setAttribute('data-chat-color', color);
+        choice.setAttribute('aria-pressed', String(settings.chatBackground === color));
+        choice.textContent = color === 'black' ? 'Black' : 'White';
+        colors.appendChild(choice);
+      });
+      el.appendChild(colors);
+    } else el.appendChild(pill);
+    if (row.range) {
+      var slider = document.createElement('input');
+      slider.id = row.range.id; slider.type = 'range'; slider.className = 'chat-setting-slider';
+      slider.min = '0'; slider.max = String(row.range.max); slider.step = '1';
+      slider.value = settings[row.key]; slider.tabIndex = -1;
+      slider.setAttribute('aria-label', row.label);
+      slider.addEventListener('input', function () { setChatRange(row, this.value, false); });
+      slider.addEventListener('change', function () { setChatRange(row, this.value, true); });
+      el.appendChild(slider);
+    }
     list.appendChild(el);
   });
+  CHATOPT_ROWS.forEach(function (row) { if (row.range) paintChatRange(row); });
+  applyChatOptFocus();
+}
+function applyChatOptFocus() {
+  var list = document.getElementById('chatopt-list');
+  for (var i = 0; i < list.children.length; i++) list.children[i].classList.toggle('focused', i === chatopt.focus);
   var f = list.children[chatopt.focus];
   if (f) {
     var top = f.offsetTop - list.offsetTop;
@@ -4770,10 +4958,30 @@ function renderChatOpt() {
   }
   showSettingDesc('settings-desc', (CHATOPT_ROWS[chatopt.focus] || {}).desc || '', f);
 }
-function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= CHATOPT_ROWS.length) return; chatopt.focus = n; renderChatOpt(); }
+function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= CHATOPT_ROWS.length) return; chatopt.focus = n; applyChatOptFocus(); }
+function paintChatRange(row) {
+  var slider = document.getElementById(row.range.id);
+  if (!slider) return;
+  var value = settings[row.key], percent = value / row.range.max * 100;
+  slider.value = value;
+  slider.style.backgroundImage = 'linear-gradient(to right, #53fc18 ' + percent + '%, #4a5156 ' + percent + '%)';
+  slider.setAttribute('aria-valuetext', row.key === 'chatDelay' ?
+    (value ? value + (value === 1 ? ' second' : ' seconds') : 'Off') : value + '% transparent');
+  slider.parentNode.querySelector('.spill').textContent = chatoptValLabel(row);
+}
+function setChatRange(row, value, persist) {
+  settings[row.key] = Math.max(0, Math.min(row.range.max, Math.round(Number(value) || 0)));
+  paintChatRange(row);
+  if (row.key === 'chatDelay') rescheduleChatDelay();
+  else applyChatStyle();
+  touchSettings();
+  if (persist) saveSettings();
+}
 function chatoptActivate(dir) {
   dir = dir || 1;
   var row = CHATOPT_ROWS[chatopt.focus];
+  if (row.action) { ChatWindow.reset(); renderChatOpt(); return; }
+  if (row.range) { setChatRange(row, settings[row.key] + dir * row.range.remoteStep, true); return; }
   if (row.bool) settings[row.key] = !settings[row.key];
   else {
     var idx = 0, n = row.vals.length;
@@ -4782,7 +4990,7 @@ function chatoptActivate(dir) {
   }
   saveSettings();
   if (row.key === 'chat') syncChat();        // connect/disconnect the chat socket
-  applyChatStyle();                          // side/size/width/opacity take effect immediately
+  applyChatStyle();                          // appearance and video layout update immediately
   renderChatOpt();
 }
 
@@ -5019,25 +5227,81 @@ function toggleVodPlay() {
    Sending would need an account, which this app deliberately does not do. */
 var CHAT_KEY = '32cbd69e4b950bf97679';   // Kick's public Pusher app key (us2)
 var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=js&version=8.4.0&flash=false';
-var CHAT_MAX = 80;                        // keep at most this many messages on screen
+var CHAT_MAX = 160;                       // bounded scrollback, including off-screen messages
+var CHAT_DELAY_MAX = 1000;
+var chatPending = [], chatDelayTimer = null;
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null };
+// One timer for the ordered delay queue. Channel changes and closing chat discard
+// pending messages, so nothing from the previous room can appear after switching.
+function scheduleChatDelay() {
+  if (chatDelayTimer !== null || !chatPending.length) return;
+  var wait = Math.max(0, chatPending[0].at + settings.chatDelay * 1000 - Date.now());
+  chatDelayTimer = setTimeout(drainChatDelay, wait);
+}
+function drainChatDelay() {
+  if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
+  chatDelayTimer = null;
+  var now = Date.now(), count = 0;
+  while (chatPending.length && chatPending[0].at + settings.chatDelay * 1000 <= now && count < 40) {
+    var item = chatPending.shift(); count++;
+    if (chat.want && settings.chat && chat.room === item.room && currentRoomId() === item.room)
+      addChatMessage(item.data, item.at);
+  }
+  scheduleChatDelay();
+}
+function rescheduleChatDelay() {
+  if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
+  chatDelayTimer = null;
+  scheduleChatDelay();
+}
+function queueChatMessage(data) {
+  if (!data || !data.sender || !chat.want || !settings.chat) return;
+  chatPending.push({ data: data, at: Date.now(), room: chat.room });
+  if (chatPending.length > CHAT_DELAY_MAX) chatPending.shift();
+  if (!settings.chatDelay && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
+  else scheduleChatDelay();
+}
+function clearChatDelay() {
+  if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
+  chatDelayTimer = null; chatPending = [];
+}
 function chatEl() { return document.getElementById('chat'); }
-// The overlay's look (side/size/width/opacity) is carried as classes so the 'on'
-// visibility flag can be toggled without losing them.
+function chatMessagesEl() { return document.getElementById('chat-messages'); }
+// Window geometry is independent from message style and survives reconnects.
+function chatLightBackground() { return settings.chatBackground === 'white' && settings.chatTransparency <= 50; }
 function chatClassBase() {
-  var cls = ['csize-' + settings.chatSize, 'cwidth-' + settings.chatWidth,
+  var cls = ['csize-' + settings.chatSize,
              'copacity-' + settings.chatOpacity, 'cbg-' + settings.chatBackground];
-  if (settings.chatSide === 'left') cls.push('side-left');
+  if (chatLightBackground()) cls.push('ctheme-light');
   return cls.join(' ');
 }
-function showChatOverlay() { chatEl().className = chatClassBase() + ' on'; }
-function hideChatOverlay() { chatEl().className = chatClassBase(); }
+function showChatOverlay() { chatEl().classList.add('on'); applyChatStyle(); }
+function hideChatOverlay() { chatEl().className = chatClassBase(); ChatWindow.hide(); }
 function applyChatStyle() {
   var el = chatEl();
-  var on = el.classList.contains('on');
+  var on = el.classList.contains('on'), wasLight = el.classList.contains('ctheme-light');
   el.className = chatClassBase() + (on ? ' on' : '');
+  var rgb = settings.chatBackground === 'white' ? '255,255,255' : '0,0,0';
+  el.style.backgroundColor = 'rgba(' + rgb + ',' + (100 - settings.chatTransparency) / 100 + ')';
+  ChatWindow.show();
+  if (wasLight !== chatLightBackground()) {
+    var names = chatMessagesEl().querySelectorAll('.cuser');
+    for (var i = 0; i < names.length; i++) names[i].style.color = chatNameColor(names[i].getAttribute('data-color'), chatLightBackground());
+  }
 }
-function clearChat() { chatEl().innerHTML = ''; }
+function clearChat() { chatMessagesEl().innerHTML = ''; ChatWindow.clear(); }
+function toggleChat() {
+  applyStreamerChatPreferences();
+  if (chatEl().classList.contains('on')) settings.chat = false;
+  else {
+    if (!state.current || state.vod) { toast('Chat is available on live streams'); return; }
+    if (!currentRoomId()) { toast('Chat is unavailable for this channel'); return; }
+    settings.chat = true;
+  }
+  saveSettings();
+  syncChat();
+  if (state.sidebarOpen) resetIdle();
+}
 // Bots and !commands are noise on a TV; optionally filter them out.
 var CHAT_BOTS = { botrix: 1, nightbot: 1, streamelements: 1, streamlabs: 1, fossabot: 1,
                   wizebot: 1, moobot: 1, kickbot: 1, ohbot: 1 };
@@ -5052,6 +5316,7 @@ function currentRoomId() {
 }
 // Bring chat into line with the current setting and channel.
 function syncChat() {
+  applyStreamerChatPreferences();
   if (!settings.chat || !state.current) { disconnectChat(); return; }
   var room = currentRoomId();
   if (!room) { disconnectChat(); return; }
@@ -5062,14 +5327,15 @@ function connectChat(room) {
   disconnectChat();
   chat.want = true; chat.room = room; chat.retry = 0;
   clearChat(); showChatOverlay();
-  startChatSweep();
+  ChatWindow.status('connecting', 'Connecting...');
   openChatSocket(room);
 }
 function openChatSocket(room) {
   var ws;
-  try { ws = new WebSocket(CHAT_URL); } catch (e) { return; }
+  try { ws = new WebSocket(CHAT_URL); } catch (e) { ChatWindow.status('unavailable', 'Chat connection unavailable'); return; }
   chat.ws = ws;
   ws.onmessage = function (ev) {
+    if (chat.ws !== ws || !chat.want || chat.room !== room) return;
     var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.event === 'pusher:ping') { try { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); } catch (e) {} return; }
     if (m.event === 'pusher:connection_established') {
@@ -5077,15 +5343,18 @@ function openChatSocket(room) {
       try { ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel: 'chatrooms.' + room + '.v2' } })); } catch (e) {}
       return;
     }
+    if (m.event === 'pusher_internal:subscription_succeeded') { ChatWindow.status('connected', 'Live'); return; }
     if (m.event && m.event.indexOf('ChatMessageEvent') !== -1) {
       var d; try { d = JSON.parse(m.data); } catch (e) { return; }
-      addChatMessage(d);
+      ChatWindow.status('connected', 'Live');
+      queueChatMessage(d);
     }
   };
   ws.onclose = function () {
     if (chat.ws !== ws) return;
     chat.ws = null;
     if (chat.want && settings.chat && currentRoomId() === room) {
+      ChatWindow.status('reconnecting', 'Reconnecting...');
       chat.retry++;
       var delay = Math.min(15000, 1500 * chat.retry);
       chat.retryTimer = setTimeout(function () {
@@ -5097,7 +5366,7 @@ function openChatSocket(room) {
 }
 function disconnectChat() {
   chat.want = false; chat.room = null;
-  stopChatSweep();
+  clearChatDelay();
   if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
   if (chat.ws) { try { chat.ws.onclose = null; chat.ws.close(); } catch (e) {} chat.ws = null; }
   hideChatOverlay(); clearChat();
@@ -5157,12 +5426,16 @@ function badgeChipsFor(sender) {
 // over the black player plane, where those names are unreadable from a sofa. Lift
 // anything below a usable luminance, keeping which colour it is.
 var CHAT_NAME_MIN_LUM = 0.4;
-function chatNameColor(hex) {
+function chatNameColor(hex, lightBackground) {
   var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
-  if (!m) return '#53fc18';
+  if (!m) return lightBackground ? '#247500' : '#53fc18';
   var n = parseInt(m[1], 16);
   var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
   var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  if (lightBackground) {
+    var scale = lum > 0.42 ? 0.42 / lum : 1;
+    return 'rgb(' + Math.round(r * scale) + ',' + Math.round(g * scale) + ',' + Math.round(b * scale) + ')';
+  }
   if (lum >= CHAT_NAME_MIN_LUM) return '#' + m[1];
   // Blend towards white by exactly the amount that reaches the floor: blending adds
   // (1 - lum) * t of luminance, so t falls straight out. Multiplying the channels
@@ -5174,15 +5447,15 @@ function chatNameColor(hex) {
   b = Math.round(b + (255 - b) * t);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
-function addChatMessage(d) {
+function addChatMessage(d, receivedAt) {
   if (!d || !d.sender) return;
   if (settings.chatBots === 'hide' && isBotMessage(d)) return;
-  var box = chatEl();
+  var box = chatMessagesEl();
   var row = document.createElement('div');
   row.className = 'cmsg';
   if (settings.chatTimestamps) {
     var ts = document.createElement('span'); ts.className = 'ctime';
-    var dt = new Date();
+    var dt = new Date(receivedAt || Date.now());
     ts.textContent = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2) + ' ';
     row.appendChild(ts);
   }
@@ -5195,7 +5468,8 @@ function addChatMessage(d) {
   var u = document.createElement('span');
   u.className = 'cuser';
   var color = d.sender.identity && d.sender.identity.color;
-  u.style.color = chatNameColor(color);
+  u.setAttribute('data-color', color || '');
+  u.style.color = chatNameColor(color, chatLightBackground());
   u.textContent = d.sender.username || '';
   row.appendChild(u);
   // ': ' rather than a bare space — without it the coloured name and the white message
@@ -5204,34 +5478,8 @@ function addChatMessage(d) {
   appendChatContent(row, d.content);
   box.appendChild(row);
   while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
-  // Stamp it and let the sweeper below handle fading, so the overlay does not build up
-  // into a static wall of text ('Never' / 0 keeps messages until they scroll off).
-  // Two timers per message does the same job but a busy channel at a 40s fade keeps
-  // hundreds of them alive at once, and each one holds the row it is going to remove —
-  // including rows CHAT_MAX already evicted above, which then cannot be collected
-  // until their timer finally fires.
-  row.setAttribute('data-t', String(Date.now()));
+  ChatWindow.messageAdded();
 }
-// One 1Hz pass over at most CHAT_MAX rows, instead of 2N pending timeouts. Fade timing
-// lands within a second of the setting, which at ten seconds and up is not visible.
-var chatSweepTimer = null;
-function startChatSweep() {
-  if (chatSweepTimer) return;
-  chatSweepTimer = setInterval(function () {
-    if (!settings.chatFade) return;
-    var box = chatEl(), now = Date.now();
-    for (var i = box.children.length - 1; i >= 0; i--) {
-      var row = box.children[i];
-      var age = now - (parseInt(row.getAttribute('data-t'), 10) || now);
-      if (age > settings.chatFade + 800) box.removeChild(row);
-      else if (age > settings.chatFade && row.className === 'cmsg') row.className = 'cmsg cfade';
-    }
-  }, 1000);
-}
-function stopChatSweep() {
-  if (chatSweepTimer) { clearInterval(chatSweepTimer); chatSweepTimer = null; }
-}
-
 /* OLED burn-in guard.
    Static bright pixels can burn into an OLED over time. When nothing has moved
    for a while and the screen is showing something static (an idle message or a
@@ -5614,7 +5862,8 @@ document.addEventListener('keydown', function (e) {
   if (k === KEY.N0) { dimQuickKey(); return; }         // 0 toggles dim; press again within 3s to change strength
   if (k === KEY.BLUE) { openBrowse(); return; }        // blue opens the live browser
   if (k === KEY.RED) { openSettings(); return; }       // red opens settings
-  if (k === KEY.YELLOW) { openVodsForContext(); return; } // yellow opens past videos
+  if (k === KEY.GREEN) { if (!e.repeat) toggleChat(); return; }
+  if (k === KEY.YELLOW) { openVodsForContext(); return; }
   if (!state.vod) {                                    // the surf list is for live channels
     if (isChUp(k)) { chpopMove(-1); return; }          // channel up/down surf the live list
     if (isChDown(k)) { chpopMove(1); return; }
@@ -5631,7 +5880,6 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.UP) moveSide(-1);
     else if (k === KEY.DOWN) moveSide(1);
     else if (k === KEY.OK) activateSide();               // OK (or a click) opens the highlighted channel
-    else if (k === KEY.GREEN) refreshSide();             // green button refreshes the list
     else if (k === KEY.LEFT || k === KEY.RIGHT) closeSidebar();   // either side tucks the list away
     else if (k === KEY.BACK) {
       // Back is what put this list on screen, so Back again carries on up and out —
@@ -5690,7 +5938,6 @@ document.addEventListener('keydown', function (e) {
   if (k === KEY.LEFT || k === KEY.RIGHT) openSidebar();  // left or right brings the list up
   else if (k === KEY.UP) chpopMove(-1);                 // up/down surf the live channels
   else if (k === KEY.DOWN) chpopMove(1);
-  else if (k === KEY.GREEN) refreshSide();              // green button refreshes even while watching
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
   else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
   else if (k === KEY.PLAY) { playVideo(video); }
@@ -5743,6 +5990,7 @@ function browseCardFromEvent(e) {
   // reaching the left edge opens the sidebar as well.
   var lastX = -1, lastY = -1;
   playerEl.addEventListener('mousemove', function (e) {
+    if (ChatWindow.activePointer(e.target)) return;
     if (diagDrag) return;                 // dragging the diagnostics window, not browsing
     if (!state.ready || state.mode !== 'player') return;
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
@@ -6146,6 +6394,7 @@ function browseCardFromEvent(e) {
     var act = el.getAttribute('data-act');
     if (act === 'settings') openSettings();
     else if (act === 'refresh') refreshSide();
+    else if (act === 'chat') toggleChat();
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();
     else if (act === 'dim') dimQuickKey();
@@ -6225,8 +6474,17 @@ function browseCardFromEvent(e) {
     var i = parseInt(el.getAttribute('data-idx'), 10);
     return isNaN(i) ? -1 : i;
   }
-  chatoptList.addEventListener('mouseover', function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; renderChatOpt(); } });
-  chatoptList.addEventListener('click', function (e) { var i = chatoptIdx(e); if (i >= 0) { chatopt.focus = i; chatoptActivate(); } });
+  chatoptList.addEventListener('mouseover', function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; applyChatOptFocus(); } });
+  chatoptList.addEventListener('click', function (e) {
+    if (e.target.tagName === 'INPUT') return;
+    var i = chatoptIdx(e); if (i < 0) return;
+    chatopt.focus = i;
+    var color = e.target.getAttribute('data-chat-color');
+    if (color === 'black' || color === 'white') {
+      settings.chatBackground = color; saveSettings(); applyChatStyle(); renderChatOpt();
+    } else chatoptActivate();
+  });
+  document.getElementById('chatopt-close').addEventListener('click', closeChatOpt);
   document.getElementById('chatoptmodal').addEventListener('click', function (e) { if (e.target === this) closeChatOpt(); });
   // Blocked categories popup pointer
   var blockedcatsList = document.getElementById('blockedcats-list');
@@ -6571,6 +6829,7 @@ function markBootReady() {
   bootDeadlineTimer = null;
   state.ready = true;
   startPlayerPoll();
+  prepareSidebarSoon();
   return true;
 }
 // True once the viewer (or the deadline's idle screen) owns what is on screen, so
@@ -6583,10 +6842,11 @@ function bootChoiceSuperseded() {
   setMode('player');
   loadQualityPref();
   loadSettings();
+  ChatWindow.init();
   getFirstRun();      // stamp the baseline before any offline row can render
   loadChannelCache();                         // instant sidebar/home data while the real fetch runs
   applyDim();
-  applyChatStyle();                           // set the chat overlay's side/size/width/opacity
+  applyChatStyle();                           // apply chat appearance and layout
   syncDiagnostics();
   loadAppVersion();                           // populate the version chip in Settings promptly
   setTimeout(checkForUpdate, 3000);           // check GitHub for a newer release, once the app has settled

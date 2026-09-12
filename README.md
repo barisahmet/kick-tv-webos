@@ -100,6 +100,19 @@ NODE_OPTIONS="--require ./shim.js" ares-install --device tv com.barisahmet.kickt
   Pinned channels sit at the top while they are live.
 - Click an offline channel, or press the yellow button while watching, to see
   that channel's past videos (VODs).
+- The green button toggles live chat. Chat starts off for new streamers;
+  enabling it affects only that streamer. Drag anywhere in chat to move it,
+  or any corner to resize it. Release near the left or right edge to dock
+  along that whole side; drag away to float again. Each channel remembers
+  every chat option, plus its size, position, and docking. A vertical Settings/Close bar sits beside chat and hides with
+  the scrollbar when the pointer leaves. Messages use the full box height.
+- Scroll inside chat to read earlier messages; **Jump to live** resumes following
+  new messages. Chat also returns to live five seconds after the pointer leaves;
+  returning before then keeps your place. The latest 160 messages stay without fading. Chat options include
+  black or white backgrounds with a transparency slider, text, filters, a layout reset,
+  and a message delay slider from Off to 60 seconds to match the video. **Separate chat** fits
+  the stream beside a docked chat; drag the inside edge to adjust its width.
+  The sidebar's refresh icon refreshes channels.
 - The blue button opens the live channel browser. Inside it, the yellow button
   (or the Categories button) lets you browse by category.
 - The gear at the bottom right, or the red button, opens Settings: chat, low

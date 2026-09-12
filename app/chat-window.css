@@ -1,0 +1,113 @@
+/* A movable reading window over the stream. Keep the video visible, the text
+   crisp, and the controls legible independently of message opacity. */
+#chat {
+  position: absolute; z-index: 4; top: 0; left: 0; right: auto;
+  width: 460px; height: 620px; padding: 0;
+  display: none; flex-direction: column; justify-content: flex-start;
+  box-sizing: border-box; overflow: visible; pointer-events: auto;
+  border: 1px solid transparent; border-radius: 14px;
+  background: rgba(12,16,18,0.16); opacity: 1;
+  color: #f0f3f4; text-shadow: 0 1px 3px #000;
+  cursor: move; touch-action: none; -webkit-user-select: none; user-select: none;
+}
+#chat.on { display: flex; }
+#chat.docked { border-radius: 0; }
+#chat.focused { border-color: rgba(224,233,237,0.3); }
+/* Controls live beside the reading box; messages use its entire height. */
+#chat-tools, .chat-resize, #chat-jump { opacity: 0; visibility: hidden; }
+#chat.focused #chat-tools, #chat.focused .chat-resize, #chat.focused #chat-jump {
+  opacity: 1; visibility: visible;
+}
+#chat-tools {
+  position: absolute; right: calc(100% + 16px); top: 0; width: 64px;
+  box-sizing: border-box; padding: 8px; border-radius: 16px;
+  border: 1px solid #53616a; background: rgba(19,24,28,0.96);
+  color: #f0f3f4; text-shadow: none; cursor: move;
+}
+#chat.tools-right #chat-tools { right: auto; left: calc(100% + 16px); }
+/* A transparent bridge lets the pointer cross the gap without hiding tools. */
+#chat-tools::before { content: ''; position: absolute; top: 0; bottom: 0; left: 100%; width: 18px; }
+#chat.tools-right #chat-tools::before { left: auto; right: 100%; }
+#chat.ctheme-light { color: #17191b; text-shadow: none; }
+#chat.ctheme-light .cmsg { color: #17191b; text-shadow: none; }
+#chat.ctheme-light.focused { border-color: #767c80; }
+#chat.ctheme-light .ctime { color: #555c61; }
+#chat.ctheme-light .chat-resize { color: #343c41; }
+#chat.ctheme-light .cbadge { text-shadow: 0 1px 2px #222; }
+#chat.ctheme-light .cbadge.mod { text-shadow: none; }
+.chat-tool {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 46px; flex-shrink: 0; margin: 0;
+  border: 0; border-radius: 8px; padding: 10px; cursor: pointer;
+  background: transparent; color: #e0e8ec;
+}
+#chat-tools .chat-tool + .chat-tool { margin-top: 6px; }
+.chat-tool svg { width: 26px; height: 26px; pointer-events: none; }
+.chat-tool path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.chat-tool:hover, .chat-tool:focus { background: rgba(230,242,248,0.15); color: #fff; outline: none; }
+#chat-scroll {
+  flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  padding: 12px 18px; box-sizing: border-box; border-radius: inherit;
+  scrollbar-width: thin; scrollbar-color: transparent transparent;
+}
+#chat-scroll::-webkit-scrollbar { width: 5px; }
+#chat-scroll::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+#chat.focused #chat-scroll { scrollbar-color: #77868d transparent; }
+#chat.focused #chat-scroll::-webkit-scrollbar-thumb { background: #77868d; }
+#chat-messages { min-height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
+#chat-messages .cmsg { flex-shrink: 0; margin-top: 9px; overflow-wrap: anywhere; }
+#chat.copacity-low #chat-messages { opacity: 0.5; }
+#chat.copacity-medium #chat-messages { opacity: 0.75; }
+#chat.copacity-high #chat-messages { opacity: 1; }
+#chat .chat-notice { color: #b8c2c9; font-style: italic; }
+#chat.ctheme-light .chat-notice { color: #555c61; }
+
+#chat-jump {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  max-width: 90%; white-space: nowrap; font: 600 20px 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  padding: 10px 20px; border: 1px solid #77868d; border-radius: 24px;
+  background: rgba(20,27,31,0.94); color: #f0f3f4; cursor: pointer;
+}
+#chat-jump:hover { border-color: #53fc18; }
+.chat-resize { position: absolute; width: 60px; height: 60px; touch-action: none; color: #d4dfe4; }
+.chat-resize.left { left: 0; }
+.chat-resize.right { right: 0; }
+.chat-resize.top { top: 0; }
+.chat-resize.bottom { bottom: 0; }
+.chat-resize.top.left, .chat-resize.bottom.right { cursor: nwse-resize; }
+.chat-resize.top.right, .chat-resize.bottom.left { cursor: nesw-resize; }
+/* Only the outer L receives input, leaving the nearby header buttons usable. */
+.chat-resize.top.left { clip-path: polygon(0 0,100% 0,100% 20px,20px 20px,20px 100%,0 100%); }
+.chat-resize.top.right { clip-path: polygon(0 0,100% 0,100% 100%,40px 100%,40px 20px,0 20px); }
+.chat-resize.bottom.left { clip-path: polygon(0 0,20px 0,20px 40px,100% 40px,100% 100%,0 100%); }
+.chat-resize.bottom.right { clip-path: polygon(40px 0,100% 0,100% 100%,0 100%,0 40px,40px 40px); }
+.chat-resize svg { display: block; width: 60px; height: 60px; pointer-events: none; }
+.chat-resize path { fill: none; stroke: currentColor; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.chat-resize:hover { color: #53fc18; }
+#chat-divider { display: none; }
+#chat.docked #chat-divider {
+  display: block; position: absolute; top: 30px; bottom: 30px;
+  width: 14px; cursor: ew-resize; touch-action: none;
+}
+#chat[data-dock="left"] #chat-divider { right: 0; }
+#chat[data-dock="right"] #chat-divider { left: 0; }
+#chat-divider::after {
+  content: ''; position: absolute; left: 5px; top: 40%; bottom: 40%;
+  width: 3px; border-radius: 2px; background: #77868d; opacity: 0;
+}
+#chat.focused #chat-divider::after { opacity: 1; }
+#chat-divider:hover::after { background: #53fc18; }
+#chat.docked .chat-resize { cursor: ew-resize; }
+#chat.adjusting { border-color: #d3e2e9; }
+#chat.adjusting #chat-messages { pointer-events: none; }
+#chat-snap {
+  position: absolute; z-index: 5; left: 0; top: 0; pointer-events: none;
+  box-sizing: border-box; border: 5px solid #53fc18;
+  background: rgba(83,252,24,0.13); box-shadow: inset 0 0 0 2px #102108;
+}
+#chat-snap::after {
+  content: attr(data-label); position: absolute; left: 50%; top: 24px;
+  transform: translateX(-50%); padding: 12px 24px; border-radius: 6px;
+  background: #53fc18; color: #102108; font-size: 24px; font-weight: 700;
+  white-space: nowrap; text-shadow: none;
+}

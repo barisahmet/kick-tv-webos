@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=1920, user-scalable=no">
   <title>Kick TV</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="chat-window.css">
 </head>
 <body>
   <div id="player" class="view">
@@ -26,7 +27,20 @@
         </div>
       </div>
     </div>
-    <div id="chat"></div>
+    <div id="chat-snap" class="hidden"></div>
+    <div id="chat" role="region" aria-label="Live chat">
+      <div id="chat-tools" role="toolbar" aria-label="Chat controls">
+        <button id="chat-options" class="chat-tool" type="button" tabindex="-1" title="Chat options" aria-label="Chat options"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></svg></button>
+        <button id="chat-close" class="chat-tool" type="button" tabindex="-1" title="Close chat" aria-label="Close chat"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <button id="chat-jump" class="hidden" type="button" tabindex="-1">Jump to live</button>
+      <div id="chat-scroll"><div id="chat-messages"></div></div>
+      <div id="chat-divider" data-resize="edge" title="Drag to resize chat width" aria-label="Resize docked chat width"></div>
+      <div id="chat-resize-tl" class="chat-resize top left" data-resize="nw" title="Drag to resize" aria-label="Resize chat from top left"><svg viewBox="0 0 60 60" aria-hidden="true"><path d="M8 52V20Q8 8 20 8H52"/></svg></div>
+      <div id="chat-resize-tr" class="chat-resize top right" data-resize="ne" title="Drag to resize" aria-label="Resize chat from top right"><svg viewBox="0 0 60 60" aria-hidden="true"><path d="M8 8H40Q52 8 52 20V52"/></svg></div>
+      <div id="chat-resize-left" class="chat-resize bottom left" data-resize="sw" title="Drag to resize" aria-label="Resize chat from bottom left"><svg viewBox="0 0 60 60" aria-hidden="true"><path d="M8 8V40Q8 52 20 52H52"/></svg></div>
+      <div id="chat-resize" class="chat-resize bottom right" data-resize="se" title="Drag to resize" aria-label="Resize chat from bottom right"><svg viewBox="0 0 60 60" aria-hidden="true"><path d="M8 52H40Q52 52 52 40V8"/></svg></div>
+    </div>
     <div id="notify"></div>
     <div id="pbstatus" class="hidden"></div>
     <div id="diagnostics" class="hidden">
@@ -137,7 +151,7 @@
     <div id="spinner" class="hidden"></div>
     <div id="cbguide" class="hidden">
       <span class="cbitem" data-act="settings"><span class="cbdot red"></span>Settings</span>
-      <span class="cbitem" data-act="refresh"><span class="cbdot green"></span>Refresh</span>
+      <span class="cbitem" data-act="chat"><span class="cbdot green"></span>Chat</span>
       <span class="cbitem" data-act="vods"><span class="cbdot yellow"></span>Past videos</span>
       <span class="cbitem" data-act="browse"><span class="cbdot blue"></span>Browse</span>
       <span class="cbitem" data-act="dim"><span class="cbkey">0</span>Dim</span>
@@ -215,8 +229,9 @@
 
   <div id="chatoptmodal" class="hidden">
     <div id="chatoptbox">
-      <div id="chatopt-head">Live chat</div>
+      <div id="chatopt-head"><span>Chat options</span><button id="chatopt-close" class="chat-tool" type="button" tabindex="-1" aria-label="Close chat options"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <div id="chatopt-list"></div>
+      <div id="chatopt-note" role="note"></div>
     </div>
   </div>
 
@@ -244,6 +259,7 @@
 
   <script src="hls.min.js"></script>
   <script src="favorites.js"></script>
+  <script src="chat-window.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
