@@ -1,0 +1,37 @@
+name: CI
+
+# The TV runs Chromium 87 (webOS 22). Desktop Chrome would happily run code the
+# TV cannot, so these checks pin the app to what that engine actually supports.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Unit tests
+        run: node --test tests/runtime.test.js tests/service.test.js
+
+      - name: App scripts parse as ES5
+        run: |
+          for f in app/*.js; do
+            [ "$f" = "app/hls.min.js" ] && continue
+            npx --yes acorn@8 --ecma5 --silent "$f" || { echo "::error file=$f::not valid ES5"; exit 1; }
+          done
+
+      - name: No CSS that Chromium 87 lacks
+        run: |
+          out=$(npx --yes doiuse@6 --browsers "chrome 87" app/*.css 2>/dev/null | grep -v "partially supported" || true)
+          if [ -n "$out" ]; then echo "$out"; exit 1; fi

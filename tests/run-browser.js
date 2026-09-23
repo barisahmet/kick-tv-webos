@@ -7,7 +7,7 @@ const http = require('http');
 const cp = require('child_process');
 const root = path.resolve(__dirname, '..');
 const selected = process.argv.slice(2).filter(a => !a.startsWith('--'));
-const suites = selected.length ? selected : ['settingscontrols', 'chatfollow', 'headerfocus', 'details', 'settings', 'app', 'hotpaths', 'grid', 'visual'];
+const suites = selected.length ? selected : ['settingscontrols', 'chatfollow', 'headerfocus', 'details', 'settings', 'app', 'hotpaths', 'grid', 'visual', 'livebar', 'fixes'];
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-ui-browser-'));
 const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-ui-results-'));
 let chrome, ws, nextId = 0;

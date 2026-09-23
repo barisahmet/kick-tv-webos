@@ -144,6 +144,8 @@ window.runAppTests = async function (assert) {
   await fixtureWait(); assert(vodBarVisible(), 'coalesced VOD reveal displays controls');
   key(461); assert(!vodBarVisible() && !state.sidebarOpen, 'first Back hides VOD controls');
   key(461); assert(state.sidebarOpen, 'next Back opens channel list');
+  key(461); assert(state.sidebarOpen && state.quitArmed, 'Back again arms the exit, as it does over live');
+  closeSidebar(); state.quitArmed = false; openSidebar();
   await fixtureWait(); requestVodOverlay(); key(461); await fixtureWait();
   assert(!state.sidebarOpen && !vodBarVisible(), 'Back cancels queued VOD pointer paint instead of reopening controls');
   closeSidebar(); state.vod = null; state.current = 'alpha';

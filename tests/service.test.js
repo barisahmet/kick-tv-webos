@@ -17,7 +17,10 @@ function harness() {
       requests.push({ options, cb, req }); return req;
     }
   };
-  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : assert.fail(name), Buffer, process };
+  const timers = [];
+  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : assert.fail(name), Buffer, process,
+    setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
+    clearTimeout: t => { if (t) t.cleared = true; } };
   vm.createContext(context); vm.runInContext(source, context);
   function begin(payload) {
     const replies = []; handlers.fetch({ payload, respond: value => replies.push(value) });
@@ -32,7 +35,7 @@ function harness() {
     response(request, JSON.stringify(value), status).emit('end');
     return JSON.parse(replies[0].body);
   }
-  return { ...context, handlers, begin, response, fetch, requests };
+  return { ...context, handlers, begin, response, fetch, requests, timers };
 }
 
 const image = { src: 'https://images.test/large.webp', srcset: 'https://images.test/small.webp 480w', responsive: 'https://images.test/cat.webp 400w', url: 'https://images.test/fallback.webp' };
@@ -116,4 +119,32 @@ test('TLS fingerprint constants and connection reuse are unchanged', () => {
   assert.equal(options.ecdhCurve, 'X25519:prime256v1:secp384r1');
   assert.equal(options.ciphers, ['TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256', 'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384', 'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305', 'AES128-GCM-SHA256', 'AES256-GCM-SHA384'].join(':'));
   assert.equal(options.agent.options.keepAlive, true); assert.equal(options.agent.options.maxSockets, 6);
+});
+
+test('slow, oversized and unsendable requests still answer exactly once', () => {
+  const h = harness();
+  // an overall deadline, independent of the idle timeout
+  const slow = h.begin({ path: '/api/v2/channels/channel' });
+  const deadline = h.timers[h.timers.length - 1];
+  assert.equal(deadline.ms, 11000);
+  const res = h.response(slow.request, '{"a":');
+  deadline.fn(); res.emit('data', '1}'); res.emit('end');
+  assert.equal(slow.replies.length, 1); assert.equal(slow.replies[0].error, 'timeout');
+  // a finished request clears its deadline
+  const quick = h.begin({ path: '/api/v2/channels/channel' });
+  const quickDeadline = h.timers[h.timers.length - 1];
+  h.response(quick.request, '{}').emit('end');
+  assert.equal(quickDeadline.cleared, true);
+  // declared or streamed bodies past the cap are refused
+  const declared = h.begin({ path: '/api/v2/channels/channel' });
+  h.response(declared.request, '', 200, { 'content-length': String(9 * 1024 * 1024) });
+  assert.equal(declared.replies.length, 1); assert.equal(declared.replies[0].error, 'too large');
+  const streamed = h.begin({ path: '/api/v2/channels/channel' });
+  const big = h.response(streamed.request, 'x'.repeat(5 * 1024 * 1024));
+  big.emit('data', 'x'.repeat(5 * 1024 * 1024)); big.emit('end');
+  assert.equal(streamed.replies.length, 1); assert.equal(streamed.replies[0].error, 'too large');
+  // paths https.get would throw on are rejected up front
+  for (const p of ['/api/v2/channels/a b', '/api/v2/channels/ç']) {
+    const r = h.begin({ path: p }); assert.equal(r.replies[0].error, 'bad path');
+  }
 });

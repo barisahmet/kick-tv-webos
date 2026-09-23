@@ -100,7 +100,7 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
 /* Focus is a location. Enabled, selected and playing states have quieter marks. */
 .bcard.focused, .ccard.focused { border-color: var(--ui-focus); box-shadow: none; transform: none; transition: none; }
 .player-tool.focused { box-shadow: none; border-color: var(--ui-focus); }
-#vodplay.focused, #vodback.focused, #vodfwd.focused { box-shadow: 0 0 0 3px var(--ui-focus); }
+#vodplay.focused, #vodback.focused, #vodfwd.focused, #vodgolive.focused { box-shadow: 0 0 0 3px var(--ui-focus); }
 .favrow.current { border-left-color: var(--ui-focus); background: #27322e; }
 .favrow.focused, .favrow.current.focused { border-left-color: var(--ui-focus); background: #3c4952; }
 .actbtn, .actbtn:hover, .actbtn.pinbtn.on:hover, .actbtn.rmbtn:hover { transform: none; transition: none; }
@@ -156,8 +156,9 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
   animation: ui-panel-enter 100ms ease-out;
 }
 @keyframes ui-panel-enter { from { opacity: 0; } to { opacity: 1; } }
-#vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop, #vod-scrim,
-#vodplay.hidden, #vodback.hidden, #vodfwd.hidden, #vodbar.hidden, #overlay.hidden, #seekpop.hidden {
+#vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop, #vod-scrim, #livebar,
+#vodplay.hidden, #vodback.hidden, #vodfwd.hidden, #vodbar.hidden, #overlay.hidden, #seekpop.hidden,
+#livebar.hidden {
   transition: opacity 100ms ease-out, transform 100ms ease-out;
 }
 #vodplay .vpglyph { transition: opacity 100ms ease-out; transform: none; }
@@ -218,6 +219,6 @@ body.ui-text-large #toast { font-size: 32px; }
 
 @media (prefers-reduced-motion: reduce) {
   #settingsbox, #qualityoptbox, #dimoptbox, #chatoptbox, #blockedcatsbox,
-  #ui-details, #vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop,
+  #ui-details, #vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop, #livebar,
   #vodplay .vpglyph, #seekpop .seekvalue { animation: none !important; transition: none !important; }
 }

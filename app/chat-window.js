@@ -121,7 +121,7 @@ var ChatWindow = (function () {
     tailFrame = requestAnimationFrame(function () {
       tailFrame = null;
       if (following) { var sc = el('chat-scroll'); sc.scrollTop = sc.scrollHeight; }
-      if (window.UIImages) UIImages.scan(el('chat-messages'));
+      if (window.UIImages) UIImages.scanSoon(el('chat-messages'));
     });
   }
   function jumpToLive() { cancelAutoLive(); following = true; unread = 0; updateJump(); followTail(); }
@@ -309,7 +309,7 @@ var ChatWindow = (function () {
       if (following) unread = 0;
       updateJump();
       updateAutoLive();
-      if (window.UIImages) UIImages.scan(el('chat-messages'));
+      if (window.UIImages) UIImages.scanSoon(el('chat-messages'));   // one pass per frame, however many scrolls
     });
     // A slow-loading emote may grow an older row after the initial append.
     box.addEventListener('load', followTail, true);

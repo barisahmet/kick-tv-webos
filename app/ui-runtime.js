@@ -5,7 +5,10 @@
   var limits = { requests: 4, background: 2, queued: 96, listeners: 64,
     cacheEntries: 64, cacheBytes: 2097152, entryBytes: 262144 };
   function later(fn) { return setTimeout(fn, 0); }
-  function safe(fn, err, value) { try { fn(err, value); } catch (e) {} }
+  function safe(fn, err, value) {
+    try { fn(err, value); }
+    catch (e) { try { console.error(e && e.stack ? e.stack : e); } catch (x) {} }   // never silently
+  }
   function cancelHandle(handle) {
     try {
       if (typeof handle === 'function') handle();
@@ -328,6 +331,16 @@
   root.UIImages = {
     watch: watch,
     scan: function (container) { scanImages(container || doc); scheduleImages(); },
+    // Coalesced: any number of calls in one frame become a single scan.
+    scanSoon: function (container) { queueImageScan(container || doc); },
+    // Just these nodes; for appends where the rest of the container is already known.
+    watchNodes: function (nodes) {
+      for (var i = 0; nodes && i < nodes.length; i++) {
+        var n = nodes[i];
+        watch(n, n.getAttribute('data-ui-src') || n.getAttribute('data-src'), n.getAttribute('alt') || n.getAttribute('aria-label'));
+      }
+      scheduleImages();
+    },
     release: function (container) {
       for (var i = imageRecords.length - 1; i >= 0; i--) {
         var el = imageRecords[i].el;

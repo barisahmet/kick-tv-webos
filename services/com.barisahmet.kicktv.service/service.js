@@ -42,28 +42,55 @@ var BROWSER_HEADERS = {
   'Referer': 'https://kick.com/'
 };
 
+// The app gives up on a call after 12s, so answering later only ties up one of
+// the six keep-alive sockets for nothing. The socket timeout below is idle time
+// only; a response that trickles in a byte at a time would never trip it.
+var REQUEST_DEADLINE_MS = 11000;
+// Kick's largest real payloads are a few hundred KB. Anything far past that is
+// not something the app can use, and buffering it would starve the TV of memory.
+var MAX_BODY_BYTES = 8 * 1024 * 1024;
+
 function kickGet(path, cb) {
   // One answer per request, whatever happens. The request and the response are
   // separate event sources and an abort can fire both, so without this guard a
   // single fetch could respond twice on the same Luna message.
-  var settled = false;
+  var settled = false, req = null, deadline = null;
   function finish(err, status, body) {
     if (settled) return;
     settled = true;
+    if (deadline) clearTimeout(deadline);
     cb(err, status, body);
   }
-  var req = https.get({
-    host: 'kick.com',
-    path: path,
-    headers: BROWSER_HEADERS,
-    ciphers: CHROME_CIPHERS,
-    ecdhCurve: CHROME_CURVES,
-    agent: KEEPALIVE_AGENT
-  }, function (res) {
+  function giveUp(reason) {
+    finish(reason);
+    if (req) { try { req.abort(); } catch (e) {} }
+  }
+  try {
+    req = https.get({
+      host: 'kick.com',
+      path: path,
+      headers: BROWSER_HEADERS,
+      ciphers: CHROME_CIPHERS,
+      ecdhCurve: CHROME_CURVES,
+      agent: KEEPALIVE_AGENT
+    }, onResponse);
+  } catch (e) {
+    // https.get throws synchronously on some bad paths; that must still answer.
+    finish(String(e && e.message || e));
+    return;
+  }
+  deadline = setTimeout(function () { giveUp('timeout'); }, REQUEST_DEADLINE_MS);
+  function onResponse(res) {
     res.setEncoding('utf8');   // decode across chunk boundaries so a split emoji cannot corrupt the JSON
-    var body = '';
+    var body = '', bytes = 0;
     var expected = parseInt(res.headers['content-length'], 10);
-    res.on('data', function (d) { body += d; });
+    if (expected > MAX_BODY_BYTES) { giveUp('too large'); return; }
+    res.on('data', function (d) {
+      if (settled) return;
+      bytes += Buffer.byteLength(d, 'utf8');
+      if (bytes > MAX_BODY_BYTES) { giveUp('too large'); return; }
+      body += d;
+    });
     // The timeout below is a socket inactivity timeout, so it can abort a response
     // that is already half-read. This Node build still emits 'end' after 'aborted',
     // which would otherwise hand the app a truncated body under a 200. Catch the
@@ -78,7 +105,7 @@ function kickGet(path, cb) {
       }
       finish(null, res.statusCode, body);
     });
-  });
+  }
   req.on('error', function (e) { finish(String(e && e.message || e)); });
   req.setTimeout(10000, function () { req.abort(); });
 }
@@ -156,7 +183,10 @@ function compactResponse(path, body) {
 // lookup (/api/v2/channels/name) or the live directory (/stream/livestreams/...).
 service.register('fetch', function (message) {
   var path = message.payload && message.payload.path;
-  if (typeof path !== 'string' || (path.indexOf('/api/') !== 0 && path.indexOf('/stream/') !== 0)) {
+  // Printable ASCII only: the app always encodes its paths, and a raw space or
+  // non-ASCII character makes https.get throw instead of sending anything.
+  if (typeof path !== 'string' || !/^[\x21-\x7e]+$/.test(path) ||
+      (path.indexOf('/api/') !== 0 && path.indexOf('/stream/') !== 0)) {
     message.respond({ ok: false, error: 'bad path' });
     return;
   }

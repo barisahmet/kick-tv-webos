@@ -1050,8 +1050,13 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #vodbar.focused #vodbar-handle { fill: #53fc18; }
 #vodbar-cur, #vodbar-dur {
-  font-size: 26px; font-weight: 700; color: #fff; min-width: 120px;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  font-size: 26px; font-weight: 700; color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums;
+}
+/* Both ends of a seek bar are fixed-width slots, so the track never changes
+   length when a time grows a digit or the right end turns into Go live. */
+#vodbar-cur, #vodbar-dur, #vodgolive, #livebar-cur, #livebar-end, #livebar-live {
+  flex: none; width: 150px; box-sizing: border-box;
 }
 #vodbar-cur { text-align: right; margin-right: 22px; }
 #vodbar-dur { text-align: left; margin-left: 22px; }
@@ -1061,6 +1066,53 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodbar-played { stroke: #53fc18; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 #vodbar-handle { fill: #fff; }
 #vodbar-origin { stroke: rgba(255,255,255,0.55); stroke-width: 3; stroke-dasharray: 4 4; }
+
+/* Live timeline: stream start on the left, the live edge on the right. It rides
+   with the info bar; rewinding past what the live buffer holds opens the stream's
+   own recording at that moment. */
+#livebar {
+  position: absolute; left: 60px; bottom: 56px;
+  width: calc(100% - 120px); box-sizing: border-box;
+  display: flex; align-items: center;
+  padding: 8px 20px; border-radius: 14px;
+  border: 2px solid transparent;
+  background: rgba(9,12,13,0.66);
+  transition: opacity 200ms ease 70ms, transform 300ms cubic-bezier(.19,.9,.3,1) 70ms,
+              border-color 160ms ease, left 200ms ease, bottom 200ms ease, width 200ms ease;
+}
+#livebar.withside { left: 530px; bottom: 120px; width: calc(100% - 590px); }
+#livebar.hidden {
+  display: flex !important; opacity: 0; pointer-events: none; transform: translateY(16px);
+  transition: opacity 150ms ease, transform 190ms ease;
+}
+#livebar.focused { border-color: rgba(83,252,24,0.35); }
+#livebar.focused #livebar-handle { fill: #53fc18; }
+#livebar-cur, #livebar-end {
+  font-size: 26px; font-weight: 700; color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums;
+}
+#livebar-cur { text-align: right; margin-right: 22px; }
+#livebar-end { text-align: left; margin-left: 22px; }
+#livebar-track { flex: 1; height: 48px; cursor: pointer; }
+#livebar-track svg { width: 100%; height: 100%; overflow: visible; }
+#livebar-remain { stroke: rgba(255,255,255,0.45); stroke-width: 4; stroke-linecap: round; }
+#livebar-played { stroke: #e91916; stroke-width: 5; stroke-linecap: round; }
+#livebar-handle { fill: #fff; }
+#livebar-origin { stroke: rgba(255,255,255,0.55); stroke-width: 3; stroke-dasharray: 4 4; }
+/* Go live takes the right-hand slot in place of the time, at the same width. */
+#livebar-live, #vodgolive {
+  display: inline-flex; align-items: center; justify-content: center; white-space: nowrap;
+  margin-left: 22px; height: 44px; padding: 0 10px;
+  font-size: 22px; font-weight: 800; color: #fff;
+  border-radius: 8px; cursor: pointer;
+  background: #e91916;
+}
+#livebar-track { touch-action: none; }
+#livebar-live .lvdot, #vodgolive .lvdot {
+  width: 11px; height: 11px; border-radius: 6px; background: #fff; margin-right: 9px;
+}
+#livebar-live:hover, #vodgolive:hover { background: #ff3b37; }
+#vodgolive.focused { box-shadow: 0 0 0 3px #53fc18, 0 0 22px rgba(83,252,24,0.35); }
 
 /* Player tools, shown at the bottom-right while the sidebar is open. Quality is
    a first-class control; Settings remains a separate themed gear. */
