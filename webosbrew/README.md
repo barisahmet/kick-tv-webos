@@ -29,5 +29,8 @@ needed is already prepared here.
 
 - `pool: main` because this is open source (MIT).
 - `category: multimedia`.
+- `requirements.webosRelease: '>=10.0'`: the app targets webOS 10 (Chrome 120 web
+  engine, also on 2022+ TVs upgraded through webOS Re:New) and may use features
+  older engines lack.
 - If you rename the repo or move the icon, update `iconUri` and `manifestUrl` in
   the package file, and `iconUri`/`sourceUrl` in the workflow's manifest step.

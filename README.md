@@ -112,11 +112,22 @@ NODE_OPTIONS="--require ./shim.js" ares-install --device tv com.barisahmet.kickt
   black or white backgrounds with a transparency slider, text, filters, a layout reset,
   and a message delay slider from Off to 60 seconds to match the video. **Separate chat** fits
   the stream beside a docked chat; drag the inside edge to adjust its width.
+  **Resize preview** shows an outline while dragging and applies the video size
+  on release. This choice is saved for the streamer too.
   The sidebar's refresh icon refreshes channels.
 - The blue button opens the live channel browser. Inside it, the yellow button
   (or the Categories button) lets you browse by category.
 - The gear at the bottom right, or the red button, opens Settings: chat, low
-  latency, auto-advance, and quality.
+  latency, auto-advance, dimming, alerts, and interface options. Quality has its
+  own player button. **Big UI** offers larger labels without scaling the video.
+  On/off and two-choice settings use switches. Select the Live chat, Dim, or
+  Blocked categories label to open its options.
+  Other choices use pill selectors; alert duration and the burn-in timeout use
+  sliders. The remote wheel scrolls menus; the D-pad moves focus and adjusts values.
+- Browse, Categories, and Past videos keep only nearby cards and artwork mounted.
+  Recent category and VOD lists reopen from a bounded cache while refreshing.
+  With menus closed, directory polling slows to two minutes; live alerts may
+  arrive later. During a VOD with alerts off, directory polling stops.
 - Press Back once for an exit prompt, Back again to close.
 
 Your channels are saved on the TV only. The public build ships with none.
@@ -127,6 +138,19 @@ A webOS page cannot call kick.com directly, and Kick blocks the TV's default
 requests. So the app includes a small background service that fetches Kick's
 data for it and hands the stream to the TV's player. It is bundled in the same
 package, nothing to set up.
+
+## Local checks
+
+These checks use synthetic channels and storage. They do not connect to a TV.
+
+```
+node --test tests/runtime.test.js tests/service.test.js
+node tests/run-browser.js
+```
+
+The browser runner uses a new headless Chrome profile, blocks external requests,
+and prints a temporary directory containing results and screenshots. Set
+`CHROME_PATH` if Chrome is installed somewhere other than the default macOS path.
 
 ## License
 

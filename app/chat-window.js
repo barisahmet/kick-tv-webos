@@ -9,13 +9,15 @@ var ChatWindow = (function () {
   function el(id) { return document.getElementById(id); }
   function copy(r) { return { x: r.x, y: r.y, w: r.w, h: r.h }; }
   function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+  function canvasHeight() { return 1080; }
   function valid(r) {
     return r && ['x', 'y', 'w', 'h'].every(function (k) { return typeof r[k] === 'number' && isFinite(r[k]); });
   }
   function bounded(r) {
-    var w = Math.round(clamp(r.w, MIN_W, 1000)), h = Math.round(clamp(r.h, MIN_H, 1080));
+    var bottom = canvasHeight();
+    var w = Math.round(clamp(r.w, MIN_W, 1000)), h = Math.round(clamp(r.h, MIN_H, bottom));
     return { x: Math.round(clamp(r.x, 0, 1920 - w)),
-      y: Math.round(clamp(r.y, 0, 1080 - h)), w: w, h: h };
+      y: Math.round(clamp(r.y, 0, bottom - h)), w: w, h: h };
   }
   function defaultRect() {
     return { x: 1436, y: 140, w: 460, h: 620 };
@@ -35,7 +37,7 @@ var ChatWindow = (function () {
   function dockRect(side) {
     dock = side;
     rect.x = side === 'left' ? 0 : 1920 - rect.w;
-    rect.y = 0; rect.h = 1080;
+    rect.y = 0; rect.h = canvasHeight();
   }
   function selectChannel() {
     var channel = state.current || (state.vod && state.vod.slug) || '';
@@ -91,6 +93,13 @@ var ChatWindow = (function () {
   }
   function paint() {
     if (!rect) rect = defaultRect();
+    rect = bounded(rect);
+    if (dock) dockRect(dock);
+    if (gesture && gesture.layout.dock && gesture.kind !== 'move' && settings.chatResizePreview) {
+      snapHint(dock, rect);
+      el('chat-snap').setAttribute('data-label', 'Release to resize');
+      return;
+    }
     var box = el('chat');
     box.style.transform = 'translate(' + rect.x + 'px,' + rect.y + 'px)';
     if (box.style.width !== rect.w + 'px') box.style.width = rect.w + 'px';
@@ -112,6 +121,7 @@ var ChatWindow = (function () {
     tailFrame = requestAnimationFrame(function () {
       tailFrame = null;
       if (following) { var sc = el('chat-scroll'); sc.scrollTop = sc.scrollHeight; }
+      if (window.UIImages) UIImages.scanSoon(el('chat-messages'));
     });
   }
   function jumpToLive() { cancelAutoLive(); following = true; unread = 0; updateJump(); followTail(); }
@@ -151,7 +161,7 @@ var ChatWindow = (function () {
     if (!side) return;
     hint.setAttribute('data-label', side === 'left' ? 'Dock left' : 'Dock right');
     hint.style.transform = 'translate(' + (side === 'left' ? 0 : 1920 - r.w) + 'px,0px)';
-    hint.style.width = r.w + 'px'; hint.style.height = '1080px';
+    hint.style.width = r.w + 'px'; hint.style.height = canvasHeight() + 'px';
   }
   function applyGesture() {
     frame = null;
@@ -182,7 +192,7 @@ var ChatWindow = (function () {
       if (g.kind.indexOf('n') !== -1) {
         r.y = clamp(r.y + dy, 0, g.start.y + g.start.h - MIN_H);
         r.h = g.start.y + g.start.h - r.y;
-      } else r.h = clamp(r.h + dy, MIN_H, 1080 - r.y);
+      } else r.h = clamp(r.h + dy, MIN_H, canvasHeight() - r.y);
       rect = bounded(r);
     }
     paint();
@@ -299,6 +309,7 @@ var ChatWindow = (function () {
       if (following) unread = 0;
       updateJump();
       updateAutoLive();
+      if (window.UIImages) UIImages.scanSoon(el('chat-messages'));   // one pass per frame, however many scrolls
     });
     // A slow-loading emote may grow an older row after the initial append.
     box.addEventListener('load', followTail, true);
@@ -310,8 +321,13 @@ var ChatWindow = (function () {
     clear: resetMessages,
     reading: function () { return !following || !!gesture; },
     activePointer: function (target) { return !!gesture || Date.now() < suppressUntil || el('chat').contains(target); },
-    messageAdded: function () {
-      if (following) followTail(); else { unread++; updateJump(); }
+    messageAdded: function (count) {
+      if (following) {
+        // Commit the tail with this append/prune batch. An earlier scroll event
+        // must see the latest rows, rather than mistake them for user scrollback.
+        if (tailFrame !== null) { cancelAnimationFrame(tailFrame); tailFrame = null; }
+        var sc = el('chat-scroll'); sc.scrollTop = sc.scrollHeight;
+      } else { unread += count || 1; updateJump(); }
     },
     side: function () { return rect && rect.x + rect.w / 2 < 960 ? 'left' : 'right'; },
     reset: function () { finish(true); restore(defaultRect()); paint(); save(); followTail(); }

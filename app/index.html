@@ -6,6 +6,7 @@
   <title>Kick TV</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="chat-window.css">
+  <link rel="stylesheet" href="ui-polish.css">
 </head>
 <body>
   <div id="player" class="view">
@@ -68,6 +69,7 @@
       <span id="ov-live">LIVE</span>
       <span id="ov-viewers"></span>
       <span id="ov-title"></span>
+      <div id="ovcat-pop" class="hidden"></div>
     </div>
     <div id="sidebar">
       <div id="side-head">
@@ -136,6 +138,7 @@
         </svg>
       </div>
       <span id="vodbar-dur">0:00</span>
+      <span id="vodgolive" class="hidden" title="Go live"><span class="lvdot"></span>Go live</span>
     </div>
     <div id="vodback" class="hidden" title="Back 30 seconds">
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 5v14l-8-7z"/><path d="M12 5v14l-8-7z"/></svg>
@@ -148,6 +151,19 @@
       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5v14l8-7z"/><path d="M12 5v14l8-7z"/></svg>
     </div>
     <div id="seekpop" class="hidden"></div>
+    <div id="livebar" class="hidden">
+      <span id="livebar-cur">0:00</span>
+      <div id="livebar-track">
+        <svg viewBox="0 0 1500 40" preserveAspectRatio="none">
+          <line id="livebar-remain" x1="0" y1="20" x2="1500" y2="20"></line>
+          <path id="livebar-played" d="M0,20" fill="none"></path>
+          <line id="livebar-origin" x1="0" y1="4" x2="0" y2="36" visibility="hidden"></line>
+          <rect id="livebar-handle" x="-4" y="5" width="8" height="30" rx="4"></rect>
+        </svg>
+      </div>
+      <span id="livebar-end">0:00</span>
+      <span id="livebar-live" class="hidden" title="Go live"><span class="lvdot"></span>Go live</span>
+    </div>
     <div id="spinner" class="hidden"></div>
     <div id="cbguide" class="hidden">
       <span class="cbitem" data-act="settings"><span class="cbdot red"></span>Settings</span>
@@ -215,6 +231,7 @@
     <div id="qualityoptbox">
       <div id="qualityopt-head">
         <span id="qualityopt-title">Quality</span>
+        <span id="qualityopt-alert" role="switch"><span class="qa-label">Alert</span><span class="qa-switch"><span class="qa-knob"></span></span></span>
       </div>
       <div id="qualityopt-list"></div>
     </div>
@@ -243,7 +260,6 @@
   </div>
 
   <div id="settings-desc" class="hidden"></div>
-  <div id="browse-tip" class="hidden"></div>
 
   <div id="updatemodal" class="hidden">
     <div id="updatebox">
@@ -259,6 +275,9 @@
 
   <script src="hls.min.js"></script>
   <script src="favorites.js"></script>
+  <script src="ui-runtime.js"></script>
+  <script src="virtual-grid.js"></script>
+  <script src="ui-polish.js"></script>
   <script src="chat-window.js"></script>
   <script src="app.js"></script>
 </body>

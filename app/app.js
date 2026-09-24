@@ -66,20 +66,38 @@ var WATCHDOG_MS = 5000;    // how often the freeze checker runs
 var STALL_TICKS = 3;       // three checks with no progress, about fifteen seconds, counts as frozen
 
 /* Favorites, pins, and last watched */
+// The follow list exists only here, so a value that will not read back as a list
+// is set aside under '<key>.corrupt' before anything can write over it. The next
+// add or remove then starts clean without destroying the only copy.
 function lsGet(key) {
-  try { return JSON.parse(localStorage.getItem(key)) || []; } catch (e) { return []; }
+  var raw = null;
+  try { raw = localStorage.getItem(key); } catch (e) { return []; }
+  if (raw === null) return [];
+  var val;
+  try { val = JSON.parse(raw); } catch (e) { val = undefined; }
+  if (Array.isArray(val)) return val;
+  if (val === null) return [];
+  try { localStorage.setItem(key + '.corrupt', raw); } catch (e) {}
+  return [];
 }
 function lsSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+  if (key === 'kicktv.added' || key === 'kicktv.removed') favoritesMemo = null;
 }
+var favoritesMemo = null, favoritesMembership = Object.create(null);
 function getFavorites() {
+  if (favoritesMemo) return favoritesMemo.slice();
   var removed = lsGet('kicktv.removed'), added = lsGet('kicktv.added'), favs = [];
   SEED_FAVORITES.forEach(function (s) { if (removed.indexOf(s) === -1) favs.push(s); });
   added.forEach(function (s) {
     if (favs.indexOf(s) === -1 && removed.indexOf(s) === -1) favs.push(s);
   });
-  return favs;
+  favoritesMemo = favs;
+  favoritesMembership = Object.create(null);
+  favs.forEach(function (slug) { favoritesMembership[slug] = true; });
+  return favs.slice();
 }
+function isFavorite(slug) { if (!favoritesMemo) getFavorites(); return favoritesMembership[slug] === true; }
 function addFavorite(slug) {
   var added = lsGet('kicktv.added'), removed = lsGet('kicktv.removed');
   var ri = removed.indexOf(slug);
@@ -156,7 +174,7 @@ function loadChannelCache() {
 }
 
 /* Talking to Kick */
-function serviceGet(path, cb) {
+function serviceTransport(path, cb, options) {
   var Bridge = window.WebOSServiceBridge || window.PalmServiceBridge;
   if (!Bridge) { cb('nobridge'); return; }
   var bridge, done = false;
@@ -172,10 +190,19 @@ function serviceGet(path, cb) {
     } catch (e) { cb('parse'); }
   };
   try {
-    bridge.call('luna://com.barisahmet.kicktv.service/fetch', JSON.stringify({ path: path }));
+    bridge.call('luna://com.barisahmet.kicktv.service/fetch', JSON.stringify({ path: path, compact: !(options && options.compact === false) }));
   } catch (e) {
     if (!done) { done = true; clearTimeout(timer); cb('callfail'); }
   }
+  return function () {
+    done = true; clearTimeout(timer);
+    if (bridge.cancel) { try { bridge.cancel(); } catch (e) {} }
+  };
+}
+if (window.UIWork) UIWork.setTransport(serviceTransport);
+function serviceGet(path, cb, options) {
+  options = { priority: options && options.priority, compact: !(options && options.compact === false) };
+  return window.UIWork ? UIWork.request(path, cb, options) : serviceTransport(path, cb, options);
 }
 function xhrGet(slug, cb) {
   var xhr = new XMLHttpRequest();
@@ -189,7 +216,8 @@ function xhrGet(slug, cb) {
   xhr.onerror = xhr.ontimeout = function () { cb('network'); };
   xhr.send();
 }
-function apiGet(slug, cb) {
+function apiGet(slug, cb, options) {
+  options = options || { priority: 0 };
   var path = '/api/v2/channels/' + encodeURIComponent(slug);
   serviceGet(path, function (err, data) {
     if (!err) { cb(null, data); return; }
@@ -200,9 +228,9 @@ function apiGet(slug, cb) {
         if (!err2) { cb(null, data2); return; }
         if (err2 === 404) { cb(404); return; }
         xhrGet(slug, cb);
-      });
+      }, options);
     }, 700);
-  });
+  }, options);
 }
 function normalize(slug, raw) {
   var live = raw.livestream && raw.livestream.is_live;
@@ -256,6 +284,11 @@ var fetchGeneration = 0;   // stamps each refresh so a slow old one cannot overw
 // follow-up pass whose callbacks all fire on fresh data.
 var fetchInFlight = false;
 var fetchFollowUp = null;
+function logError(e) { try { console.error(e && e.stack ? e.stack : e); } catch (x) {} }
+// Only channels that have been fetched at least once can be sorted or shown.
+function currentFavoritesWithData() {
+  return getFavorites().filter(function (s) { return !!state.channels[s]; });
+}
 function fetchFavorites(done, liveOnly) {
   done = done || function () {};
   if (fetchInFlight) {
@@ -265,14 +298,15 @@ function fetchFavorites(done, liveOnly) {
   }
   fetchInFlight = true;
   runFetchFavorites(function () {
-    fetchInFlight = false;
-    done();
+    fetchInFlight = false;             // first, so a throwing callback can never wedge refreshes
+    try { done(); } catch (e) { logError(e); }
     prepareSidebarSoon();
+    warmPreviews(false);               // newly live channels get a frame within the minute
     var queued = fetchFollowUp;
     fetchFollowUp = null;
     if (queued && queued.length) {
       fetchFavorites(function () {     // follow-up passes are always full
-        for (var i = 0; i < queued.length; i++) queued[i]();
+        for (var i = 0; i < queued.length; i++) { try { queued[i](); } catch (e) { logError(e); } }
       });
     }
   }, liveOnly);
@@ -294,18 +328,34 @@ function runFetchFavorites(done, liveOnly) {
     if (!targets.length) { done(); return; }
   }
   var total = targets.length;
+  var focusItem = state.sidebarOpen && state.sideItems[state.sideFocus];
+  function targetRank(s) {
+    return s === state.current ? 0 : (focusItem && focusItem.slug === s ? 1 :
+      (isPinned(s) ? 2 : (state.channels[s] && state.channels[s].live ? 3 : 4)));
+  }
+  targets = targets.slice().sort(function (a, b) {
+    return targetRank(a) - targetRank(b);
+  });
   function onOne(slug, err, raw) {
     var stale = gen !== fetchGeneration;
-    if (!err) { if (!stale) state.channels[slug] = normalize(slug, raw); ok++; }
-    else {
-      if (err !== 404) hard++;         // a 404 is a definitive answer, not a connectivity failure
-      if (!stale) {
-        if (err === 404) {             // channel is gone: drop stale live data but keep its name
-          var old = state.channels[slug];
-          state.channels[slug] = offlineStub(slug);
-          if (old && old.name) state.channels[slug].name = old.name;
-        } else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
+    if (!err && !(raw && typeof raw === 'object')) err = 'parse';   // an empty body must not throw in normalize
+    // Whatever one channel's data does, the pass must still count it as finished;
+    // otherwise fetchInFlight stays set and the list silently never refreshes again.
+    try {
+      if (!err) { if (!stale) state.channels[slug] = normalize(slug, raw); ok++; }
+      else {
+        if (err !== 404) hard++;         // a 404 is a definitive answer, not a connectivity failure
+        if (!stale) {
+          if (err === 404) {             // channel is gone: drop stale live data but keep its name
+            var old = state.channels[slug];
+            state.channels[slug] = offlineStub(slug);
+            if (old && old.name) state.channels[slug].name = old.name;
+          } else if (!state.channels[slug]) state.channels[slug] = offlineStub(slug);
+        }
       }
+    } catch (e) {
+      logError(e);
+      if (!stale && !state.channels[slug]) state.channels[slug] = offlineStub(slug);
     }
     if (++finished === total) {
       if (gen !== fetchGeneration) { done(); return; }  // a newer refresh owns the shared state now
@@ -316,14 +366,19 @@ function runFetchFavorites(done, liveOnly) {
       // success is proof we reached Kick.
       if (!liveOnly) setNetDown(ok === 0 && hard > 0);
       else if (ok > 0) setNetDown(false);
-      sortOrder(favs); detectOnline(favs); saveChannelCache(); done();
+      // Sort what the list is NOW, not what it was when this pass began: a remove
+      // or pin made mid-pass must not be undone by the pass finishing.
+      var favsNow = currentFavoritesWithData();
+      try { sortOrder(favsNow); detectOnline(favsNow); saveChannelCache(); }
+      finally { done(); }
     } else {
       pump();                          // a slot freed up — start the next one
     }
   }
   function pump() {
     while (started < total && (started - finished) < FETCH_CONCURRENCY) {
-      (function (slug) { apiGet(slug, function (err, raw) { onOne(slug, err, raw); }); })(targets[started++]);
+      (function (slug) { apiGet(slug, function (err, raw) { onOne(slug, err, raw); },
+        { priority: !state.ready || state.sidebarOpen ? 1 : 2 }); })(targets[started++]);
     }
   }
   pump();
@@ -351,16 +406,23 @@ function detectOnline(favs) {
   if (newly.length) notifyOnline(newly);
 }
 function alertAllowed(item) {
-  if (!item || settings.alerts === 'off' || getFavorites().indexOf(item.slug) === -1) return false;
+  if (!item || settings.alerts === 'off' || !isFavorite(item.slug)) return false;
   var c = state.channels[item.slug];
   if (!c || !c.live) return false;
+  if (item.slug === state.current) return false;   // already watching it
   if (isChannelBlocked(c)) return false;   // a blocked category never interrupts
   return settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(item.slug));
 }
+// Every panel or popup that takes over the remote. This is the ONE list: the
+// "is something in the way" checks below all build on it, so a new popup only
+// has to be added here and they cannot drift apart again.
+function anyPanelOpen() {
+  return !!(browse.open || vods.open || cats.open || chpop.open || settings.open || dimopt.open ||
+    chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen);
+}
 function notifyUiBusy() {
   return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||
-    browse.open || vods.open || cats.open || settings.open || dimopt.open ||
-    chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen || chpop.open;
+    anyPanelOpen();
 }
 function notifyOnline(items) {
   items.forEach(function (item) {
@@ -645,6 +707,7 @@ function teardownVideo() {
   saveVodProgress(true);          // capture the old VOD before its media/state is replaced
   saveLiveMark(true);             // ...and where we were in a live stream, for its recording
   resetSeekAccum();               // a queued seek belongs to the source being torn down
+  hideLiveBar();
   PB.active = false;
   hideVodBar();
   hideSpinner();
@@ -679,14 +742,35 @@ function play(slug, preserveLastVod, prefetchedRaw) {
   applyStreamerChatPreferences();
   state.preserveLastVodDuringLive = !!preserveLastVod;
   // if it is not one of your channels, it shows in the sidebar as a temporary row
-  state.tempChannel = (getFavorites().indexOf(slug) === -1) ? slug : null;
+  state.tempChannel = !isFavorite(slug) ? slug : null;
   PB.slug = slug; PB.session = (PB.session || 0) + 1; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
-  PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = '';
+  PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = ''; PB.netWaits = 0;
   PB.userSeekUntil = 0; PB.rewound = false;
   setBanner('');
   showState('hidden');
   updateGear();
   loadChannel(slug, false, prefetchedRaw);
+}
+// A playback link carries a signed token that Kick issues for about ten minutes.
+// Read its expiry, and treat it as usable only with a margin left.
+function playbackUrlFresh(url) {
+  var m = /[?&]token=([^&]+)/.exec(url || '');
+  if (!m) return false;
+  try {
+    var body = m[1].split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    var exp = JSON.parse(atob(body)).exp;
+    return typeof exp === 'number' && exp * 1000 - Date.now() > 90000;
+  } catch (e) { return false; }
+}
+// The last started live link, so a relaunch within its lifetime can start at once.
+function rememberPlayback(slug, url) {
+  try { localStorage.setItem('kicktv.lastplay', JSON.stringify({ slug: slug, url: url })); } catch (e) {}
+}
+function recallPlayback(slug) {
+  try {
+    var v = JSON.parse(localStorage.getItem('kicktv.lastplay'));
+    return v && v.slug === slug && playbackUrlFresh(v.url) ? v.url : null;
+  } catch (e) { return null; }
 }
 // Fetch the channel again, which also hands us a fresh playback link since the
 // old one expires after a while, then start the video. A caller that already
@@ -697,14 +781,36 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
     if (state.current !== slug || session !== PB.session) return;  // switched away, or an older session for the same channel
     PB.reloading = false;
     if (err) {
-      if (isRecovery) { scheduleReconnect(slug); return; }  // a recovery try failed, so keep trying
+      if (isRecovery) {
+        // A lookup that could not reach Kick says nothing about the stream, so it
+        // does not spend the give-up budget: keep trying, backing off, until the
+        // network comes back. Only a real answer ("not live", 404) ends playback.
+        if (err !== 404) PB.recoverCount = Math.max(0, PB.recoverCount - 1);
+        // About ten minutes of backoff without one answer: hand over to the idle
+        // "Can't reach Kick" screen, whose own retry picks things up again.
+        if (err !== 404 && (PB.netWaits || 0) >= 20) {
+          toast('Could not reconnect');
+          returnToIdle();
+          setNetDown(true);
+          showNothing();
+          scheduleDownRetry();
+          return;
+        }
+        scheduleReconnect(slug, err !== 404);
+        return;
+      }
       toast('Kick API unreachable');
       returnToIdle();
       return;
     }
     var c = normalize(slug, raw);
     state.channels[slug] = c;
+    start(c);
+  }
+  function start(c) {
     if (!c.live || !c.playbackUrl) { advanceOrIdle(slug); return; }   // stream ended / offline
+    PB.netWaits = 0;
+    if (!isRecovery) rememberPlayback(slug, c.playbackUrl);
     saveLast(slug);
     // An automatic live fallback after a transient VOD lookup failure must not
     // erase Continue Watching. A deliberate live choice calls play() without
@@ -716,7 +822,12 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
     syncChat();                                  // connect chat for this channel if it is enabled
   }
   if (prefetchedRaw) { handle(null, prefetchedRaw); return; }
-  apiGet(slug, handle);
+  // The list refresh already holds a playback link for every live channel. While
+  // its token has time left, start on it and skip the lookup (a round trip to Kick
+  // on every switch). If the stream ended meanwhile, recovery looks it up afresh.
+  var known = state.channels[slug];
+  if (!isRecovery && known && known.live && playbackUrlFresh(known.playbackUrl)) { start(known); return; }
+  apiGet(slug, handle, { priority: 0 });
 }
 /* Show a still while the first frame is decoding, instead of black. Live uses the
    warmed preview thumbnail; a recording uses its own. Cleared on teardown so a
@@ -750,7 +861,7 @@ function livePoster(slug) {
   var c = previewCache[slug];
   var ch = state.channels[slug];
   return {
-    frame: (c && Date.now() - c.t < 60000) ? c.url : null,
+    frame: (c && Date.now() - c.t < 3 * PREVIEW_REFRESH_MS) ? c.url : null,
     avatar: (ch && ch.avatar) || null
   };
 }
@@ -764,16 +875,18 @@ function attachStream(slug, url) {
   liveWatchCountedMs = liveWatchStartedMs;
   liveWatchAccumSec = 0;
   liveWatchSeeded = false;           // re-fold the stored total on the next save
+  liveWatchContentMs = 0;
   var lp = livePoster(slug);
   setPosterStill(lp.frame, lp.avatar);
   try { video.playbackRate = 1; } catch (e) {}
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
     state.hls = hls;
+    qualityAlertReset();
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;   // old stream, or not fatal, so ignore
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) onNetworkError(slug, hls);
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) onNetworkError(slug, hls, data.details);
       else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) onMediaError(slug, hls, data.details);
       else recoverPlayback(slug);                              // nothing we can patch, reload it all
     });
@@ -784,12 +897,25 @@ function attachStream(slug, url) {
     });
     if (Hls.Events.LEVEL_SWITCHED) {
       hls.on(Hls.Events.LEVEL_SWITCHED, function () {
-        if (state.hls === hls) updateQualityButton();
+        if (state.hls === hls) { updateQualityButton(); checkQualityDrop(); }
       });
     }
     if (Hls.Events.FRAG_LOADED) {
       hls.on(Hls.Events.FRAG_LOADED, function (ev, d) { diagCountFrag(d); });
     }
+    // hls.js starts a live stream at its sync point, which usually lands partway
+    // into a segment. The TV's decoder then has to run from that segment's
+    // keyframe to the point before it shows anything, and waits for several more
+    // segments while it does: measured, 3s to the first frame instead of ~1.2s.
+    // Starting at the segment's own start costs at most one segment of extra
+    // delay, which Auto chat delay absorbs.
+    var aligned = false;
+    hls.on(Hls.Events.FRAG_BUFFERED, function (ev, d) {
+      if (aligned || state.hls !== hls) return;
+      aligned = true;
+      var f = d && d.frag, t = video.currentTime;
+      if (f && t > f.start + 0.2 && t < f.start + f.duration) video.currentTime = f.start + 0.05;
+    });
     try { hls.loadSource(url); hls.attachMedia(video); }
     catch (e) { recoverPlayback(slug); return; }
   } else {
@@ -814,8 +940,11 @@ var resumeWasPaused = false;   // unused while the pause-under-popups experiment
    behind Browse and Past videos. Revert this commit to restore the old behaviour. */
 function pausePlaybackForBrowse() {}
 function resumePlaybackAfterBrowse() {}
-function onNetworkError(slug, hls) {
+function onNetworkError(slug, hls, details) {
   if (state.current !== slug) return;
+  // After a fatal manifest error hls.js has no levels, so startLoad() is a no-op
+  // and only a fresh playback link (the old one usually expired) gets us back.
+  if (details && String(details).indexOf('manifest') === 0) { recoverPlayback(slug); return; }
   PB.netRetries++;
   if (PB.netRetries <= MAX_NET_RETRY) {
     setBanner('Reconnecting...');
@@ -890,19 +1019,27 @@ function handleEnded(slug) {
   var session = PB.session;
   apiGet(slug, function (err, raw) {
     if (state.current !== slug || session !== PB.session) return;
+    if (err && err !== 404) { PB.endedCount = 0; scheduleReconnect(slug, true); return; }
     var live = !err && raw && raw.livestream && raw.livestream.is_live && raw.playback_url;
     if (!live) { advanceOrIdle(slug); return; }
     state.channels[slug] = normalize(slug, raw);
     attachStream(slug, raw.playback_url);
   });
 }
-function scheduleReconnect(slug) {
+// netWait: the last try could not reach Kick at all. Those retries back off
+// (5s, 10s, 20s, then every 30s) instead of hammering a dead link.
+function scheduleReconnect(slug, netWait) {
   setBanner('Reconnecting...');
   if (PB.reconnectTimer) return;
+  var wait = 5000;
+  if (netWait) {
+    PB.netWaits = (PB.netWaits || 0) + 1;
+    wait = Math.min(30000, 5000 * Math.pow(2, PB.netWaits - 1));
+  }
   PB.reconnectTimer = setTimeout(function () {
     PB.reconnectTimer = null;
     if (state.current === slug) recoverPlayback(slug);
-  }, 5000);
+  }, wait);
 }
 // Keeps an eye on playback. A stream can freeze without ever throwing an error,
 // so if the play position stops moving for a while we step in and reconnect.
@@ -965,8 +1102,15 @@ function startPlayerPoll() {
   stopPlayerPoll();
   state.playerTimer = setInterval(function () {
     playerPollTick++;
-    // Every third tick (90s) is a full refresh; in between, only live channels
-    // are re-checked — a handful of ~50ms requests instead of the whole list.
+    var quiet = !state.sidebarOpen && !chpop.open && !browse.open && !cats.open && !vods.open;
+    // Closed menus need much less directory work. Keep live alerts current on
+    // a two-minute beat; a movie with alerts disabled needs no directory poll.
+    if (quiet) {
+      if (state.vod && settings.alerts === 'off') return;
+      if (playerPollTick % 4 !== 0) return;
+    }
+    // Open menus use a full pass every90s with live-only checks between.
+    // Quiet checks include offline channels too, so new-live alerts work.
     fetchFavorites(function () {
       if (state.sidebarOpen) renderSidebar();
       if (chpop.open && chpop.persistent) refreshChpopList();   // keep the stream-end list fresh
@@ -976,7 +1120,7 @@ function startPlayerPoll() {
         var ov = document.getElementById('overlay');
         if (ov.className.indexOf('hidden') === -1) fillOverlay(cur);
       }
-    }, playerPollTick % 3 !== 0);
+    }, !quiet && playerPollTick % 3 !== 0);
   }, PLAYER_REFRESH_MS);
 }
 function stopPlayerPoll() {
@@ -992,6 +1136,7 @@ function setOverlayAvatar(avatarUrl, name) {
   else { av.style.backgroundImage = ''; av.textContent = (name || '?').charAt(0).toUpperCase(); }
 }
 function fillOverlay(c) {
+  vodOverlayKey = '';
   setOverlayAvatar(c.avatar, c.name);
   document.getElementById('ov-name').textContent = c.name;
   var up = c.live && c.startedAt ? fmtUptime(c.startedAt) : '';
@@ -1016,15 +1161,61 @@ function showOverlay(c) {
   ov.style.left = state.sidebarOpen ? '470px' : '0';
   ov.style.width = state.sidebarOpen ? '1450px' : '1920px';
   ov.className = '';
+  showLiveBar(false);
+  armLiveOverlayHide();
+}
+function armLiveOverlayHide() {
   clearTimeout(overlayTimer);
   overlayTimer = setTimeout(function () {
-    if (!state.sidebarOpen) ov.className = 'hidden';  // with the sidebar open it hides on close instead
-  }, 4000);
+    if (state.sidebarOpen) return;                     // with the sidebar open it hides on close instead
+    // still seeking, or the pointer is resting on the bar
+    if (liveSeek.base !== null || liveBar.dragTarget !== null || liveBar.hover || catPop.hover) { armLiveOverlayHide(); return; }
+    document.getElementById('overlay').className = 'hidden';
+    hideLiveBar();
+  }, liveBar.focused ? 6000 : 4000);
 }
+/* Block the playing category from the top bar. Resting the pointer on the category
+   chip opens a small "Block category" button under it; the bar stays up while the
+   pointer is on either, and a short grace lets the pointer cross the gap. */
+var catPop = { hover: false, timer: null, slug: '', name: '' };
+function showCatPop(chip) {
+  var pop = document.getElementById('ovcat-pop'), ov = document.getElementById('overlay');
+  if (!pop || !ov) return;
+  clearTimeout(catPop.timer);
+  catPop.hover = true;
+  catPop.slug = chip.getAttribute('data-catslug');
+  catPop.name = chip.textContent;
+  var blocked = isCatBlocked(catPop.slug);
+  pop.innerHTML = blockIcon();
+  pop.appendChild(document.createTextNode(blocked ? 'Unblock category' : 'Block category'));
+  pop.className = blocked ? 'unblock' : '';
+  var r = chip.getBoundingClientRect(), o = ov.getBoundingClientRect();
+  pop.style.left = Math.round(r.left - o.left) + 'px';
+  pop.style.top = Math.round(r.bottom - o.top + 10) + 'px';
+}
+function leaveCatPop() {
+  clearTimeout(catPop.timer);
+  catPop.timer = setTimeout(hideCatPop, 250);
+}
+function hideCatPop() {
+  clearTimeout(catPop.timer);
+  catPop.hover = false;
+  var pop = document.getElementById('ovcat-pop');
+  if (pop && pop.className !== 'hidden') pop.className = 'hidden';
+}
+// OK on a live stream: the info bar comes up with the timeline focused, so
+// Left/Right seek; OK again (or Back) puts it all away.
 function toggleOverlay() {
   var ov = document.getElementById('overlay');
-  if (ov.className === 'hidden') { var c = state.channels[state.current]; if (c) showOverlay(c); }
-  else { ov.className = 'hidden'; clearTimeout(overlayTimer); }
+  if (ov.className === 'hidden') {
+    var c = state.channels[state.current];
+    if (c) { liveBar.focused = true; showOverlay(c); }
+  } else if (liveSeek.base !== null) applyLiveSeek();
+  else if (!liveBar.focused && liveBarVisible()) {   // up from a channel switch: take the timeline
+    liveBar.focused = true;
+    showOverlay(state.channels[state.current]);
+  }
+  else { ov.className = 'hidden'; clearTimeout(overlayTimer); hideLiveBar(); }
 }
 
 /* The channel sidebar */
@@ -1059,7 +1250,8 @@ function activatePlayerTool() {
 function updateGear() {
   var open = state.sidebarOpen;
   var tools = document.getElementById('player-tools');
-  if (tools) { if (open) tools.classList.remove('hidden'); else tools.classList.add('hidden'); }
+  if (open) endQualityAlert();
+  if (tools) { if (open) tools.classList.remove('hidden'); else if (!tools.classList.contains('qalert')) tools.classList.add('hidden'); }
   if (!open) {
     state.playerToolFocus = -1;
     hideQualityHint();
@@ -1069,36 +1261,55 @@ function updateGear() {
   var guide = document.getElementById('cbguide');
   if (guide) { if (open) guide.classList.remove('hidden'); else guide.classList.add('hidden'); }
 }
+var sidebarRevealFrame = null;
 function openSidebar() {
   if (!state.ready || browse.open || vods.open || cats.open || chpop.open) return;
   state.suppressNudgeUntil = 0;                  // an explicit reopen cancels an older Back/click grace
   showCursor();
   if (!state.sidebarOpen) {
     state.sidebarOpen = true;
+    if (state.notifyCurrent) pauseNotify();
     document.getElementById('sidebar').className = 'open';
     sidePreviewArmed = !state.vod;      // in a VOD, wait for a move or a hover
     var prefer = (state.current && state.order.indexOf(state.current) !== -1)
       ? state.current : null;
-    renderSidebar(prefer);
-    if (state.current && state.channels[state.current]) showOverlay(state.channels[state.current]);
+    var list = document.getElementById('fav-list');
+    if (!list.children.length) renderSidebar(prefer);
+    else if (prefer) {
+      for (var i = 0; i < state.sideItems.length; i++) {
+        if (state.sideItems[i].slug === prefer) { state.sideFocus = i; break; }
+      }
+      applySideFocus();
+    }
   }
   resetIdle();
   updateGear();
-  placeDiagnostics();
-  prefetchSidePreviews();                             // warm live-row thumbnails for instant previews
-  if (state.vod) showVodOverlay();                    // the full VOD controls ride with the sidebar
-  // only refetch when the data is stale, so opening the list stays snappy
-  if (Date.now() - state.lastFetch > 8000) {
-    fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
-  }
+  if (sidebarRevealFrame !== null) cancelAnimationFrame(sidebarRevealFrame);
+  sidebarRevealFrame = requestAnimationFrame(function () {
+    sidebarRevealFrame = requestAnimationFrame(function () {
+      sidebarRevealFrame = null;
+      if (!state.sidebarOpen) return;
+      renderSidebar();
+      if (state.current && state.channels[state.current]) showOverlay(state.channels[state.current]);
+      placeDiagnostics();
+      prefetchSidePreviews();
+      if (state.vod) showVodOverlay();
+      if (Date.now() - state.lastFetch > 60000) {
+        fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
+      }
+    });
+  });
 }
 function closeSidebar() {
   clearTimeout(state.idleTimer);
+  if (vodOverlayFrame !== null) { cancelAnimationFrame(vodOverlayFrame); vodOverlayFrame = null; }
+  if (sidebarRevealFrame !== null) { cancelAnimationFrame(sidebarRevealFrame); sidebarRevealFrame = null; }
   if (!state.sidebarOpen) return;
   state.sidebarOpen = false;
   state.backOpenedSidebar = false;   // however this list closed, the exit is no longer armed
   document.getElementById('sidebar').className = '';
   document.getElementById('overlay').className = 'hidden';
+  hideLiveBar();
   clearTimeout(overlayTimer);
   sidePreviewCard.cancel();
   hideVodBar();                                       // VOD seek bar hides with the sidebar
@@ -1178,33 +1389,48 @@ function clipWithDots(text, font, maxPx) {
   return text.slice(0, lo).replace(/[\s·]+$/, '') + dots;
 }
 var sideTextStyle = null;
-// The sidebar has a fixed width and fonts. Measure those once, and only clip text
-// whose full value changed. Keep the original so refreshing never clips its own dots.
+// The sidebar has fixed fonts, so read those once. Widths depend on the row: one with
+// a viewer count or pin marker stops short of it. Read every width in one batch
+// before writing any text, and only clip a value whose text or width changed. Keep
+// the original so refreshing never clips its own dots.
+// The second line is two spans, category then " · title", in different fonts. The
+// category keeps its room first; the title gets whatever is left.
 function clipSidebarText() {
   var list = document.getElementById('fav-list');
-  var groups = ['.favname', '.favgame'];
   if (!sideTextStyle) {
     var probe = list.querySelector('.favname');
     if (!probe || probe.clientWidth <= 0) return;
-    sideTextStyle = { width: probe.clientWidth, fonts: [] };
     // Finish reading styles before writing any text.
-    for (var g = 0; g < groups.length; g++) {
-      var cs = getComputedStyle(list.querySelector(groups[g]));
-      sideTextStyle.fonts[g] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
-    }
+    var fonts = {};
+    ['.favname', '.favcat', '.favtitle'].forEach(function (sel) {
+      var cs = getComputedStyle(list.querySelector(sel));
+      fonts[sel] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    });
+    sideTextStyle = { fonts: fonts };
   }
-  for (var gi = 0; gi < groups.length; gi++) {
-    var font = sideTextStyle.fonts[gi], w = sideTextStyle.width;
-    var els = list.querySelectorAll(groups[gi]);
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i], full = el.getAttribute('data-full');
-      if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
-      var key = JSON.stringify([full, font, w]);
-      if (el._sideClipKey === key) continue;
-      var clipped = clipWithDots(full, font, w);
-      if (el.textContent !== clipped) el.textContent = clipped;
-      el._sideClipKey = key;
-    }
+  var f = sideTextStyle.fonts;
+  var names = list.querySelectorAll('.favname'), subs = list.querySelectorAll('.favgame');
+  var nameW = [], subW = [], i;
+  for (i = 0; i < names.length; i++) nameW.push(names[i].clientWidth);
+  for (i = 0; i < subs.length; i++) subW.push(subs[i].clientWidth);
+  for (i = 0; i < names.length; i++) {
+    var el = names[i], w = nameW[i], full = el.getAttribute('data-full');
+    if (w <= 0) continue;
+    if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
+    var key = full + '\n' + w;
+    if (el._sideClipKey === key) continue;
+    var clipped = clipWithDots(full, f['.favname'], w);
+    if (el.textContent !== clipped) el.textContent = clipped;
+    el._sideClipKey = key;
+  }
+  for (i = 0; i < subs.length; i++) {
+    var sub = subs[i], sw = subW[i];
+    if (sw <= 0 || !sub._sideParts) continue;
+    var skey = sub.getAttribute('data-full') + '\n' + sw;
+    if (sub._sideClipKey === skey) continue;
+    clipTwoParts(sub.children[0], sub.children[1], sub._sideParts.cat, sub._sideParts.rest,
+      f['.favcat'], f['.favtitle'], sw);
+    sub._sideClipKey = skey;
   }
 }
 function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
@@ -1218,12 +1444,12 @@ function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
   }
   return nextEl;
 }
+// Keep a focused row in view by the shared rule (revealScroll, virtual-grid.js).
 function scrollIntoViewport(container, el, pad) {
   if (!el) return;
-  var top = el.offsetTop - container.offsetTop;
-  if (top < container.scrollTop) container.scrollTop = top - pad;
-  else if (top + el.offsetHeight > container.scrollTop + container.clientHeight)
-    container.scrollTop = top + el.offsetHeight - container.clientHeight + pad;
+  var scroll = container.scrollTop;
+  var next = revealScroll(scroll, container.clientHeight, el.offsetTop - container.offsetTop, el.offsetHeight, pad);
+  if (next !== scroll) container.scrollTop = next;
 }
 var sideFocusEl = null;
 var sideLayout = null;
@@ -1249,10 +1475,8 @@ function applySideFocus() {
   // the source of truth without remeasuring every row on each keypress.
   var scroll = list.scrollTop, nextScroll = scroll;
   if (pos) {
-    if (pos.top < scroll) nextScroll = pos.top - 8;
-    else if (pos.top + pos.height > scroll + sideLayout.height)
-      nextScroll = pos.top + pos.height - sideLayout.height + 8;
-    nextScroll = Math.max(0, Math.min(sideLayout.maxScroll, nextScroll));
+    nextScroll = revealScroll(scroll, sideLayout.height, pos.top, pos.height, 8);
+    if (nextScroll !== scroll) nextScroll = Math.max(0, Math.min(sideLayout.maxScroll, nextScroll));
   }
   sideFocusEl = swapFocus(list, sideFocusEl, row, sideBaseOf, state.playerToolFocus < 0);
   if (nextScroll !== scroll) list.scrollTop = nextScroll;
@@ -1262,53 +1486,255 @@ function applySideFocus() {
    focused list row — used by the sidebar and the quick-switch popup. The window
    appears instantly with a loading spinner; the frame swaps in when loaded
    (usually at once, thanks to prefetching). */
-var previewCache = {};   // slug -> { t, url }; v1 thumbnails live on images.kick.com, which loads directly
-// The v2 payload only carries a thumbnail host the webview cannot load, so ask
-// v1 for the images.kick.com variants and prefer the 480-wide one — the card is
-// 426px and the smaller file arrives much faster.
+var previewCache = {};   // slug -> { t, url, bitmap, img, ready }; v1 thumbnails live on images.kick.com, which loads directly
+var previewPending = Object.create(null);
+var PREVIEW_REFRESH_MS = 60000;   // how old a frame may get before the warmer fetches the next one
+/* The preview card's size in device pixels. Read once from the stylesheet (it is
+   fixed there) and the screen's pixel ratio, so every frame is scaled to exactly
+   what this TV draws — no bigger. */
+var previewPx = null;
+function previewTargetSize() {
+  if (previewPx) return previewPx;
+  var e = document.getElementById('sidepreview');
+  var cs = e ? getComputedStyle(e) : null;
+  var w = cs ? parseFloat(cs.width) : NaN, h = cs ? parseFloat(cs.height) : NaN;
+  var radius = cs ? (parseFloat(cs.borderTopLeftRadius) || 0) - (parseFloat(cs.borderTopWidth) || 0) : 10;
+  if (!(w > 0) || !(h > 0)) { w = 426; h = 240; }
+  var dpr = window.devicePixelRatio || 1;
+  previewPx = { w: Math.round(w * dpr), h: Math.round(h * dpr), r: Math.max(0, radius) * dpr };
+  return previewPx;
+}
+// The v2 payload only carries a thumbnail host the webview cannot load, so ask v1
+// for the images.kick.com variants and take the smallest that still covers the card.
 function pickPreviewUrl(raw) {
   var t = raw && raw.livestream && raw.livestream.thumbnail;
   if (!t) return null;
-  var m = /(https:\/\/[^\s]+\/480\.webp[^\s]*)/.exec(String(t.responsive || ''));
-  return (m && m[1]) || t.url || null;
+  return pickSrcsetUrl(t.responsive, previewTargetSize().w) || t.url || null;
 }
-function fetchPreviewUrl(slug, done) {
+function previewReady(slug) {
+  var c = previewCache[slug];
+  return !!(c && c.ready);
+}
+function releasePreview(entry) {
+  if (entry && entry.bitmap && entry.bitmap.close) { try { entry.bitmap.close(); } catch (e) {} }
+}
+/* Kick's variants come in fixed sizes. Download the one that covers the card, let
+   the browser decode it as-is off the main thread (a Blob source decodes on a
+   worker), then crop and shrink it to the card's exact pixels with one GPU draw.
+   Measured on the TV: createImageBitmap's own resize option stalled every frame for
+   ~500ms per image, while a plain decode plus a canvas draw costs no frames at all
+   (bar a one-off shader compile on the first). Frames are prepared one at a time so
+   a warm pass never lands as a burst. If the blob route fails, the Image is kept
+   and scaled at draw time instead. */
+var previewPrepQueue = [], previewPrepBusy = false;
+function queuePreviewPrep(job) {
+  previewPrepQueue.push(job);
+  if (!previewPrepBusy) nextPreviewPrep();
+}
+function nextPreviewPrep() {
+  var job = previewPrepQueue.shift();
+  if (!job) { previewPrepBusy = false; return; }
+  previewPrepBusy = true;
+  job(function () { setTimeout(nextPreviewPrep, 50); });
+}
+function scalePreviewBitmap(full) {
+  var size = previewTargetSize(), w = size.w, h = size.h, iw = full.width, ih = full.height;
+  var s = Math.max(w / iw, h / ih), sw = w / s, sh = h / s;
+  var canvas = window.OffscreenCanvas ? new OffscreenCanvas(w, h) : document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  var ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(full, (iw - sw) / 2, (ih - sh) / 2, sw, sh, 0, 0, w, h);
+  if (full.close) full.close();
+  return canvas.transferToImageBitmap ? canvas.transferToImageBitmap() : canvas;
+}
+function loadPreviewFrame(url, done) {
+  var settled = false;
+  function once(bitmap, img) { if (!settled) { settled = true; done(bitmap, img); } }
+  function viaImage() {
+    var img = new Image();
+    img.onload = function () { once(null, img); };
+    img.onerror = function () { once(null, null); };
+    img.src = url;
+  }
+  if (!window.createImageBitmap) { viaImage(); return; }
+  var xhr = new XMLHttpRequest();
+  try {
+    xhr.open('GET', url, true);
+    xhr.responseType = 'blob';
+    xhr.timeout = 15000;
+  } catch (e) { viaImage(); return; }
+  xhr.onload = function () {
+    if (xhr.status !== 200 || !xhr.response) { viaImage(); return; }
+    var blob = xhr.response;
+    queuePreviewPrep(function (next) {
+      createImageBitmap(blob).then(function (full) {
+        var bitmap = null;
+        try { bitmap = scalePreviewBitmap(full); } catch (e) { logError(e); }
+        next();
+        if (bitmap) once(bitmap, null); else viaImage();
+      }, function () { next(); viaImage(); });
+    });
+  };
+  xhr.onerror = xhr.ontimeout = viaImage;
+  xhr.send();
+}
+/* Resolve a channel's current frame AND prepare it, then swap it into the cache.
+   Each new frame has its own versionId in the URL. Until the new one is ready the
+   cache keeps the previous frame, so a card never waits on the network once a
+   channel has been warmed. */
+// `urgent` is for a frame someone is waiting on (a highlighted row that was not
+// warmed yet, a Browse card); the background warmer leaves it off.
+function fetchPreviewUrl(slug, done, urgent) {
+  if (previewPending[slug]) { if (done) previewPending[slug].push(done); return; }
+  previewPending[slug] = done ? [done] : [];
+  function finish() {
+    var callbacks = previewPending[slug] || [];
+    delete previewPending[slug];
+    callbacks.forEach(function (callback) { try { callback(); } catch (e) { logError(e); } });
+  }
   serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
     var url = err ? null : pickPreviewUrl(raw);
-    if (url) {
-      if (Object.keys(previewCache).length > 16) previewCache = {};
-      previewCache[slug] = { t: Date.now(), url: url };
-      var img = new Image();     // warm the browser cache so presenting is instant
-      img.src = url;
-    }
-    if (done) done();
+    var old = previewCache[slug];
+    if (!url) { finish(); return; }
+    if (old && old.url === url && old.ready) { old.t = Date.now(); finish(); return; }
+    loadPreviewFrame(url, function (bitmap, img) {
+      if (bitmap || img) {
+        releasePreview(old);
+        previewCache[slug] = { t: Date.now(), url: url, bitmap: bitmap, img: img, ready: true };
+      } else if (!old) previewCache[slug] = { t: Date.now(), url: url, bitmap: null, img: null, ready: false };
+      else old.t = Date.now();          // keep showing the last good frame; retry next round
+      finish();
+    });
+  }, { priority: urgent ? 1 : 3 });  // idle: never ahead of the channel list refresh
+}
+// Every channel whose frame a list could show: live favourites plus a temporary one.
+function previewTargets() {
+  var out = [];
+  for (var i = 0; i < state.order.length; i++) {
+    var c = state.channels[state.order[i]];
+    if (c && c.live) out.push(state.order[i]);
+  }
+  var t = state.tempChannel;
+  if (t && state.channels[t] && state.channels[t].live && out.indexOf(t) === -1) out.push(t);
+  return out;
+}
+// Drop frames for channels that went offline or left the list, so the cache stays
+// the size of the live list instead of growing through a long evening.
+function prunePreviews(keep) {
+  for (var slug in previewCache) {
+    if (keep.indexOf(slug) === -1 && !previewPending[slug]) { releasePreview(previewCache[slug]); delete previewCache[slug]; }
+  }
+}
+/* Keep every live channel's frame warm in the background, on a one-minute beat,
+   so opening the sidebar or surf list shows real frames at once. Stale ones only;
+   the request queue runs them two at a time at background priority, behind playback. */
+var previewWarmLast = 0;
+function warmPreviews(force) {
+  if (!state.ready || document.hidden || saver.on) return;
+  if (!force && Date.now() - previewWarmLast < PREVIEW_REFRESH_MS - 5000) return;
+  previewWarmLast = Date.now();
+  var targets = previewTargets();
+  prunePreviews(targets);
+  // Whatever the viewer is about to look at goes first: the highlighted row, then
+  // the list order (pinned and busiest channels are at the top).
+  var focusItem = state.sidebarOpen && state.sideItems[state.sideFocus];
+  if (focusItem && focusItem.slug && targets.indexOf(focusItem.slug) > 0) {
+    targets.splice(targets.indexOf(focusItem.slug), 1);
+    targets.unshift(focusItem.slug);
+  }
+  targets.forEach(function (slug) {
+    var cached = previewCache[slug];
+    if (!cached || Date.now() - cached.t >= PREVIEW_REFRESH_MS - 5000) fetchPreviewUrl(slug);
   });
 }
-// Resolve and warm thumbnails for the live rows as soon as a channel list
-// opens, one at a time (the Luna bus dislikes bursts), so browsing feels instant.
-function prefetchSidePreviews() {
-  var queue = [];
-  for (var i = 0; i < state.order.length && queue.length < 8; i++) {
-    var s = state.order[i], c = state.channels[s];
-    if (c && c.live && s !== state.current) {
-      var cached = previewCache[s];
-      if (!cached || Date.now() - cached.t >= 60000) queue.push(s);
-    }
+// Opening a list forces a pass over anything stale (the timer may be up to a
+// minute away); fresh frames are left alone, so this costs nothing when warm.
+function prefetchSidePreviews() { warmPreviews(true); }
+setInterval(function () { warmPreviews(false); }, PREVIEW_REFRESH_MS);
+// Copy a prepared frame onto the card's canvas, clipped to the card's inner
+// rounded corners (a canvas is not clipped by its parent's border-radius).
+function drawPreviewFrame(card, entry) {
+  var size = previewTargetSize();
+  var canvas = card.querySelector('canvas.prevframe');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'prevframe';
+    card.insertBefore(canvas, card.firstChild);
   }
-  (function next() {
-    if (!queue.length || (!state.sidebarOpen && !chpop.open)) return;
-    fetchPreviewUrl(queue.shift(), next);
-  })();
+  if (canvas.width !== size.w || canvas.height !== size.h) { canvas.width = size.w; canvas.height = size.h; }
+  var ctx = canvas.getContext('2d'), w = size.w, h = size.h, r = size.r;
+  ctx.clearRect(0, 0, w, h);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(w - r, 0); ctx.arcTo(w, 0, w, r, r);
+  ctx.lineTo(w, h - r); ctx.arcTo(w, h, w - r, h, r);
+  ctx.lineTo(r, h); ctx.arcTo(0, h, 0, h - r, r);
+  ctx.lineTo(0, r); ctx.arcTo(0, 0, r, 0, r);
+  ctx.closePath();
+  ctx.clip();
+  // Cover-crop. A prepared bitmap is already the card's width, so for a 16:9
+  // stream this is a straight copy; anything else is scaled here as a fallback.
+  var src = entry.bitmap || entry.img;
+  var iw = entry.bitmap ? src.width : src.naturalWidth, ih = entry.bitmap ? src.height : src.naturalHeight;
+  if (iw && ih) {
+    var s = Math.max(w / iw, h / ih);
+    ctx.drawImage(src, (iw - w / s) / 2, (ih - h / s) / 2, w / s, h / s, 0, 0, w, h);
+  }
+  ctx.restore();
 }
 // One controller per card element; each follows its own list's focus. Repeat
 // updates for the same row are no-ops (re-renders must not flash the card).
+// Where an element sits once any entrance animation has finished. The sidebar
+// slides and the surf panel scales in, and a warmed preview now appears within
+// that animation, so a getBoundingClientRect would pin it to the moving start
+// frame. Offsets ignore transforms; scrolled ancestors are subtracted by hand.
+function layoutRect(el) {
+  var x = 0, y = 0, w = el.offsetWidth, h = el.offsetHeight, n = el;
+  while (n) {
+    x += n.offsetLeft; y += n.offsetTop;
+    var p = n.offsetParent;
+    for (var a = n.parentNode; a && a !== p && a.nodeType === 1; a = a.parentNode) { x -= a.scrollLeft; y -= a.scrollTop; }
+    if (p) { x += p.clientLeft - p.scrollLeft; y += p.clientTop - p.scrollTop; }
+    n = p;
+  }
+  return { left: x, top: y, right: x + w, bottom: y + h, width: w, height: h };
+}
+// The card sits at 0,0 and moves by transform, so the CSS transition can glide it
+// from row to row on the compositor.
+function positionStreamPreview(panel, row, container) {
+  if (!row || !container) return;
+  var anchor = layoutRect(row), edge = layoutRect(container);
+  var clip = layoutRect(row.parentNode);
+  var vis = anchor.bottom <= clip.top || anchor.top >= clip.bottom ? 'hidden' : '';
+  if (panel.style.visibility !== vis) panel.style.visibility = vis;
+  var width = panel.offsetWidth, height = panel.offsetHeight;
+  var viewWidth = window.innerWidth || 1920, viewHeight = window.innerHeight || 1080;
+  var left = edge.right + 24;
+  if (left + width > viewWidth - 24) left = edge.left - width - 24;
+  var x = Math.round(Math.max(24, Math.min(viewWidth - width - 24, left)));
+  var y = Math.round(Math.max(24, Math.min(viewHeight - height - 24, anchor.top + (anchor.height - height) / 2)));
+  var transform = 'translate(' + x + 'px,' + y + 'px)';
+  if (panel.style.transform !== transform) panel.style.transform = transform;
+}
 function makePreviewCard(elId, currentSlugFn, positionFn) {
-  var slugShowing = null, timer = null;
+  var slugShowing = null, urlShowing = null, timer = null, titleFont = null;
   function el() { return document.getElementById(elId); }
   function hide() {
-    slugShowing = null;
+    slugShowing = null; urlShowing = null;
     var e = el();
-    if (e) e.className = 'hidden';
+    if (e && e.className !== 'hidden') e.className = 'hidden';
+  }
+  // Show the card in a state and move it to the highlighted row. Coming out of
+  // hiding it jumps straight there; while it is up it glides.
+  function reveal(e, cls) {
+    var wasHidden = e.className === 'hidden';
+    if (e.className !== cls) e.className = cls;
+    if (!wasHidden) { positionFn(e); return; }
+    e.style.transition = 'none';
+    positionFn(e);
+    void e.offsetWidth;                 // commit the jump before transitions return
+    e.style.transition = '';
   }
   function setTitle(e, slug) {
     var tEl = e.querySelector('.prevtitle');
@@ -1318,67 +1744,74 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
     tEl.style.display = title ? '' : 'none';
     if (!title) { tEl.textContent = ''; return; }
     // Same hand-rolled ".." as the channel list, so the two never disagree. The
-    // card has to be visible for clientWidth to read, hence the fallback.
-    var cs = getComputedStyle(tEl);
-    var w = tEl.clientWidth -
-            (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-    tEl.textContent = w > 0
-      ? clipWithDots(title, cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily, w)
-      : title;
+    // card has a fixed size, so its font and text width are read once. It has to be
+    // visible for clientWidth to read, hence the fallback.
+    if (!titleFont || titleFont.w <= 0) {
+      var cs = getComputedStyle(tEl);
+      titleFont = { font: cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily,
+        w: tEl.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) };
+    }
+    var clipped = titleFont.w > 0 ? clipWithDots(title, titleFont.font, titleFont.w) : title;
+    if (tEl.textContent !== clipped) tEl.textContent = clipped;
   }
-  function present(slug, url) {
+  function present(slug) {
     if (slugShowing !== slug || currentSlugFn() !== slug) return;   // focus moved meanwhile
+    var entry = previewCache[slug];
+    if (!entry || !entry.ready) return;
     var e = el();
-    e.style.backgroundImage = 'url(' + url + ')';
+    if (urlShowing !== entry.url || e._frameSlug !== slug) {
+      drawPreviewFrame(e, entry);
+      urlShowing = entry.url; e._frameSlug = slug;
+    }
+    reveal(e, '');
     setTitle(e, slug);
-    positionFn(e);
-    e.className = '';
   }
-  function preload(slug, url) {
-    var img = new Image();   // swap in only after a real load — never a black card
-    img.onload = function () { present(slug, url); };
-    img.onerror = function () { if (slugShowing === slug) hide(); };
-    img.src = url;
+  // A warmed frame is ready to draw: show it on the spot, and swap in a newer one
+  // if the warmer brings it while the card is still up.
+  function showWarm(slug) {
+    present(slug);
+    if (Date.now() - previewCache[slug].t >= PREVIEW_REFRESH_MS) {
+      fetchPreviewUrl(slug, function () { if (slugShowing === slug) present(slug); });
+    }
   }
   function update() {
     var slug = currentSlugFn();
     var c = slug ? state.channels[slug] : null;
     var want = !!(slug && c && c.live && slug !== state.current);
-    if (want && slug === slugShowing) return;
+    if (want && slug === slugShowing) { if (el().className !== 'hidden') positionFn(el()); return; }
     clearTimeout(timer);
     if (!want) { hide(); return; }
     slugShowing = slug;
+    if (previewReady(slug)) { showWarm(slug); return; }
+    // Not warmed yet. A card already up glides along with a spinner; a hidden one
+    // waits for the highlight to settle. Either way the network is only asked once
+    // the highlight rests.
     var e = el();
-    positionFn(e);
-    setTitle(e, slug);      // the title is known immediately, even before the frame
-    e.className = 'loading';
-    var cached = previewCache[slug];
-    if (cached && Date.now() - cached.t < 60000) { preload(slug, cached.url); return; }
+    urlShowing = null;
+    if (e.className !== 'hidden') { reveal(e, 'loading'); setTitle(e, slug); }
     timer = setTimeout(function () {
+      if (currentSlugFn() !== slug) { hide(); return; }
+      reveal(e, 'loading');
+      setTitle(e, slug);
       fetchPreviewUrl(slug, function () {
-        var c2 = previewCache[slug];
-        if (c2) preload(slug, c2.url);
-        else if (slugShowing === slug) hide();   // no thumbnail: no stuck spinner
-      });
+        if (slugShowing !== slug) return;
+        if (previewReady(slug)) present(slug);
+        else hide();                    // no thumbnail: no stuck spinner
+      }, true);
     }, 150);
   }
   return { update: update, cancel: function () { clearTimeout(timer); hide(); } };
 }
 var sidePreviewCard = makePreviewCard('sidepreview',
   function () {
-    if (!state.sidebarOpen) return null;
+    if (!state.sidebarOpen || settings.open || qualityopt.open || chatopt.open) return null;
     var item = state.sideItems[state.sideFocus];
     return (item && (item.type === 'chan' || item.type === 'temp')) ? item.slug : null;
   },
   function (e) {
     var list = document.getElementById('fav-list');
     var row = list.children[state.sideFocus];
-    var top = 200;
-    if (row) {
-      var r = row.getBoundingClientRect();
-      top = Math.max(90, Math.min(1080 - 280, r.top - 40));
-    }
-    e.style.top = Math.round(top) + 'px';
+    positionStreamPreview(e, row, document.getElementById('sidebar'));
   });
 /* Over a VOD the preview window lands on top of the transport controls, which ride with
    the sidebar. So in a VOD the preview is not armed by merely opening the list — it waits
@@ -1399,6 +1832,18 @@ function prepareSidebarSoon() {
     sidePrepareTimer = null;
     if (!document.hidden && !state.sidebarOpen) renderSidebar();
   }, 500);
+}
+// The second line: an optional category span and the rest in title colour.
+function setSideSub(el, cat, rest) {
+  var full = cat + '\n' + rest;
+  if (el.getAttribute('data-full') === full) return false;
+  el.setAttribute('data-full', full);
+  if (el.children.length !== 2) el.innerHTML = '<span class="favcat"></span><span class="favtitle"></span>';
+  el.children[0].textContent = cat;
+  el.children[1].textContent = rest;
+  el._sideParts = { cat: cat, rest: rest };
+  el._sideClipKey = null;
+  return true;
 }
 function setSideText(el, full) {
   full = String(full == null ? '' : full);
@@ -1489,6 +1934,7 @@ function renderSidebar(focusKey) {
         row.innerHTML = '<div class="favav"></div><div class="favmid"><div class="favname"></div><div class="favgame"></div></div><div class="favinfo"></div><div class="favactions"></div>';
       }
       if (row.getAttribute('data-base') !== base) {
+        if (row.hasAttribute('data-base')) textChanged = true;   // live/pinned changes the text width
         row.setAttribute('data-base', base);
         row.className = base + (row === sideFocusEl && state.playerToolFocus < 0 ? ' focused' : '');
       }
@@ -1505,10 +1951,9 @@ function renderSidebar(focusKey) {
 
       var mid = row.children[1];
       if (setSideText(mid.children[0], c.name)) textChanged = true;
-      var subtitle = c.live
-        ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
-        : offlineLabel(slug);
-      if (setSideText(mid.children[1], subtitle)) textChanged = true;
+      if (c.live) {
+        if (setSideSub(mid.children[1], c.category || 'Live', c.title ? ' · ' + c.title : '')) textChanged = true;
+      } else if (setSideSub(mid.children[1], '', offlineLabel(slug))) textChanged = true;
 
       var info = row.children[2];
       var infoHtml = '';
@@ -1591,25 +2036,32 @@ function confirmYes() {
   if (a.type === 'remove' && state.channels[a.slug]) {
     var name = state.channels[a.slug].name;
     removeFavorite(a.slug);
+    // Still playing: it stays in the list as a temporary row, with its add button.
+    if (a.slug === state.current && !state.vod) state.tempChannel = a.slug;
     toast('Removed ' + name);
-    fetchFavorites(function () {
-      if (state.sidebarOpen) renderSidebar();
-      if (!state.current) showNothing();
-    });
+    // Sorting is local; no need to re-fetch every channel to drop one row.
+    sortOrder(currentFavoritesWithData());
+    if (state.sidebarOpen) renderSidebar();
+    if (!state.current) showNothing();
+    saveChannelCache();
   }
+  resetIdle();
 }
 function confirmNo() {
   pendingAction = null;
   setMode('player');
   if (state.sidebarOpen) renderSidebar();
   if (!state.current) showNothing();
+  resetIdle();
 }
 function togglePinFocused() {
   var item = state.sideItems[state.sideFocus];
   if (!item || item.type !== 'chan') return;
   var nowPinned = togglePin(item.slug);
   toast((nowPinned ? 'Pinned ' : 'Unpinned ') + state.channels[item.slug].name);
-  fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(item.slug); });
+  sortOrder(currentFavoritesWithData());          // a pin only reorders; no network needed
+  if (state.sidebarOpen) renderSidebar(item.slug);
+  saveChannelCache();
 }
 // The temporary (browsed) channel row has an add icon that saves it for good.
 function addTempToFavorites() {
@@ -1628,7 +2080,7 @@ function refreshSide() {
   function stop() { if (done && minned) btn.classList.remove('spinning'); }
   setTimeout(function () { minned = true; stop(); }, 700); // keep it spinning for at least one full turn
   fetchFavorites(function () {
-    if (state.sidebarOpen) renderSidebar(); else openSidebar();
+    if (state.sidebarOpen) renderSidebar();   // closed meanwhile: leave it closed
     if (!state.current && !state.vod) showNothing();
     done = true; stop();
   });
@@ -1661,6 +2113,7 @@ function closeAdd() {
            : (state.tempChannel || state.order[0] || 'add');
   if (state.sidebarOpen) renderSidebar(back); else openSidebar();
   if (!state.current) showNothing();   // bring back the idle message we hid
+  resetIdle();                         // the idle timer ran out while the dialog was up
 }
 // OK: add the highlighted suggestion if you moved into the list, otherwise add
 // exactly what was typed (the Add button does the same).
@@ -1756,7 +2209,7 @@ function addChannelBySlug(raw) {
   var slug = (raw || '').trim().toLowerCase()
     .replace(/^https?:\/\/(www\.)?kick\.com\//, '').replace(/[\/?#].*$/, '');
   if (!slug) return;
-  if (getFavorites().indexOf(slug) !== -1) {          // already following — don't add it again
+  if (isFavorite(slug)) {                          // already following — don't add it again
     toast(((state.channels[slug] && state.channels[slug].name) || slug) + ' is already in your channels');
     return;
   }
@@ -1801,7 +2254,77 @@ var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                cats: [], session: 0, closedAt: 0, scrollTop: 0, langMenuOpen: false,
                sort: 'viewers', discover: false, hideBlocked: true, renderLimit: 60,
-               fillTimer: null, retryTimer: null, retryCount: 0 };
+               fillTimer: null, retryTimer: null, retryCount: 0, error: false, capped: false, headerIdx: 3, pinIdx: 0 };
+var CATALOGUE_LIMIT = 2000;
+var browseGridView = null, catsGridView = null, vodGridView = null;
+var BROWSE_HEADERS = ['browse-cats-btn', 'browse-discover', 'browse-hideblocked', 'browse-langbtn', 'browse-close'];
+function catalogueImage(el, url, label) {
+  if (window.UIImages) UIImages.watch(el, url || '', label || 'Artwork unavailable');
+  else if (url) el.style.backgroundImage = 'url(' + url + ')';
+}
+function catalogueKey(s) { return (s.channel && s.channel.slug) || s.slug || ''; }
+function catalogueIdentityIndex(list, key, identity, fallback) {
+  if (identity != null) for (var i = 0; i < list.length; i++) if (key(list[i], i) === identity) return i;
+  return Math.max(0, Math.min(list.length - 1, fallback || 0));
+}
+function catalogueMove(index, n, cols, dx, dy) {
+  if (!n) return 0;
+  if (dx) return Math.max(0, Math.min(n - 1, index + dx));
+  if (dy > 0) return Math.min(n - 1, index + cols);
+  return Math.max(0, index - cols);
+}
+function catalogueUpdate(node, fresh) {
+  if (window.UIImages) UIImages.release(node);
+  node.className = fresh.className;
+  node.setAttribute('data-base', fresh.getAttribute('data-base') || fresh.className);
+  if (fresh.hasAttribute('role')) node.setAttribute('role', fresh.getAttribute('role')); else node.removeAttribute('role');
+  while (node.firstChild) node.removeChild(node.firstChild);
+  while (fresh.firstChild) node.appendChild(fresh.firstChild);
+}
+function catalogueTerminal(kind, msg, retry) {
+  return { catalogueTerminal: true, kind: kind, message: msg, retry: !!retry };
+}
+function makeCatalogueTerminal(item) {
+  var node = document.createElement('div');
+  node.className = item.kind === 'cats' ? 'ccard catalogue-state' : 'bcard catalogue-state';
+  node.setAttribute('data-base', node.className);
+  node.setAttribute('role', item.retry ? 'button' : 'status');
+  node.textContent = item.message + (item.retry ? ' · Retry' : '');
+  node.style.display = 'flex'; node.style.alignItems = 'center'; node.style.justifyContent = 'center';
+  node.style.padding = '24px'; node.style.fontSize = '25px'; node.style.textAlign = 'center';
+  return node;
+}
+function catalogueSkeletons(view, kind) {
+  var list = [];
+  for (var i = 0; i < 8; i++) list.push({ skeleton: i });
+  view.setItems(list, function (item) { return 'skeleton-' + item.skeleton; }, function () {
+    var node = document.createElement('div');
+    node.className = kind === 'cats' ? 'ccard cskel' : 'bcard bskel';
+    node.innerHTML = kind === 'cats' ? '<div class="cbanner"></div>' : '<div class="bthumb"></div><div class="bmeta"><div class="skline w1"></div><div class="skline w2"></div></div>';
+    node.setAttribute('data-base', node.className);
+    node.style.animation = 'none';
+    return node;
+  });
+}
+function catalogueAnchoredScroll(view, nextIndex, key, saved) {
+  var old = view.focused, m = view.metrics;
+  if (m && old >= 0 && view.keys[old] === '$' + key && view.get(old)) {
+    return Math.max(0, saved + (Math.floor(nextIndex / m.cols) - Math.floor(old / m.cols)) * m.pitchY);
+  }
+  return saved;
+}
+function catalogueMountedFocus(view, index, active, baseOf) {
+  var next = view.get(index), focused = view.content.querySelectorAll('.focused');
+  for (var i = 0; i < focused.length; i++) if (focused[i] !== next || !active) focused[i].className = baseOf(focused[i]);
+  if (next && active) next.className = baseOf(next) + ' focused';
+  return next;
+}
+function getBrowseGrid() {
+  if (!browseGridView) browseGridView = new VirtualGrid(document.getElementById('browse-grid'), { columns: BROWSE_COLS, height: 350, onRender: function () {
+    browseFocusEl = catalogueMountedFocus(browseGridView, browse.gridIdx, browse.zone === 'grid', browseCardBaseOf);
+  } });
+  return browseGridView;
+}
 var BROWSE_SORTS = [
   { key: 'viewers', label: 'Top' },
   { key: 'newest',  label: 'New' },
@@ -1821,8 +2344,6 @@ function cycleBrowseSort() {
   for (var i = 0; i < BROWSE_SORTS.length; i++) if (BROWSE_SORTS[i].key === browse.sort) { idx = i; break; }
   var next = BROWSE_SORTS[(idx + 1) % BROWSE_SORTS.length];
   browse.sort = next.key;
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
   renderBrowseSort();
   renderBrowse();
   toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
@@ -1840,9 +2361,7 @@ function toggleBrowseDiscover() {
   browse.discover = !browse.discover;
   try { localStorage.setItem('kicktv.browsediscover', browse.discover ? '1' : '0'); } catch (e) {}
   renderBrowseDiscover();
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
-  renderBrowse();
+  refilterBrowse();
   toast(browse.discover ? 'Hiding channels you follow' : 'Showing all channels');
 }
 /* "Hide Blocked": drop streams whose category you have blocked out of the grid.
@@ -1860,26 +2379,11 @@ function toggleBrowseHideBlocked() {
   browse.hideBlocked = !browse.hideBlocked;
   try { localStorage.setItem('kicktv.browsehideblocked', browse.hideBlocked ? '1' : '0'); } catch (e) {}
   renderBrowseHideBlocked();
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
-  renderBrowse();
+  refilterBrowse();
   toast(browse.hideBlocked ? 'Hiding blocked categories' : 'Showing blocked categories');
 }
-// Skeleton cards shimmer in the grid while the first page loads.
-function renderBrowseSkeletons() {
-  var grid = document.getElementById('browse-grid');
-  grid.innerHTML = '';
-  for (var i = 0; i < 8; i++) {
-    var sk = document.createElement('div');
-    sk.className = 'bcard bskel';
-    var th = document.createElement('div'); th.className = 'bthumb';
-    sk.appendChild(th);
-    var meta = document.createElement('div'); meta.className = 'bmeta';
-    meta.innerHTML = '<div class="skline w1"></div><div class="skline w2"></div>';
-    sk.appendChild(meta);
-    grid.appendChild(sk);
-  }
-}
+// Static placeholders keep the first page geometry stable while loading.
+function renderBrowseSkeletons() { catalogueSkeletons(getBrowseGrid(), 'browse'); }
 
 // Selected languages persist as a JSON array; an empty selection means All.
 // Older installs stored a single string — migrate it on load.
@@ -1965,8 +2469,10 @@ function openBrowse(categorySlug, categoryName) {
   // optionally open pre-filtered (the clickable category in the top bar)
   browse.cats = categorySlug ? [{ slug: categorySlug, name: categoryName || categorySlug }] : [];
   browse.session++;               // orphan any request still in flight from a previous opening
-  browse.raw = []; browse.streams = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
-  browse.renderLimit = 60;
+  browse.raw = [];
+  browse.streams = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
+  browse.renderLimit = 60; browse.error = false; browse.capped = false;
+  getBrowseGrid().clear();
   browse.sort = 'viewers';
   browse.discover = loadBrowseDiscoverPref();
   browse.hideBlocked = loadBrowseHideBlockedPref();
@@ -1996,7 +2502,8 @@ function closeBrowse() {
   browse.scrollTop = grid ? grid.scrollTop : 0;
   browse.closedAt = Date.now();
   document.getElementById('browse').className = 'hidden';
-  document.getElementById('browse-tip').className = 'hidden';
+  clearTimeout(browsePeekTimer);
+  if (typeof flushChatRender === 'function') flushChatRender();
   resumePlaybackAfterBrowse();
 }
 function cancelBrowseFill() {
@@ -2009,106 +2516,62 @@ function cancelBrowseFill() {
 // Count complete rows of real cards, excluding a partial row and the loader.
 // The first card of the last two full rows must be entirely below the viewport.
 function browseNeedsMoreRows() {
-  var grid = document.getElementById('browse-grid');
-  var fullRows = Math.floor(Math.min(browse.renderLimit, browse.streams.length) / BROWSE_COLS);
-  if (fullRows < 2) return true;
-  var card = grid.children[(fullRows - 2) * BROWSE_COLS];
-  return !card || card.getBoundingClientRect().top < grid.getBoundingClientRect().bottom;
+  var view = getBrowseGrid();
+  var m = view.metrics;
+  if (!m) return true;
+  return Math.ceil(browse.streams.length / BROWSE_COLS) * m.pitchY < view.container.scrollTop + m.height + 2 * m.pitchY;
 }
 function scheduleBrowseFill() {
-  if (!browse.open || browse.fillTimer !== null || browse.retryTimer !== null) return;
+  if (!browse.open || cats.open || browse.fillTimer !== null || browse.error || !browse.hasMore) return;
   var ses = browse.session;
   browse.fillTimer = setTimeout(function () {
     browse.fillTimer = null;
-    if (!browse.open || ses !== browse.session) return;
-    // Use already-fetched matches before asking Kick for another page.
-    while (browseNeedsMoreRows() && browse.renderLimit < browse.streams.length) {
-      var oldLimit = browse.renderLimit;
-      browse.renderLimit += 40;
-      extendBrowseWindow(oldLimit);
-    }
-    if (browseNeedsMoreRows() && browse.hasMore) loadBrowseMore();
-    else if (!browse.fetching) setBrowseLoadingCard(false);
+    if (browse.open && !cats.open && ses === browse.session && browseNeedsMoreRows()) loadBrowseMore();
   }, 0);
-}
-// A card at the end of the grid with an indeterminate bar, shown while more
-// pages are on their way. Re-renders wipe it; each fetch re-appends it.
-function setBrowseLoadingCard(on) {
-  var grid = document.getElementById('browse-grid');
-  var card = document.getElementById('browse-loadcard');
-  if (on) {
-    if (!card) {
-      card = document.createElement('div');
-      card.id = 'browse-loadcard';
-      card.className = 'bcard bloadcard';
-      card.innerHTML = '<div class="loadtrack"><div class="loadfill"></div></div>';
-    }
-    grid.appendChild(card);          // (re)attach at the end
-  } else if (card && card.parentNode) {
-    card.parentNode.removeChild(card);
-    if (browse.gridIdx >= browse.streams.length) {   // focus was parked on the card
-      browse.gridIdx = Math.max(0, browse.streams.length - 1);
-      applyBrowseFocus();
-    }
-  }
 }
 // The loading card counts as one focusable (but inert) cell at the end, so
 // Down can reach it and the grid scrolls to reveal it.
-function browseFocusCount() {
-  var card = document.getElementById('browse-loadcard');
-  return browse.streams.length + (card && card.parentNode ? 1 : 0);
+function browseFocusCount() { return browse.streams.length + (browse.error || browse.fetching || !browse.hasMore ? 1 : 0); }
+function renderBrowseStatus() {
+  setBrowseStatus('');
 }
 // One serialized request at a time, until two spare rows or the directory's end.
 function loadBrowseMore() {
-  if (!browse.open || browse.fetching || !browse.hasMore || browse.retryTimer !== null) return;
-  browse.fetching = true;
-  if (!browse.raw.length) setBrowseStatus('Loading...');
-  else setBrowseLoadingCard(true);   // subsequent pages: progress card in the grid
+  if (!browse.open || cats.open || browse.fetching || !browse.hasMore) return;
+  browse.fetching = true; browse.error = false;
+  if (browse.raw.length) renderBrowse(true); else setBrowseStatus('Loading live streams...');
   var pg = browse.page, ses = browse.session;
   serviceGet('/stream/livestreams/en?page=' + pg + '&limit=50&sort=desc', function (err, data) {
-    // Belongs to a closed/reopened session: drop it without clearing the flag, which now
-    // guards a newer request. Anything that bumps browse.session MUST also reset
-    // browse.fetching (openBrowse does) or this flag stays true and Browse never loads.
-    if (ses !== browse.session) return;
+    if (ses !== browse.session || !browse.open) return;
     browse.fetching = false;
-    if (!browse.open) return;
     if (err || !data || !Array.isArray(data.data)) {
-      browse.retryCount++;
-      setBrowseStatus('Could not reach Kick. Retrying...');
-      setBrowseLoadingCard(true);
-      browse.retryTimer = setTimeout(function () {
-        browse.retryTimer = null;
-        if (browse.open && ses === browse.session) scheduleBrowseFill();
-      }, Math.min(15000, 1000 * Math.pow(2, Math.min(browse.retryCount - 1, 4))));
-      return;
+      browse.error = true; renderBrowse(true); return;
     }
-    browse.retryCount = 0;
-    var arr = data.data;
-    if (!arr.length) {
-      browse.hasMore = false;
-      setBrowseLoadingCard(false);
-      renderBrowse(true);
-      return;
+    // Slugs already in the pool, kept alongside it instead of rebuilt per page.
+    if (browse.rawSeenFor !== browse.raw || browse.rawSeenCount !== browse.raw.length) {
+      browse.rawSeen = Object.create(null);
+      for (var j = 0; j < browse.raw.length; j++) browse.rawSeen['$' + catalogueKey(browse.raw[j])] = true;
     }
-    // Keep only the fields the app uses — deep scans can hold thousands of
-    // these, and the full directory objects are ~10x bigger.
-    for (var pi2 = 0; pi2 < arr.length; pi2++) {
-      var it = arr[pi2], ch2 = it.channel || {}, cat0 = (it.categories && it.categories[0]) || null;
-      arr[pi2] = {
-        viewer_count: it.viewer_count || 0,
-        language: it.language || '',
-        session_title: it.session_title || '',
-        created_at: it.created_at || '',
-        thumbnail: it.thumbnail || null,
-        categories: cat0 ? [{ name: cat0.name || '', slug: cat0.slug || '' }] : [],
-        channel: { slug: ch2.slug || it.slug || '', user: { username: (ch2.user && ch2.user.username) || '' } }
-      };
+    var arr = data.data, seen = browse.rawSeen, added = 0;
+    for (var i = 0; i < arr.length && browse.raw.length < CATALOGUE_LIMIT; i++) {
+      var it = arr[i], ch = it.channel || {}, cat = (it.categories && it.categories[0]) || null;
+      var slug = ch.slug || it.slug || '';
+      if (!slug || seen['$' + slug]) continue;
+      seen['$' + slug] = true; added++;
+      var entry = { viewer_count: it.viewer_count || 0, language: it.language || '',
+        session_title: it.session_title || '', created_at: it.created_at || '', thumbnail: it.thumbnail || null,
+        categories: cat ? [{ name: cat.name || '', slug: cat.slug || '' }] : [],
+        channel: { slug: slug, user: { username: (ch.user && ch.user.username) || '' } } };
+      entry.__bot = looksBotStream(entry);          // decided once here, not on every render
+      browse.raw.push(entry);
     }
-    browse.raw = browse.raw.concat(arr);
+    browse.rawSeenFor = browse.raw; browse.rawSeenCount = browse.raw.length;
     browse.page = pg + 1;
+    browse.capped = browse.raw.length >= CATALOGUE_LIMIT;
+    browse.hasMore = !!arr.length && !!added && !browse.capped;
     renderBrowse(true);
-    if (browseNeedsMoreRows() && browse.hasMore) setBrowseLoadingCard(true);
-  });
+    scheduleBrowseFill();
+  }, { priority: 1 });
 }
 /* Languages live behind one button in the top-right corner rather than eight
    chips across the header: the row was 1152px wide and left nothing for anything
@@ -2134,26 +2597,23 @@ function renderBrowseLangMenu() {
   var box = document.getElementById('browse-langmenu');
   if (!box) return;
   box.className = browse.langMenuOpen ? '' : 'hidden';
-  if (!browse.langMenuOpen) { box.innerHTML = ''; return; }
-  box.innerHTML = '';
+  if (!browse.langMenuOpen) return;
   for (var i = 0; i < BROWSE_LANGS.length; i++) {
-    var l = BROWSE_LANGS[i];
-    // "All languages" is the empty selection rather than a value of its own.
-    var on = (i === 0) ? !browse.langs.length : browse.langs.indexOf(l.value) !== -1;
-    var row = document.createElement('div');
-    row.className = 'blangrow' + (on ? ' on' : '') + (i === browse.langIdx ? ' focused' : '');
-    row.setAttribute('data-idx', i);
-    var cb = document.createElement('span');
-    cb.className = 'blangbox';
-    cb.textContent = on ? '✓' : '';
-    row.appendChild(cb);
-    row.appendChild(document.createTextNode(i === 0 ? 'All languages' : l.label));
-    box.appendChild(row);
+    var l = BROWSE_LANGS[i], on = i === 0 ? !browse.langs.length : browse.langs.indexOf(l.value) !== -1;
+    var row = box.children[i];
+    if (!row) {
+      row = document.createElement('div'); row.setAttribute('data-idx', i);
+      var cb = document.createElement('span'); cb.className = 'blangbox'; row.appendChild(cb);
+      row.appendChild(document.createTextNode(i === 0 ? 'All languages' : l.label)); box.appendChild(row);
+    }
+    var cls = 'blangrow' + (on ? ' on' : '') + (i === browse.langIdx ? ' focused' : '');
+    if (row.className !== cls) row.className = cls;
+    var tick = on ? '✓' : ''; if (row.firstChild.textContent !== tick) row.firstChild.textContent = tick;
   }
 }
 function openBrowseLangMenu() {
   browse.langMenuOpen = true;
-  browse.zone = 'lang';
+  browse.zone = 'lang'; browse.headerIdx = 3;
   if (!(browse.langIdx >= 0 && browse.langIdx < BROWSE_LANGS.length)) browse.langIdx = 0;
   renderBrowseLangMenu();
   renderBrowseLangBtn();
@@ -2192,6 +2652,11 @@ function looksBotStream(s) {
   var name = (ch.user && ch.user.username) || ch.slug || '';
   return botTitleish(s.session_title) && botNameish(name);
 }
+function isBotStream(s) {
+  if (!s) return false;
+  if (s.__bot === undefined) s.__bot = looksBotStream(s);
+  return s.__bot;
+}
 function makeBrowseCard(s, i, favs) {
   var ch = s.channel || {}, user = ch.user || {};
   var card = document.createElement('div');
@@ -2200,13 +2665,13 @@ function makeBrowseCard(s, i, favs) {
   var url = thumbUrl(s);
   var thumb = document.createElement('div');
   thumb.className = 'bthumb';
-  if (url) thumb.style.backgroundImage = 'url(' + url + ')';
+  catalogueImage(thumb, url, user.username || ch.slug || 'Live stream');
   var v = document.createElement('span');
   v.className = 'bviewers';
   v.innerHTML = '<span class="bdot"></span>';
   v.appendChild(document.createTextNode(fmtViewers(s.viewer_count || 0)));
   thumb.appendChild(v);
-  var already = favs.indexOf(ch.slug) !== -1;
+  var already = isFavorite(ch.slug);
   var add = document.createElement('span');
   add.className = 'baddbtn' + (already ? ' added' : '');
   add.setAttribute('data-act', 'badd');
@@ -2225,22 +2690,6 @@ function makeBrowseCard(s, i, favs) {
   card.appendChild(add);
   return card;
 }
-// Growing the window used to call renderBrowse(), which re-filtered and re-sorted the
-// whole raw pool and rebuilt every card in the DOM just to show forty more — a visible
-// hitch every ten rows of a deep scroll, getting worse the deeper you went. Nothing
-// above the new cards has changed, so append them and leave the rest alone.
-function extendBrowseWindow(oldLimit) {
-  var grid = document.getElementById('browse-grid');
-  var loadCard = document.getElementById('browse-loadcard');
-  var favs = getFavorites();
-  var end = Math.min(browse.renderLimit, browse.streams.length);
-  for (var i = oldLimit; i < end; i++) {
-    var card = makeBrowseCard(browse.streams[i], i, favs);
-    // the loading card is always last, so new cards go in front of it
-    if (loadCard && loadCard.parentNode === grid) grid.insertBefore(card, loadCard);
-    else grid.appendChild(card);
-  }
-}
 /* Selected categories. An array rather than a single slug so Browse can hold
    several at once; pick order is preserved so the status line reads the way you
    built it. hasBrowseCat is asked once per stream per render, but the list is a
@@ -2258,11 +2707,8 @@ function browseCatLabel() {
 // Everything that has to catch up once the selection changes. The Categories
 // popup stays open while you pick, so its ticks re-render too.
 function afterBrowseCatChange() {
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
   updateBrowseTitle();
-  renderPinnedCatChips();
-  renderBrowse();
+  refilterBrowse();              // also re-counts the chips
   if (cats.open) renderCats();
 }
 function toggleBrowseCat(slug, name) {
@@ -2281,13 +2727,32 @@ function clearBrowseCats() {
   browse.cats = [];
   afterBrowseCatChange();
 }
-function renderBrowse(preserveScroll) {
+// A filter changed: if the focused stream is filtered away, start over at the
+// top instead of keeping a numeric index into an unrelated list.
+function refilterBrowse() { renderBrowse(false, true); }
+// Filtering and sorting up to 2000 streams is the expensive part of a render, and
+// most renders (the loading card appearing, a focus refresh) change neither the
+// pool nor the filters. The result is kept until one of them does.
+function browseFilterKey() {
+  return [(browse.raw || []).length, settings.hideBots ? 1 : 0, browse.langs.join(','),
+          browse.discover ? getFavorites().join(',') : '', JSON.stringify(browse.cats),
+          browse.hideBlocked ? JSON.stringify(getBlockedCats()) : '', browse.sort].join('|');
+}
+var browseFilterMemo = { key: null, raw: null, list: null };
+function renderBrowse(preserveScroll, filterChanged) {
+  var onStatus = browse.gridIdx >= browse.streams.length;   // the loading/retry/end card
+  var old = onStatus ? null : browse.streams[browse.gridIdx];
+  var identity = old ? catalogueKey(old) : null;
+  var fkey = browseFilterKey();
+  if (browseFilterMemo.key === fkey && browseFilterMemo.raw === browse.raw && browseFilterMemo.list) {
+    finishRenderBrowse(browseFilterMemo.list.slice(), preserveScroll, filterChanged, onStatus, identity);
+    return;
+  }
   var list = (browse.raw || []).slice();
-  if (settings.hideBots) list = list.filter(function (s) { return !looksBotStream(s); });
+  if (settings.hideBots) list = list.filter(function (s) { return !isBotStream(s); });
   if (browse.langs.length) list = list.filter(function (s) { return browse.langs.indexOf(s.language) !== -1; });
   if (browse.discover) {
-    var favsNow = getFavorites();
-    list = list.filter(function (s) { return favsNow.indexOf((s.channel || {}).slug) === -1; });
+    list = list.filter(function (s) { return !isFavorite((s.channel || {}).slug); });
   }
   // An explicit selection of any size beats Hide Blocked: asking for a category
   // by name — including a blocked one you pinned — has to show it, or the grid
@@ -2314,71 +2779,89 @@ function renderBrowse(preserveScroll) {
   } else {
     list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
   }
-  browse.streams = list;
-
-  // Windowed rendering: only the first renderLimit cards live in the DOM. The
-  // window grows as focus or scrolling nears its end, so deep scans stay cheap
-  // no matter how many streams are loaded behind it.
-  if (browse.gridIdx >= browse.renderLimit) browse.renderLimit = browse.gridIdx + 40;
-  var grid = document.getElementById('browse-grid');
-  var savedScroll = grid.scrollTop;
-  grid.innerHTML = '';
-  // read once, not once per card: getFavorites() is two localStorage reads and a parse
-  var favsInGrid = getFavorites();
-  for (var ci = 0; ci < browse.renderLimit && ci < browse.streams.length; ci++) {
-    grid.appendChild(makeBrowseCard(browse.streams[ci], ci, favsInGrid));
-  }
-  grid.scrollTop = savedScroll;   // keep position while more pages append
-
-  if (!browse.streams.length) {
-    setBrowseStatus(browse.fetching ? 'Loading...' :
-      (browse.cats.length ? 'No ' + browseCatLabel() + ' streams in the top live list' :
-       (!browse.langs.length ? 'Nothing live right now' : 'No live channels in these languages yet')));
-  } else setBrowseStatus('');
-
-  if (browse.gridIdx >= browse.streams.length) browse.gridIdx = Math.max(0, browse.streams.length - 1);
-  renderPinnedCatChips();          // keep the per-category live counts current
-  applyBrowseFocus();
-  if (preserveScroll) grid.scrollTop = savedScroll;
+  browseFilterMemo = { key: fkey, raw: browse.raw, list: list.slice() };
+  finishRenderBrowse(list, preserveScroll, filterChanged, onStatus, identity);
 }
+function finishRenderBrowse(list, preserveScroll, filterChanged, onStatus, identity) {
+  var prevIdx = browse.gridIdx;
+  browse.streams = list;
+  var found = -1;
+  if (identity !== null) for (var fi = 0; fi < list.length; fi++) if (catalogueKey(list[fi]) === identity) { found = fi; break; }
+  var hasStatus = !!(browse.error || browse.fetching || !browse.hasMore);
+  if (found !== -1) browse.gridIdx = found;
+  else if (filterChanged) browse.gridIdx = 0;
+  // Focus sat on the loading/retry card: keep it there (or on the first new card
+  // that took its place) rather than snapping back onto the last stream.
+  else if (onStatus) browse.gridIdx = Math.max(0, Math.min(prevIdx, list.length + (hasStatus ? 0 : -1)));
+  else browse.gridIdx = Math.max(0, Math.min(list.length - 1, prevIdx || 0));
+  var view = getBrowseGrid(), savedScroll = view.container.scrollTop;
+  if (filterChanged && found === -1) { savedScroll = 0; view.container.scrollTop = 0; }
+  if (preserveScroll && identity !== null) savedScroll = catalogueAnchoredScroll(view, browse.gridIdx, identity, savedScroll);
+  var favs = getFavorites(), items = list.slice();
+  if (browse.error) items.push(catalogueTerminal('browse', 'Could not load more streams', true));
+  else if (browse.fetching) items.push(catalogueTerminal('browse', 'Loading more streams...'));
+  else if (!browse.hasMore) items.push(catalogueTerminal('browse', browse.capped ? 'Directory limit reached · Refine your filters' : (list.length ? 'End of live directory' : 'No matching streams in this directory')));
+  function create(item, i) { return item.catalogueTerminal ? makeCatalogueTerminal(item) : makeBrowseCard(item, i, favs); }
+  function signature(item) { return JSON.stringify(item) + (item.catalogueTerminal ? '' : '|' + isFavorite(catalogueKey(item))); }
+  view.setItems(items, function (item) { return item.catalogueTerminal ? '__state' : catalogueKey(item); }, function (item, i) {
+    var node = create(item, i); node.__signature = signature(item); return node;
+  }, function (node, item, i) {
+    var sig = signature(item); if (node.__signature !== sig) { catalogueUpdate(node, create(item, i)); node.__signature = sig; }
+  });
+  renderBrowseStatus();
+  renderPinnedCatChips();
+  applyBrowseFocus(!!preserveScroll);
+  if (preserveScroll) { view.container.scrollTop = savedScroll; view.refresh(); }
+}
+
 var browseFocusEl = null;
 // the loading card is focusable but not activatable, so it keeps its own base class
-function browseCardBaseOf(card) { return card.id === 'browse-loadcard' ? 'bcard bloadcard' : 'bcard'; }
-function applyBrowseFocus() {
-  // one button instead of eight chips, so this is a single cheap write
+function browseCardBaseOf(card) { return card.getAttribute('data-base') || 'bcard'; }
+function applyBrowseFocus(preserveScroll) {
   renderBrowseLangBtn();
-  var grid = document.getElementById('browse-grid');
-  var card = grid.children[browse.gridIdx] || null;
-  browseFocusEl = swapFocus(grid, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
-  if (browse.zone === 'grid') scrollIntoViewport(grid, card, 12);
-  scheduleBrowsePeek();
-  scheduleBrowseFill();
+  for (var hi = 0; hi < BROWSE_HEADERS.length; hi++) {
+    var h = document.getElementById(BROWSE_HEADERS[hi]);
+    if (h) h.classList.toggle('focused', (browse.zone === 'header' || browse.zone === 'lang') && hi === browse.headerIdx && !browse.langMenuOpen);
+  }
+  var pins = document.getElementById('browse-pinnedcats'), chip = null;
+  for (var pi = 0; pins && pi < pins.children.length; pi++) {
+    pins.children[pi].classList.toggle('focused', browse.zone === 'pins' && pi === browse.pinIdx);
+    if (pi === browse.pinIdx) chip = pins.children[pi];
+  }
+  if (browse.zone === 'pins' && chip) {
+    if (chip.offsetLeft < pins.scrollLeft) pins.scrollLeft = chip.offsetLeft;
+    else if (chip.offsetLeft + chip.offsetWidth > pins.scrollLeft + pins.clientWidth) pins.scrollLeft = chip.offsetLeft + chip.offsetWidth - pins.clientWidth;
+  }
+  var view = getBrowseGrid();
+  view.focused = browse.gridIdx;
+  var card = browse.zone === 'grid' && !preserveScroll ? view.focus(browse.gridIdx) : view.get(browse.gridIdx);
+  browseFocusEl = swapFocus(view.content, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
+  scheduleBrowsePeek(); scheduleBrowseFill();
 }
 // After dwelling on a browse card, refresh its thumbnail with the channel's
 // current frame (the directory image can be minutes old).
 var browsePeekTimer = null;
 function scheduleBrowsePeek() {
   clearTimeout(browsePeekTimer);
-  if (!browse.open || browse.zone !== 'grid') return;
-  var idx = browse.gridIdx;
+  if (!browse.open || cats.open || browse.zone !== 'grid') return;
+  var idx = browse.gridIdx, ses = browse.session;
   var s = browse.streams[idx];
   var slug = s && s.channel && s.channel.slug;
   if (!slug) return;
   browsePeekTimer = setTimeout(function () {
-    if (!browse.open || browse.gridIdx !== idx) return;
+    if (!browse.open || cats.open || browse.session !== ses || browse.gridIdx !== idx || !browse.streams[idx] || catalogueKey(browse.streams[idx]) !== slug) return;
     function apply(url) {
-      if (!browse.open || browse.gridIdx !== idx) return;
-      var grid = document.getElementById('browse-grid');
-      var card = grid.children[idx];
+      if (!browse.open || cats.open || browse.session !== ses || browse.gridIdx !== idx || !browse.streams[idx] || catalogueKey(browse.streams[idx]) !== slug) return;
+      var card = getBrowseGrid().get(idx);
       var th = card && card.querySelector('.bthumb');
-      if (th) th.style.backgroundImage = 'url(' + url + ')';
+      if (th) catalogueImage(th, url, slug);
     }
     var cached = previewCache[slug];
-    if (cached && Date.now() - cached.t < 60000) { apply(cached.url); return; }
+    if (cached && Date.now() - cached.t < PREVIEW_REFRESH_MS) { apply(cached.url); return; }
     fetchPreviewUrl(slug, function () {
       var c2 = previewCache[slug];
       if (c2) apply(c2.url);
-    });
+    }, true);
   }, 800);
 }
 // Toggle a language chip in or out of the selection. The All chip (index 0)
@@ -2392,55 +2875,50 @@ function toggleBrowseLang(idx) {
     if (i === -1) browse.langs.push(v); else browse.langs.splice(i, 1);
   }
   saveBrowseLangPref();
-  browse.gridIdx = 0;
-  browse.renderLimit = 60;
   renderBrowseLangBtn();
   renderBrowseLangMenu();    // the menu stays open so several can be picked at once
-  renderBrowse();            // just re-filter what we already fetched
+  refilterBrowse();          // just re-filter what we already fetched
 }
 function browseMove(dx, dy) {
-  // Inside the dropdown Up/Down walks the list and OK ticks a box; Left/Right and
-  // Back get you out. Nothing else on the page moves while it is open.
   if (browse.langMenuOpen) {
-    if (dy !== 0) {
-      var ln = browse.langIdx + dy;
-      if (ln >= 0 && ln < BROWSE_LANGS.length) { browse.langIdx = ln; renderBrowseLangMenu(); }
-    }
+    if (dy) { var ln = browse.langIdx + dy; if (ln >= 0 && ln < BROWSE_LANGS.length) { browse.langIdx = ln; renderBrowseLangMenu(); } }
     return;
   }
-  if (browse.zone === 'lang') {
-    if (dy === 1) { browse.zone = 'grid'; browse.gridIdx = 0; applyBrowseFocus(); return; }
-    return;                    // the Languages button is the only thing up here now
-  }
-  var count = browseFocusCount();
-  if (dy === -1 && browse.gridIdx < BROWSE_COLS) { browse.zone = 'lang'; applyBrowseFocus(); return; }
-  if (!count) { scheduleBrowseFill(); return; }
-  var idx = browse.gridIdx;
-  if (dx === 1 && idx < count - 1) idx++;
-  else if (dx === -1 && idx > 0) idx--;
-  else if (dy === 1 && idx + BROWSE_COLS < count) idx += BROWSE_COLS;
-  else if (dy === 1 && Math.floor(idx / BROWSE_COLS) < Math.floor((count - 1) / BROWSE_COLS)) idx = count - 1;  // partial last row
-  else if (dy === -1 && idx - BROWSE_COLS >= 0) idx -= BROWSE_COLS;
-  browse.gridIdx = idx;
-  if (idx >= browse.renderLimit - 2 * BROWSE_COLS && browse.renderLimit < browse.streams.length) {
-    var grewFrom = browse.renderLimit;
-    browse.renderLimit += 40;          // extend the window before focus hits its edge
-    extendBrowseWindow(grewFrom);
-  }
+  var pins = document.getElementById('browse-pinnedcats');
+  var hasPins = pins && pins.children.length && pins.className !== 'hidden';
+  if (browse.zone === 'lang') { browse.zone = 'header'; browse.headerIdx = 3; }
+  if (browse.zone === 'header') {
+    if (dx) browse.headerIdx = Math.max(0, Math.min(BROWSE_HEADERS.length - 1, browse.headerIdx + dx));
+    if (dy > 0) browse.zone = hasPins ? 'pins' : 'grid';
+  } else if (browse.zone === 'pins') {
+    if (dx) browse.pinIdx = Math.max(0, Math.min(pins.children.length - 1, browse.pinIdx + dx));
+    if (dy < 0) browse.zone = 'header';
+    if (dy > 0) browse.zone = 'grid';
+  } else if (dy < 0 && browse.gridIdx < BROWSE_COLS) browse.zone = hasPins ? 'pins' : 'header';
+  else browse.gridIdx = catalogueMove(browse.gridIdx, browseFocusCount(), BROWSE_COLS, dx, dy);
   applyBrowseFocus();
 }
 function browseActivate() {
-  if (browse.langMenuOpen) { toggleBrowseLang(browse.langIdx); return; }     // OK ticks a box, menu stays open
-  if (browse.zone === 'lang') { openBrowseLangMenu(); return; }              // OK opens it; Down enters the grid
-  var s = browse.streams[browse.gridIdx];
-  if (s && s.channel && s.channel.slug) {
-    closeBrowse();
-    play(s.channel.slug);   // starts fresh, so no need to resume the paused stream
+  if (browse.langMenuOpen) { toggleBrowseLang(browse.langIdx); return; }
+  if (browse.zone === 'lang') { openBrowseLangMenu(); return; }
+  if (browse.zone === 'header') {
+    var actions = [openCats, toggleBrowseDiscover, toggleBrowseHideBlocked, openBrowseLangMenu, closeBrowse];
+    actions[browse.headerIdx](); return;
   }
+  if (browse.zone === 'pins') {
+    var pins = getPinnedCats(), pin = pins[browse.pinIdx - 1];
+    if (!browse.pinIdx) clearBrowseCats(); else if (pin) toggleBrowseCat(pin.slug, pin.name);
+    applyBrowseFocus(true); return;
+  }
+  if (browse.gridIdx >= browse.streams.length) { if (browse.error) loadBrowseMore(); return; }
+  var s = browse.streams[browse.gridIdx];
+  if (!s) return;
+  var slug = (s.channel && s.channel.slug) || s.slug;
+  if (slug) { closeBrowse(); play(slug); }
 }
 // The "+" on a browse card saves that streamer without leaving the popup.
 function browseAddFavorite(slug) {
-  if (!slug || getFavorites().indexOf(slug) !== -1) return;
+  if (!slug || isFavorite(slug)) return;
   addFavorite(slug);
   if (slug === state.tempChannel) state.tempChannel = null;   // it is a real favorite now
   state.lastFetch = 0;                                        // let the sidebar refresh next time
@@ -2454,7 +2932,26 @@ function browseAddFavorite(slug) {
    is applied over the streams already pulled into Browse: great for popular
    categories, thinner for niche ones. Opened from the Browse header. */
 var cats = { open: false, gridIdx: 0, list: [], page: 1, hasMore: true, fetching: false, session: 0,
-             query: '', results: null };
+             query: '', results: null, error: false, searchError: false, searching: false, capped: false, closedAt: 0, scrollTop: 0, focusKey: null, zone: 'grid', headerIdx: 0 };
+var CATS_LIMIT = 1024;
+function catKey(c) { return c.catalogueTerminal ? '__state' : (c.all ? '__all' : c.slug); }
+function getCatsGrid() {
+  if (!catsGridView) catsGridView = new VirtualGrid(document.getElementById('cats-grid'), { columns: CATS_COLS, height: 233, onRender: function () {
+    catsFocusEl = catalogueMountedFocus(catsGridView, cats.gridIdx, cats.zone === 'grid', catsCardBaseOf);
+  } });
+  return catsGridView;
+}
+function compactCat(c) { return { slug: c.slug || '', name: c.name || c.slug || '', viewers: c.viewers || 0, banner: c.banner || null }; }
+function mergeCats(arr, replaceFirst) {
+  var seen = {}, out = [], first = replaceFirst ? arr : cats.list, second = replaceFirst ? cats.list : arr;
+  for (var pass = 0; pass < 2; pass++) {
+    var list = pass ? second : first;
+    for (var i = 0; i < list.length && out.length < CATS_LIMIT; i++) if (list[i].slug && !seen['$' + list[i].slug]) {
+      seen['$' + list[i].slug] = true; out.push(compactCat(list[i]));
+    }
+  }
+  cats.list = out; cats.capped = out.length >= CATS_LIMIT;
+}
 // The grid shows either the paginated list or, while searching, the API's
 // category search results (identical item shape).
 function displayedCats() { return cats.results || cats.list; }
@@ -2470,148 +2967,148 @@ function catBanner(c) {
 }
 function openCats() {
   if (!browse.open) return;
-  cats.open = true; cats.session++; cats.gridIdx = 0; cats.list = []; cats.page = 1; cats.hasMore = true; cats.fetching = false;
-  cats.query = ''; cats.results = null;
+  var warm = cats.list.length && Date.now() - (cats.loadedAt || cats.closedAt) < 300000;
+  cats.open = true; cats.session++; cats.fetching = false; cats.searching = false; cats.refreshing = false;
+  clearTimeout(browsePeekTimer);
+  cats.zone = 'grid';
+  document.getElementById('cats').className = ''; showCursor();
+  if (warm) {
+    var view = getCatsGrid(); view.container.scrollTop = cats.scrollTop; view.dirty = true;
+    renderCats(true);
+    if (cats.query) runCatsSearch(cats.query);
+    else refreshCats();
+    return;
+  }
+  cats.gridIdx = 0; cats.focusKey = null; cats.list = []; cats.page = 1; cats.hasMore = true;
+  cats.error = false; cats.searchError = false; cats.capped = false; cats.query = ''; cats.results = null;
   document.getElementById('cats-search').value = '';
-  showCursor();
-  document.getElementById('cats').className = '';
-  renderCatsSkeletons();
-  setCatsStatus('Loading...');
-  loadCatsMore(true);
+  getCatsGrid().clear(); renderCatsSkeletons(); setCatsStatus('Loading categories...'); loadCatsMore(true);
+}
+function refreshCats() {
+  if (!cats.open || cats.refreshing) return;
+  cats.refreshing = true; cats.error = false; cats.refreshError = false;
+  renderCats(true);
+  var ses = cats.session;
+  serviceGet('/api/v1/subcategories?page=1&limit=32', function (err, data) {
+    if (!cats.open || ses !== cats.session) return;
+    cats.refreshing = false;
+    if (err || !data || !Array.isArray(data.data)) { cats.error = true; cats.refreshError = true; renderCats(true); return; }
+    cats.error = false; cats.refreshError = false; cats.loadedAt = Date.now(); mergeCats(data.data, true); renderCats(true);
+  }, { priority: 2 });
 }
 function closeCats() {
-  cats.open = false;
-  hideTip();
+  cats.open = false; cats.session++; cats.fetching = false; cats.searching = false; cats.refreshing = false;
+  cats.closedAt = Date.now(); cats.scrollTop = document.getElementById('cats-grid').scrollTop;
+  clearTimeout(catsSearchTimer);
   try { document.getElementById('cats-search').blur(); } catch (e) {}
   document.getElementById('cats').className = 'hidden';
+  if (typeof flushChatRender === 'function') flushChatRender();
+  scheduleBrowseFill();
 }
-// Skeleton tiles shimmer while the first page loads.
-function renderCatsSkeletons() {
-  var grid = document.getElementById('cats-grid');
-  grid.innerHTML = '';
-  for (var i = 0; i < 8; i++) {
-    var sk = document.createElement('div');
-    sk.className = 'ccard cskel';
-    var b = document.createElement('div'); b.className = 'cbanner';
-    sk.appendChild(b);
-    grid.appendChild(sk);
-  }
-}
-// No page cap here either: the list's own end is the terminator.
+// Static tiles preserve the catalogue geometry while the first page loads.
+function renderCatsSkeletons() { catalogueSkeletons(getCatsGrid(), 'cats'); }
+// Keep a bounded directory pool; the search endpoint can find categories beyond it.
 function loadCatsMore(initial) {
-  if (cats.fetching || !cats.hasMore) return;
-  cats.fetching = true;
+  if (!cats.open || cats.fetching || !cats.hasMore || cats.query) return;
+  cats.fetching = true; cats.error = false; cats.refreshError = false;
+  if (cats.list.length) renderCats(true);
   var pg = cats.page, ses = cats.session;
   serviceGet('/api/v1/subcategories?page=' + pg + '&limit=32', function (err, data) {
-    if (ses !== cats.session) return;     // stale response from a previous opening
+    if (ses !== cats.session || !cats.open) return;
     cats.fetching = false;
-    if (!cats.open) return;
-    var arr = (!err && data && data.data) ? data.data : [];
-    if (!arr.length) { cats.hasMore = false; if (!cats.list.length && !cats.results) setCatsStatus('Could not load categories'); return; }
-    cats.list = cats.list.concat(arr);
-    cats.page = pg + 1;
-    if (!cats.results) {                 // do not repaint over active search results
-      renderCats();
-      setCatsStatus('');
-    }
-    if (initial && cats.page <= 2) loadCatsMore(true);
-  });
+    if (err || !data || !Array.isArray(data.data)) { cats.error = true; if (!cats.query) renderCats(true); return; }
+    var arr = data.data, before = cats.list.length;
+    mergeCats(arr, false); cats.loadedAt = Date.now(); cats.page = pg + 1;
+    cats.hasMore = !!arr.length && cats.list.length > before && !cats.capped;
+    if (!cats.query) renderCats(true);
+    if (initial && cats.page <= 2 && cats.hasMore) loadCatsMore(true);
+  }, { priority: 1 });
 }
 // Search across all of Kick's categories (the paginated list only holds what
 // has been scrolled in so far).
 var catsSearchTimer = null;
 function runCatsSearch(q) {
   var ses = cats.session;
+  cats.searching = true; cats.searchError = false;
+  renderCats(true);
   serviceGet('/api/search?searched_word=' + encodeURIComponent(q), function (err, data) {
-    if (ses !== cats.session || !cats.open || cats.query !== q) return;   // superseded
-    var arr = (!err && data && Object.prototype.toString.call(data.categories) === '[object Array]')
-      ? data.categories : [];
-    cats.results = arr;
-    cats.gridIdx = 0;
+    if (ses !== cats.session || !cats.open || cats.query !== q) return;
+    cats.searching = false;
+    if (err || !data || !Array.isArray(data.categories)) { cats.searchError = true; renderCats(true); return; }
+    cats.results = data.categories.slice(0, CATS_LIMIT).map(compactCat);
     renderCats();
-    setCatsStatus(arr.length ? '' : 'No categories match');
-  });
+  }, { priority: 1 });
 }
-function renderCats() {
-  var grid = document.getElementById('cats-grid');
-  var saved = grid.scrollTop;
-  grid.innerHTML = '';
-  var allTile = document.createElement('div');   // index 0 clears the filter
-  allTile.className = 'ccard'; allTile.setAttribute('data-idx', '-1');
-  allTile.innerHTML = '<div class="cbanner">' +
-    (browse.cats.length ? '' : '<span class="catsel">✓</span>') +
-    '</div><div class="cname">All categories</div>';
-  grid.appendChild(allTile);
-  displayedCats().forEach(function (c, i) {
-    var card = document.createElement('div');
-    card.className = 'ccard';
-    card.setAttribute('data-idx', i);
-    var banner = document.createElement('div');
-    banner.className = 'cbanner';
-    var url = catBanner(c);
-    if (url) banner.style.backgroundImage = 'url(' + url + ')';
-    var vw = document.createElement('span');
-    vw.className = 'cviewers';
-    vw.innerHTML = '<span class="bdot"></span>';
-    vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0)));
-    banner.appendChild(vw);
-    var pin = document.createElement('span');
-    pin.className = 'catpin' + (isCatPinned(c.slug) ? ' on' : '');
-    pin.setAttribute('data-act', 'catpin');
-    pin.setAttribute('title', 'Pin category');
-    pin.innerHTML = pinIcon();
-    banner.appendChild(pin);
-    var block = document.createElement('span');
-    block.className = 'catblock' + (isCatBlocked(c.slug) ? ' on' : '');
-    block.setAttribute('data-act', 'catblock');
-    block.setAttribute('title', 'Block category');
-    block.innerHTML = blockIcon();
-    banner.appendChild(block);
-    // Only drawn when the category is in the Browse filter, so unselected tiles
-    // stay uncluttered. Purely an indicator — the whole tile is the toggle.
-    if (hasBrowseCat(c.slug)) {
-      var tick = document.createElement('span');
-      tick.className = 'catsel';
-      tick.textContent = '✓';
-      banner.appendChild(tick);
-    }
-    var name = document.createElement('div');
-    name.className = 'cname';
-    name.textContent = c.name || c.slug;
-    card.appendChild(banner); card.appendChild(name);
-    grid.appendChild(card);
+function renderCats(preserveScroll) {
+  var view = getCatsGrid(), saved = view.container.scrollTop;
+  var items = [{ all: true }].concat(displayedCats());
+  if (cats.query && cats.searchError) items.push(catalogueTerminal('cats', 'Could not search categories', true));
+  else if (!cats.query && cats.error) items.push(catalogueTerminal('cats', 'Could not load categories', true));
+  else if (cats.searching || (!cats.query && (cats.fetching || cats.refreshing))) items.push(catalogueTerminal('cats', 'Loading categories...'));
+  else if (cats.query) items.push(catalogueTerminal('cats', displayedCats().length ? 'End of search results' : 'No categories match'));
+  else if (!cats.hasMore) items.push(catalogueTerminal('cats', cats.capped ? 'Category limit reached · Search for more' : 'End of categories'));
+  cats.gridIdx = catalogueIdentityIndex(items, catKey, cats.focusKey, cats.gridIdx);
+  if (preserveScroll && cats.focusKey !== null) saved = catalogueAnchoredScroll(view, cats.gridIdx, cats.focusKey, saved);
+  var flags = '|' + JSON.stringify(browse.cats) + '|' + JSON.stringify(getPinnedCats()) + '|' + JSON.stringify(getBlockedCats());
+  function signature(c) { return JSON.stringify(c) + flags; }
+  view.setItems(items, catKey, function (c, i) { var node = makeCatCard(c, i); node.__signature = signature(c); return node; }, function (node, c, i) {
+    var sig = signature(c); if (node.__signature !== sig) { catalogueUpdate(node, makeCatCard(c, i)); node.__signature = sig; }
   });
-  grid.scrollTop = saved;
-  if (cats.gridIdx >= grid.children.length) cats.gridIdx = grid.children.length - 1;
-  applyCatsFocus();
+  setCatsStatus(''); applyCatsFocus(!!preserveScroll);
+  if (preserveScroll) { view.container.scrollTop = saved; view.refresh(); }
+}
+function makeCatCard(c, i) {
+  if (c.catalogueTerminal) return makeCatalogueTerminal(c);
+  var card = document.createElement('div'); card.className = 'ccard';
+  var banner = document.createElement('div'); banner.className = c.all ? 'cbanner call' : 'cbanner';
+  if (c.all) {
+    // No artwork for "every category": a grid mark instead of an empty black tile.
+    banner.innerHTML = '<svg class="callicon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>';
+  } else {
+    catalogueImage(banner, catBanner(c), c.name || c.slug);
+    var vw = document.createElement('span'); vw.className = 'cviewers';
+    vw.innerHTML = '<span class="bdot"></span>'; vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0))); banner.appendChild(vw);
+    var pin = document.createElement('span'); pin.className = 'catpin' + (isCatPinned(c.slug) ? ' on' : '');
+    pin.setAttribute('data-act', 'catpin'); pin.setAttribute('title', 'Pin category'); pin.innerHTML = pinIcon(); banner.appendChild(pin);
+    var block = document.createElement('span'); block.className = 'catblock' + (isCatBlocked(c.slug) ? ' on' : '');
+    block.setAttribute('data-act', 'catblock'); block.setAttribute('title', 'Block category'); block.innerHTML = blockIcon(); banner.appendChild(block);
+  }
+  if (c.all ? !browse.cats.length : hasBrowseCat(c.slug)) {
+    var tick = document.createElement('span'); tick.className = 'catsel'; tick.textContent = '✓'; banner.appendChild(tick);
+  }
+  var name = document.createElement('div'); name.className = 'cname'; name.textContent = c.all ? 'All categories' : (c.name || c.slug);
+  card.appendChild(banner); card.appendChild(name); return card;
 }
 var catsFocusEl = null;
-function catsCardBaseOf() { return 'ccard'; }
-function applyCatsFocus() {
-  var grid = document.getElementById('cats-grid');
-  var el = grid.children[cats.gridIdx] || null;
-  catsFocusEl = swapFocus(grid, catsFocusEl, el, catsCardBaseOf, true);
-  scrollIntoViewport(grid, el, 12);
+function catsCardBaseOf(card) { return card.getAttribute('data-base') || 'ccard'; }
+function applyCatsFocus(preserveScroll) {
+  var view = getCatsGrid(), el = cats.zone === 'grid' && !preserveScroll ? view.focus(cats.gridIdx) : view.get(cats.gridIdx);
+  view.focused = cats.gridIdx;
+  var item = view.items[cats.gridIdx]; cats.focusKey = item ? catKey(item) : null;
+  catsFocusEl = swapFocus(view.content, catsFocusEl, el, catsCardBaseOf, cats.zone === 'grid');
+  document.getElementById('cats-search').classList.toggle('focused', cats.zone === 'header' && cats.headerIdx === 0);
+  document.getElementById('cats-close').classList.toggle('focused', cats.zone === 'header' && cats.headerIdx === 1);
 }
 function catsMove(dx, dy) {
-  var n = document.getElementById('cats-grid').children.length;
-  if (!n) return;
-  var idx = cats.gridIdx;
-  if (dx === 1 && idx < n - 1) idx++;
-  else if (dx === -1 && idx > 0) idx--;
-  else if (dy === 1 && idx + CATS_COLS < n) idx += CATS_COLS;
-  else if (dy === 1 && Math.floor(idx / CATS_COLS) < Math.floor((n - 1) / CATS_COLS)) idx = n - 1;  // partial last row
-  else if (dy === -1 && idx - CATS_COLS >= 0) idx -= CATS_COLS;
-  cats.gridIdx = idx;
+  if (cats.zone === 'header') {
+    if (dx) cats.headerIdx = Math.max(0, Math.min(1, cats.headerIdx + dx));
+    if (dy > 0) { cats.zone = 'grid'; document.getElementById('cats-search').blur(); }
+  } else if (dy < 0 && cats.gridIdx < CATS_COLS) cats.zone = 'header';
+  else cats.gridIdx = catalogueMove(cats.gridIdx, getCatsGrid().items.length, CATS_COLS, dx, dy);
   applyCatsFocus();
-  if (!cats.results && cats.gridIdx >= (cats.list.length + 1) - 2 * CATS_COLS) loadCatsMore(false);
+  if (cats.zone === 'grid' && !cats.query && !cats.error && cats.gridIdx >= cats.list.length + 1 - 2 * CATS_COLS) loadCatsMore(false);
 }
 // OK toggles and the popup stays up, so several categories can be picked in one
 // visit. Back is what closes it.
 function catsActivate() {
-  if (cats.gridIdx === 0) { clearBrowseCats(); return; }   // the All tile
-  var c = displayedCats()[cats.gridIdx - 1];
-  if (c) toggleBrowseCat(c.slug, c.name || c.slug);
+  if (cats.zone === 'header') { if (cats.headerIdx) closeCats(); else document.getElementById('cats-search').focus(); return; }
+  var item = getCatsGrid().items[cats.gridIdx];
+  if (item && item.catalogueTerminal) {
+    if (item.retry) { if (cats.query) runCatsSearch(cats.query); else if (cats.refreshError) refreshCats(); else { cats.hasMore = true; loadCatsMore(false); } }
+    return;
+  }
+  if (cats.gridIdx === 0) { clearBrowseCats(); return; }
+  var c = displayedCats()[cats.gridIdx - 1]; if (c) toggleBrowseCat(c.slug, c.name || c.slug);
 }
 
 /* Pinned categories: starred in the Categories popup (Green, or the pin icon),
@@ -2638,14 +3135,15 @@ function toggleCatPin(slug, name) {
   renderPinnedCatChips();
   if (cats.open) renderCats();
 }
+var chipCountMemo = { key: null, raw: null, counts: null };   // recounted only when the pool or its filters change
 function renderPinnedCatChips() {
   var box = document.getElementById('browse-pinnedcats');
   var panel = document.getElementById('browse-panel');
   if (!box) return;
-  box.innerHTML = '';
   var l = getPinnedCats();
   if (!l.length) {
-    box.className = 'hidden';
+    box.innerHTML = ''; box.__signature = ''; box.className = 'hidden';
+    if (browse.zone === 'pins') browse.zone = 'header';
     if (panel) panel.className = '';
     return;
   }
@@ -2654,17 +3152,28 @@ function renderPinnedCatChips() {
   // Live streams per category, counted under the SAME language and Discover
   // filters the grid uses — the number a chip shows is the number of cards
   // clicking it will yield. Re-rendered on every filter change.
-  var counts = {};
-  var pool = browse.raw || [];
-  var favsNow = browse.discover ? getFavorites() : null;
-  for (var ri = 0; ri < pool.length; ri++) {
-    var s = pool[ri];
-    if (settings.hideBots && looksBotStream(s)) continue;   // chips count what the grid will show
-    if (browse.langs.length && browse.langs.indexOf(s.language) === -1) continue;
-    if (favsNow && favsNow.indexOf((s.channel || {}).slug) !== -1) continue;
-    var rc = s.categories && s.categories[0];
-    if (rc && rc.slug) counts[rc.slug] = (counts[rc.slug] || 0) + 1;
+  var hideFollowed = browse.discover;
+  var countKey = [(browse.raw || []).length, settings.hideBots ? 1 : 0, browse.langs.join(','),
+                  hideFollowed ? getFavorites().join(',') : ''].join('|');
+  var counts = chipCountMemo.key === countKey && chipCountMemo.raw === browse.raw ? chipCountMemo.counts : null;
+  if (!counts) {
+    counts = {};
+    var pool = browse.raw || [];
+    for (var ri = 0; ri < pool.length; ri++) {
+      var s = pool[ri];
+      if (settings.hideBots && isBotStream(s)) continue;   // chips count what the grid will show
+      if (browse.langs.length && browse.langs.indexOf(s.language) === -1) continue;
+      if (hideFollowed && isFavorite((s.channel || {}).slug)) continue;
+      var rc = s.categories && s.categories[0];
+      if (rc && rc.slug) counts[rc.slug] = (counts[rc.slug] || 0) + 1;
+    }
+    chipCountMemo = { key: countKey, raw: browse.raw, counts: counts };
   }
+  var chipSignature = JSON.stringify(l) + '|' + JSON.stringify(counts) + '|' + JSON.stringify(browse.cats);
+  if (box.__signature === chipSignature) return;
+  box.__signature = chipSignature;
+  var savedLeft = box.scrollLeft;
+  box.innerHTML = '';
   var all = document.createElement('span');
   all.className = 'pcat' + (browse.cats.length ? '' : ' sel');
   all.textContent = 'All';
@@ -2684,6 +3193,9 @@ function renderPinnedCatChips() {
     chip.appendChild(x);
     box.appendChild(chip);
   }
+  browse.pinIdx = Math.min(browse.pinIdx, l.length);
+  box.scrollLeft = savedLeft;
+  if (browseGridView) { browseGridView.dirty = true; browseGridView.schedule(); }
 }
 
 /* Blocked categories. A category you would rather not see: followed channels
@@ -2862,14 +3374,18 @@ function clearLastVodMatch(slug, id) {
   var marker = loadLastVod();
   if (marker && marker.slug === slug && (!id || marker.id === String(id))) clearLastVod();
 }
+var vodProgressMemo = null, vodProgressSerialized = null;
 function loadVodProgress() {
+  if (vodProgressMemo) return vodProgressMemo;
   try {
-    var data = JSON.parse(localStorage.getItem(VOD_PROGRESS_KEY));
-    if (data && data.version === 1 && data.items && typeof data.items === 'object') return data;
+    vodProgressSerialized = localStorage.getItem(VOD_PROGRESS_KEY);
+    var data = JSON.parse(vodProgressSerialized);
+    if (data && data.version === 1 && data.items && typeof data.items === 'object') return (vodProgressMemo = data);
   } catch (e) {}
-  return { version: 1, items: {} };
+  return (vodProgressMemo = { version: 1, items: {} });
 }
 function writeVodProgress(data) {
+  vodProgressMemo = data;
   try {
     var keys = Object.keys(data.items);
     if (keys.length > VOD_PROGRESS_LIMIT) {
@@ -2878,7 +3394,11 @@ function writeVodProgress(data) {
       });
       while (keys.length > VOD_PROGRESS_LIMIT) delete data.items[keys.shift()];
     }
-    localStorage.setItem(VOD_PROGRESS_KEY, JSON.stringify(data));
+    var serialized = JSON.stringify(data);
+    if (serialized !== vodProgressSerialized) {
+      localStorage.setItem(VOD_PROGRESS_KEY, serialized);
+      vodProgressSerialized = serialized;
+    }
   } catch (e) {}
 }
 function vodProgressKey(slug, v) {
@@ -2890,6 +3410,7 @@ function vodProgressKey(slug, v) {
 }
 function savedVodPosition(key) {
   var entry = loadVodProgress().items[key];
+  if (entry && entry.watched) return 0;     // the card says Watched, so it starts over
   var pos = entry && parseFloat(entry.position);
   return isFinite(pos) && pos >= 10 ? pos : 0;
 }
@@ -3052,6 +3573,17 @@ var liveMarkLastWrite = 0;
 var liveWatchCountedMs = 0;   // time already counted towards the running total
 var liveWatchAccumSec = 0;    // seconds actually watched in this session
 var liveWatchSeeded = false;  // has the stored total been folded in yet
+var liveWatchContentMs = 0;   // wall-clock moment of the stream frame last seen playing
+// How far behind the live edge the picture is, in seconds.
+function liveLatencySec() {
+  var video = document.getElementById('video'), lat = NaN;
+  try { if (state.hls) lat = state.hls.latency; } catch (e) {}
+  if (typeof lat !== 'number' || !isFinite(lat) || lat < 0) {
+    var r = liveSeekRange(video);
+    lat = r ? Math.max(0, r.end - (video.currentTime || 0)) : 0;
+  }
+  return lat;
+}
 // Called on every timeupdate, which only fires while the video is progressing.
 // Counting here rather than at write time keeps paused, hidden and asleep
 // stretches out of the total, and each step is small enough to be trustworthy.
@@ -3064,6 +3596,8 @@ function tickLiveWatch() {
   if (video && !video.paused && since > 0 && since < LIVEMARK_TICK_GAP_MS) {
     liveWatchAccumSec += since / 1000;
   }
+  // Only moves while frames do, so a pause holds the mark where the picture stopped.
+  if (video && !video.paused) liveWatchContentMs = now - liveLatencySec() * 1000;
 }
 // Quietly remember where the viewer is in the live stream, so the recording of
 // this session can pick up there once it ends. Nothing is shown for this.
@@ -3077,8 +3611,11 @@ function saveLiveMark(force) {
   if (!liveWatchStartedMs || now - liveWatchStartedMs < LIVEMARK_MIN_WATCH_MS) return;
   if (!force && now - liveMarkLastWrite < 5000) return;
   var startedMs = parseKickTime(c.startedAt);
-  if (!startedMs) return;
-  var offsetSec = Math.floor((now - startedMs) / 1000);
+  if (!startedMs || !liveWatchContentMs) return;
+  // Where the PICTURE was, not what the clock says: a pause, or simply sitting
+  // behind the live edge, must not push the recording's resume point forward.
+  var seenMs = Math.min(now, liveWatchContentMs);
+  var offsetSec = Math.floor((seenMs - startedMs) / 1000);
   if (!(offsetSec >= 10)) return;
   liveMarkLastWrite = now;
   var data = loadLiveMarks();
@@ -3091,7 +3628,7 @@ function saveLiveMark(force) {
   }
   data.items[slug] = {
     sessionStartedAt: c.startedAt,
-    leftAtMs: now,
+    leftAtMs: seenMs,
     offsetSec: offsetSec,
     watchedSec: Math.floor(liveWatchAccumSec),
     name: c.name || slug,
@@ -3102,7 +3639,7 @@ function saveLiveMark(force) {
 }
 
 function saveVodProgress(force) {
-  if (!state.vod || !state.vod.key) return;
+  if (!state.vod || !state.vod.key || state.vod.liveRewind) return;
   // Ignore media events left over from the previous source until this VOD has
   // its own metadata. Otherwise a queued pause/timeupdate at 0 can erase the
   // new video's saved resume point during a source switch.
@@ -3121,6 +3658,11 @@ function saveVodProgress(force) {
   // afterwards does not unmark it.
   var watched = !!(prev && prev.watched);
   if (isFinite(dur) && dur > 0 && pos / dur >= 0.9) watched = true;
+  var nextPosition = pos < 10 ? 0 : Math.floor(pos);
+  var nextDuration = isFinite(dur) && dur > 0 ? Math.floor(dur) : 0;
+  if (prev && prev.position === nextPosition && prev.duration === nextDuration &&
+      !!prev.watched === watched) return;
+  if (!prev && pos < 10 && !watched) return;
   if (pos < 10) {
     // nothing to resume this close to the start, but keep the watched mark alive
     if (watched) {
@@ -3159,7 +3701,7 @@ function applyVodResume() {
   } catch (e) {}
 }
 function completeVodProgress() {
-  if (!state.vod) return;
+  if (!state.vod || state.vod.liveRewind) return;
   state.vod.completed = true;
   // Finished: no resume point (a rewatch starts from the beginning), but the
   // recording stays marked as watched for the Past videos grid.
@@ -3174,7 +3716,24 @@ function completeVodProgress() {
   };
   writeVodProgress(data);
 }
-var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0, session: 0 };
+var vods = { open: false, slug: '', gridIdx: 0, list: [], loading: false, hidden: 0, session: 0, error: false, capped: false, zone: 'grid', headerIdx: 0, focusKey: null };
+var VOD_CATALOGUE_LIMIT = 400;
+var vodCatalogueCache = {}, vodCatalogueOrder = [];
+function vodCatalogueKey(v) { return v.catalogueTerminal ? '__state' : (vodStableId(v) || String(v.created_at || '') + '|' + String(v.source || '')); }
+function getVodGrid() {
+  if (!vodGridView) vodGridView = new VirtualGrid(document.getElementById('vods-grid'), { columns: VOD_COLS, height: 366, onRender: function () {
+    vodsFocusEl = catalogueMountedFocus(vodGridView, vods.gridIdx, vods.zone === 'grid', vodCardBaseOf);
+  } });
+  return vodGridView;
+}
+function rememberVodCatalogue() {
+  if (!vods.slug || !vods.listAll || !vods.loadedAt) return;
+  var slug = vods.slug, at = vodCatalogueOrder.indexOf(slug);
+  if (at !== -1) vodCatalogueOrder.splice(at, 1); vodCatalogueOrder.push(slug);
+  vodCatalogueCache['$' + slug] = { list: vods.listAll, hidden: vods.hidden, capped: vods.capped, loadedAt: vods.loadedAt,
+    focusKey: vods.focusKey, gridIdx: vods.gridIdx, scrollTop: document.getElementById('vods-grid').scrollTop };
+  while (vodCatalogueOrder.length > 4) delete vodCatalogueCache['$' + vodCatalogueOrder.shift()];
+}
 var VOD_COLS = 4;
 function setVodStatus(msg) { document.getElementById('vods-status').textContent = msg || ''; }
 // Kick includes subscriber/gated recordings in the public list but with an
@@ -3201,12 +3760,13 @@ function loadVodHideWatchedPref() {
   try { return localStorage.getItem('kicktv.vodhidewatched') === '1'; } catch (e) { return false; }
 }
 function applyVodFilter() {
-  if (!vods.hideWatched) { vods.list = vods.listAll.slice(); return; }
-  var items = loadVodProgress().items;
-  vods.list = [];
-  for (var i = 0; i < vods.listAll.length; i++) {
-    if (!vodWatchedInfo(vods.slug, vods.listAll[i], items).watched) vods.list.push(vods.listAll[i]);
+  var identity = vods.list[vods.gridIdx] ? vodCatalogueKey(vods.list[vods.gridIdx]) : vods.focusKey;
+  if (!vods.hideWatched) vods.list = vods.listAll.slice();
+  else {
+    var items = loadVodProgress().items; vods.list = [];
+    for (var i = 0; i < vods.listAll.length; i++) if (!vodWatchedInfo(vods.slug, vods.listAll[i], items).watched) vods.list.push(vods.listAll[i]);
   }
+  vods.gridIdx = catalogueIdentityIndex(vods.list, vodCatalogueKey, identity, vods.gridIdx);
 }
 function renderVodFilterChip() {
   var el = document.getElementById('vods-filter');
@@ -3215,12 +3775,7 @@ function renderVodFilterChip() {
 function toggleVodHideWatched() {
   vods.hideWatched = !vods.hideWatched;
   try { localStorage.setItem('kicktv.vodhidewatched', vods.hideWatched ? '1' : '0'); } catch (e) {}
-  applyVodFilter();
-  vods.gridIdx = 0;
-  renderVods();
-  renderVodFilterChip();
-  setVodStatus(vods.list.length ? ''
-    : (vods.listAll.length ? 'All watched — Green shows them' : 'No past videos'));
+  applyVodFilter(); renderVods(); renderVodFilterChip(); applyVodFocus(true);
   toast(vods.hideWatched ? 'Hiding watched videos' : 'Showing watched videos');
 }
 function fmtDuration(ms) {
@@ -3232,9 +3787,8 @@ function fmtDuration(ms) {
 // Kick's created_at looks like "2026-07-21 21:25:29" and is UTC. Turn it into a
 // short "how long ago" label.
 function fmtVodAgo(str) {
-  var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(str || '');
-  if (!m) return '';
-  var t = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  var t = parseKickTime(str);
+  if (!t) return '';
   var diff = Date.now() - t;
   if (diff < 0) diff = 0;
   function n(v, unit) { return v + ' ' + unit + (v === 1 ? '' : 's') + ' ago'; }
@@ -3246,8 +3800,9 @@ function fmtVodAgo(str) {
   var days = Math.floor(hrs / 24);
   if (days < 7) return n(days, 'day');
   if (days < 30) return n(Math.floor(days / 7), 'week');
-  if (days < 365) return n(Math.floor(days / 30), 'month');
-  return n(Math.floor(days / 365), 'year');
+  var months = Math.floor(days / 30);
+  if (months < 12) return n(months, 'month');
+  return n(Math.max(1, Math.floor(days / 365)), 'year');
 }
 // minWidth shrinks the pick for the grid. The full-screen poster passes nothing and
 // keeps the 1280-wide `src`: a 480-wide still stretched across 1920px looks soft.
@@ -3267,49 +3822,80 @@ function openVods(slug) {
   if (!state.ready || !slug) return;
   if (browse.open) closeBrowse();
   if (settings.open) closeSettings();
-  vods.open = true; vods.session++; vods.slug = slug; vods.gridIdx = 0; vods.list = []; vods.loading = true; vods.hidden = 0;
-  vods.listAll = []; vods.hideWatched = loadVodHideWatchedPref();
-  renderVodFilterChip();
-  state.vodReturn = state.current || state.vodReturn;   // where to go back to afterwards
-  showCursor();
-  closeSidebar();
-  pausePlaybackForBrowse();
+  if (vods.open) rememberVodCatalogue();
+  var oldSlug = vods.slug, cached = vodCatalogueCache['$' + slug];
+  var warm = cached && Date.now() - cached.loadedAt < 300000;
+  vods.open = true; vods.session++; vods.slug = slug; vods.zone = 'grid'; vods.error = false;
+  vods.loading = false; vods.hideWatched = loadVodHideWatchedPref();
+  state.vodReturn = state.current || state.vodReturn;
+  showCursor(); closeSidebar(); pausePlaybackForBrowse();
   document.getElementById('vods').className = '';
   var name = (state.channels[slug] && state.channels[slug].name) || slug;
   document.getElementById('vods-title').textContent = 'Past videos - ' + name;
-  document.getElementById('vods-grid').innerHTML = '';
-  setVodStatus('Loading...');
-  var ses = vods.session;
-  serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
-    if (ses !== vods.session) return;     // a newer opening owns the popup
-    vods.loading = false;
-    if (!vods.open || vods.slug !== slug) return;
-    var allVods = Array.isArray(data) ? data : [];
-    vods.listAll = allVods.filter(playableVod);
-    vods.hidden = allVods.length - vods.listAll.length;
-    // If a live session was marked and has since ended, its recording picks up
-    // where the viewer left. Must run before applyVodFilter, which reads progress.
-    try { resolveLiveMark(slug, vods.listAll); } catch (e) {}
+  renderVodFilterChip();
+  var view = getVodGrid(); view.dirty = true;
+  if (warm) {
+    vods.listAll = cached.list; vods.list = []; vods.hidden = cached.hidden; vods.capped = cached.capped; vods.loadedAt = cached.loadedAt;
+    vods.gridIdx = cached.gridIdx; vods.focusKey = cached.focusKey;
     applyVodFilter();
-    renderVods();
-    if (!vods.list.length) {
-      setVodStatus(err ? 'Could not load videos'
-        : (vods.listAll.length ? 'All watched — Green shows them'
-          : (vods.hidden ? 'No playable past videos' : 'No past videos')));
+    if (oldSlug !== slug) view.clear();
+    view.container.scrollTop = cached.scrollTop;
+    renderVods(true); view.container.scrollTop = cached.scrollTop; view.refresh();
+    loadVods(true);
+  } else {
+    vods.listAll = []; vods.list = []; vods.gridIdx = 0; vods.focusKey = null; vods.hidden = 0; vods.capped = false; vods.loadedAt = 0;
+    view.clear(); catalogueSkeletons(view, 'vod'); setVodStatus('Loading past videos...'); loadVods(false);
+  }
+}
+function loadVods(quiet) {
+  if (!vods.open || vods.loading) return;
+  var ses = vods.session, slug = vods.slug;
+  vods.loading = true; vods.error = false;
+  if (!quiet && vods.listAll.length) renderVods(true);
+  serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
+    if (ses !== vods.session || !vods.open || slug !== vods.slug) return;
+    vods.loading = false;
+    if (err || !Array.isArray(data)) { vods.error = true; renderVods(true); return; }
+    var all = [], hidden = 0, seen = {};
+    for (var i = 0; i < data.length; i++) {
+      var src = data[i];
+      if (!src || !playableVod(src)) { hidden++; continue; }
+      var key = vodCatalogueKey(src);
+      if (seen['$' + key]) continue; seen['$' + key] = true;
+      if (all.length < VOD_CATALOGUE_LIMIT) all.push({ id: src.id, uuid: src.uuid, video: src.video ? { id: src.video.id, uuid: src.video.uuid, thumb: src.video.thumb } : null,
+        source: src.source, session_title: src.session_title || '', duration: src.duration || 0, views: src.views || 0,
+        thumbnail: src.thumbnail || null, categories: src.categories && src.categories[0] ? [{ name: src.categories[0].name || '', slug: src.categories[0].slug || '' }] : [],
+        created_at: src.created_at || '', is_live: !!src.is_live });
     }
-    else setVodStatus('');
-  });
+    vods.listAll = all; vods.hidden = hidden; vods.capped = data.length - hidden > VOD_CATALOGUE_LIMIT; vods.loadedAt = Date.now();
+    try { resolveLiveMark(slug, vods.listAll); } catch (e) {}
+    applyVodFilter(); renderVods(!!quiet); rememberVodCatalogue();
+  }, { priority: quiet ? 2 : 1 });
 }
 function closeVods() {
-  vods.open = false;
+  rememberVodCatalogue(); vods.open = false; vods.session++; vods.loading = false;
   document.getElementById('vods').className = 'hidden';
-  if (state.current || state.vod) resumePlaybackAfterBrowse();   // a live stream or VOD was underneath
+  if (typeof flushChatRender === 'function') flushChatRender();
+  if (state.current || state.vod) resumePlaybackAfterBrowse();
 }
-function renderVods() {
-  var grid = document.getElementById('vods-grid');
-  grid.innerHTML = '';
+function renderVods(preserveScroll) {
+  var view = getVodGrid(), saved = view.container.scrollTop, items = vods.list.slice();
+  if (preserveScroll && vods.focusKey !== null) saved = catalogueAnchoredScroll(view, vods.gridIdx, vods.focusKey, saved);
+  if (vods.error) items.push(catalogueTerminal('vod', 'Could not load past videos', true));
+  else if (vods.loading) items.push(catalogueTerminal('vod', 'Loading past videos...'));
+  else if (items.length) items.push(catalogueTerminal('vod', vods.capped ? 'Showing the latest ' + VOD_CATALOGUE_LIMIT + ' past videos' : 'End of past videos'));
   var progress = loadVodProgress().items;
-  vods.list.forEach(function (v, i) {
+  function signature(v) { return JSON.stringify(v) + '|' + JSON.stringify(progress[vodProgressKey(vods.slug, v)] || null); }
+  view.setItems(items, vodCatalogueKey, function (v, i) { var node = v.catalogueTerminal ? makeCatalogueTerminal(v) : makeVodCard(v, i, progress); node.__signature = signature(v); return node; }, function (node, v, i) {
+    var sig = signature(v); if (node.__signature !== sig) { catalogueUpdate(node, v.catalogueTerminal ? makeCatalogueTerminal(v) : makeVodCard(v, i, progress)); node.__signature = sig; }
+  });
+  vods.gridIdx = Math.max(0, Math.min(items.length - 1, vods.gridIdx));
+  if (!items.length) vods.zone = 'header';
+  setVodStatus(items.length ? '' : (vods.listAll.length ? 'All watched · Green shows them' : (vods.hidden ? 'No playable past videos' : 'No past videos')));
+  applyVodFocus(!!preserveScroll);
+  if (preserveScroll) { view.container.scrollTop = saved; view.refresh(); }
+}
+function makeVodCard(v, i, progress) {
     // Saved progress for this recording: a thin bar on the thumbnail, and 90%+
     // (or finished) counts as watched — badge, fade, full bar.
     var w = vodWatchedInfo(vods.slug, v, progress);
@@ -3324,7 +3910,7 @@ function renderVods() {
     var url = vodThumb(v, CARD_IMG_W);
     var thumbImage = document.createElement('div');
     thumbImage.className = 'vodthumb-image';
-    if (url) thumbImage.style.backgroundImage = 'url(' + url + ')';
+    catalogueImage(thumbImage, url, v.session_title || 'Past video');
     thumb.appendChild(thumbImage);
     var dur = document.createElement('span');
     dur.className = 'bdur';
@@ -3365,33 +3951,31 @@ function renderVods() {
       meta.children[2].appendChild(resume);
     }
     card.appendChild(meta);
-    grid.appendChild(card);
-  });
-  if (vods.gridIdx >= vods.list.length) vods.gridIdx = Math.max(0, vods.list.length - 1);
-  applyVodFocus();
+    return card;
 }
 var vodsFocusEl = null;
 // data-base carries the watched dimming, so a card must not lose it on unfocus
 function vodCardBaseOf(vcard) { return vcard.getAttribute('data-base') || 'bcard'; }
-function applyVodFocus() {
-  var grid = document.getElementById('vods-grid');
-  var el = grid.children[vods.gridIdx] || null;
-  vodsFocusEl = swapFocus(grid, vodsFocusEl, el, vodCardBaseOf, true);
-  scrollIntoViewport(grid, el, 12);
+function applyVodFocus(preserveScroll) {
+  var view = getVodGrid(), el = vods.zone === 'grid' && !preserveScroll ? view.focus(vods.gridIdx) : view.get(vods.gridIdx);
+  view.focused = vods.gridIdx;
+  var item = view.items[vods.gridIdx]; vods.focusKey = item ? vodCatalogueKey(item) : null;
+  vodsFocusEl = swapFocus(view.content, vodsFocusEl, el, vodCardBaseOf, vods.zone === 'grid');
+  document.getElementById('vods-filter').classList.toggle('focused', vods.zone === 'header' && vods.headerIdx === 0);
+  document.getElementById('vods-close').classList.toggle('focused', vods.zone === 'header' && vods.headerIdx === 1);
 }
 function vodMove(dx, dy) {
-  var n = vods.list.length;
-  if (!n) return;
-  var idx = vods.gridIdx;
-  if (dx === 1 && idx < n - 1) idx++;
-  else if (dx === -1 && idx > 0) idx--;
-  else if (dy === 1 && idx + VOD_COLS < n) idx += VOD_COLS;
-  else if (dy === 1 && Math.floor(idx / VOD_COLS) < Math.floor((n - 1) / VOD_COLS)) idx = n - 1;  // partial last row
-  else if (dy === -1 && idx - VOD_COLS >= 0) idx -= VOD_COLS;
-  vods.gridIdx = idx;
+  if (vods.zone === 'header') {
+    if (dx) vods.headerIdx = Math.max(0, Math.min(1, vods.headerIdx + dx));
+    if (dy > 0 && getVodGrid().items.length) vods.zone = 'grid';
+  } else if (dy < 0 && vods.gridIdx < VOD_COLS) vods.zone = 'header';
+  else vods.gridIdx = catalogueMove(vods.gridIdx, getVodGrid().items.length, VOD_COLS, dx, dy);
   applyVodFocus();
 }
 function vodActivate() {
+  if (vods.zone === 'header') { if (vods.headerIdx) closeVods(); else toggleVodHideWatched(); return; }
+  if (vods.gridIdx >= vods.list.length) { if (vods.error) loadVods(false); return; }
+  rememberVodCatalogue();
   var v = vods.list[vods.gridIdx];
   if (v && v.source) {
     vods.open = false;
@@ -3401,7 +3985,8 @@ function vodActivate() {
     playVod(v, vods.list.slice(), vods.gridIdx, vods.slug);
   }
 }
-function playVod(v, queue, queueIndex, slug) {
+function playVod(v, queue, queueIndex, slug, opts) {
+  var liveRewind = !!(opts && opts.liveRewind);
   teardownVideo();
   disconnectChat();
   setMode('player');
@@ -3416,9 +4001,11 @@ function playVod(v, queue, queueIndex, slug) {
     playIndex = 0;
   }
   var progressKey = vodProgressKey(vodSlug, v);
-  var resumeAt = savedVodPosition(progressKey);
-  var savedEntry = loadVodProgress().items[progressKey];
+  var resumeAt = liveRewind ? opts.resumeAt : savedVodPosition(progressKey);
+  var savedEntry = liveRewind ? null : loadVodProgress().items[progressKey];
   var knownDuration = (savedEntry && savedEntry.duration) || (v.duration || 0) / 1000 || 0;
+  // A running stream's recording lists no duration; it is as long as the stream so far.
+  if (liveRewind && !knownDuration && opts.recStartMs) knownDuration = Math.max(0, (Date.now() - opts.recStartMs) / 1000);
   vodProgressLastWrite = 0;
   state.vod = { slug: vodSlug, source: v.source,
                 title: v.session_title || 'Past video',
@@ -3429,9 +4016,14 @@ function playVod(v, queue, queueIndex, slug) {
 
                 key: progressKey, resumeAt: resumeAt, resumeApplied: false,
                 knownDuration: knownDuration,
-                progressReady: false, completed: false, ending: false, retries: 0 };
+                progressReady: false, completed: false, ending: false, retries: 0,
+                // Rewound live: temporary, so no progress, no Continue Watching, no
+                // startup recovery; its end is the live edge, not "video ended".
+                liveRewind: liveRewind,
+                wallTarget: liveRewind ? opts.wallTarget : 0,
+                recStartMs: liveRewind ? opts.recStartMs : 0, recEndMs: 0 };
   applyStreamerChatPreferences();
-  saveLastVod(vodSlug, v, state.vod.name);
+  if (!liveRewind) saveLastVod(vodSlug, v, state.vod.name);
   PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = '';
   setBanner('');
   showState('hidden');
@@ -3475,7 +4067,7 @@ function attachVod(source) {
   liveWatchStartedMs = 0;            // a recording is not a live session
   setPosterStill(state.vod && state.vod.poster);   // also covers a reload
   if (window.Hls && Hls.isSupported()) {
-    var hls = new Hls({
+    var hls = new Hls(withTvGuards({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
       // hls.js keeps everything behind the playhead by default. On a four-hour VOD
       // that grows until the TV's MSE quota starts force-evicting, which shows up as
@@ -3483,8 +4075,9 @@ function attachVod(source) {
       backBufferLength: 30,
       manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6,
       startPosition: state.vod && state.vod.resumeAt > 0 ? state.vod.resumeAt : -1
-    });
+    }));
     state.hls = hls;
+    qualityAlertReset();
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;
@@ -3508,11 +4101,14 @@ function attachVod(source) {
     });
     if (Hls.Events.LEVEL_SWITCHED) {
       hls.on(Hls.Events.LEVEL_SWITCHED, function () {
-        if (state.hls === hls) updateQualityButton();
+        if (state.hls === hls) { updateQualityButton(); checkQualityDrop(); }
       });
     }
     if (Hls.Events.FRAG_LOADED) {
       hls.on(Hls.Events.FRAG_LOADED, function (ev, d) { diagCountFrag(d); });
+    }
+    if (state.vod && state.vod.liveRewind && Hls.Events.LEVEL_LOADED) {
+      hls.on(Hls.Events.LEVEL_LOADED, function (ev, d) { liveRewindLevelLoaded(hls, d); });
     }
     try { hls.loadSource(source); hls.attachMedia(video); }
     catch (e) { reloadVod(); return; }
@@ -3521,6 +4117,20 @@ function attachVod(source) {
   }
   PB.active = true;
   playVideo(video);
+}
+// Every segment of a live recording carries its wall-clock time. The first one
+// pins where the recording starts, which turns the requested moment into an
+// exact position (created_at alone is a few seconds off).
+function liveRewindLevelLoaded(hls, d) {
+  var v = state.vod;
+  if (state.hls !== hls || !v || !v.liveRewind) return;
+  var det = d && d.details, frags = det && det.fragments;
+  var pdt = frags && frags.length && frags[0].programDateTime;
+  if (!(pdt > 0)) return;
+  v.recStartMs = pdt;
+  if (det.totalduration > 0) v.recEndMs = pdt + det.totalduration * 1000;
+  if (v.wallTarget && !v.resumeApplied) v.resumeAt = Math.max(0, (v.wallTarget - pdt) / 1000);
+  v.wallTarget = 0;              // a later reload resumes from the playhead, not this target
 }
 function reloadVod() {
   if (!state.vod) return;
@@ -3543,7 +4153,7 @@ function resetVodRecovery() {
 // consecutive-failure budget only after ten seconds of actual playback progress.
 function trackVodRecovery() {
   var vod = state.vod, video = document.getElementById('video');
-  if (!vod || !vod.retries) return;
+  if (!vod || (!vod.retries && !vod.mediaRecoveries)) return;
   if (video.paused || video.seeking || !isFinite(video.currentTime)) { resetVodRecovery(); return; }
   var now = Date.now(), pos = video.currentTime;
   var elapsed = (now - vod.recoveryAt) / 1000;
@@ -3554,7 +4164,7 @@ function trackVodRecovery() {
   } else vod.healthySeconds = 0;
   vod.recoveryTime = pos;
   vod.recoveryAt = now;
-  if (vod.healthySeconds >= 10) { vod.retries = 0; resetVodRecovery(); }
+  if (vod.healthySeconds >= 10) { vod.retries = 0; vod.mediaRecoveries = 0; resetVodRecovery(); }
 }
 function exitVod() {
   var back = state.vodReturn;
@@ -3632,6 +4242,14 @@ function resetSeekAccum() {
   if (el) el.className = 'hidden';
   document.getElementById('vodbar-origin').setAttribute('visibility', 'hidden');
 }
+var vodOverlayKey = '', vodOverlayFrame = null;
+function requestVodOverlay() {
+  if (vodOverlayFrame !== null) return;
+  vodOverlayFrame = requestAnimationFrame(function () {
+    vodOverlayFrame = null;
+    if (Date.now() >= state.suppressNudgeUntil && !anyPanelOpen()) showVodOverlay();
+  });
+}
 function showVodOverlay() {
   if (!state.vod) return;
   var player = document.getElementById('player');
@@ -3640,11 +4258,15 @@ function showVodOverlay() {
   document.getElementById('vod-scrim').className = '';
   var ov = document.getElementById('overlay');
   var vc = state.channels[state.vod.slug];
+  var signature = [state.vod.slug, state.vod.title, state.vod.name, vc && vc.avatar, state.vod.liveRewind].join('|');
+  if (signature !== vodOverlayKey) {
+    vodOverlayKey = signature;
   setOverlayAvatar(vc && vc.avatar, state.vod.name);
   document.getElementById('ov-name').textContent = state.vod.name;
   document.getElementById('ov-live').style.display = 'none';
-  document.getElementById('ov-viewers').textContent = 'Past video';
+  document.getElementById('ov-viewers').textContent = state.vod.liveRewind ? 'Rewound live stream' : 'Past video';
   document.getElementById('ov-title').textContent = state.vod.title;
+  }
   ov.className = '';
   showVodBar();
   showVodPlay();
@@ -3667,7 +4289,9 @@ var vodPointerHover = '';    // only actual pointer interaction holds the contro
 var vodFocus = '';           // '', 'bar' or 'buttons'
 var vodButtonNav = false;
 var vodBtnIdx = 1;           // 0 rewind, 1 play/pause, 2 forward
-var VOD_BTN_IDS = ['vodback', 'vodplay', 'vodfwd'];
+// Go live (index 3) sits at the right end of the seek bar, and only while rewound.
+var VOD_BTN_IDS = ['vodback', 'vodplay', 'vodfwd', 'vodgolive'];
+function vodBtnCount() { return state.vod && state.vod.liveRewind ? 4 : 3; }
 function applyVodCtrlFocus() {
   var bar = document.getElementById('vodbar');
   if (bar && bar.className.indexOf('hidden') === -1) {
@@ -3702,7 +4326,7 @@ function blurVodFocus() {
 }
 function vodBtnMove(d) {
   var n = vodBtnIdx + d;
-  if (n < 0 || n >= VOD_BTN_IDS.length) return;
+  if (n < 0 || n >= vodBtnCount()) return;
   vodBtnIdx = n;
   showVodOverlay();          // keep the controls alive while moving between them
   applyVodCtrlFocus();
@@ -3710,6 +4334,7 @@ function vodBtnMove(d) {
 function vodBtnActivate() {
   if (vodBtnIdx === 0) seekVod(-30);
   else if (vodBtnIdx === 2) seekVod(30);
+  else if (vodBtnIdx === 3) goLive();
   else toggleVodPlay();
 }
 // Showing at all, focused or not.
@@ -3719,11 +4344,17 @@ function vodBarVisible() {
 }
 // Dismiss the whole VOD control set when the overlay times out.
 function hideVodControls() {
+  if (vodOverlayFrame !== null) { cancelAnimationFrame(vodOverlayFrame); vodOverlayFrame = null; }
   document.getElementById('overlay').className = 'hidden';
   hideVodPlay();
   hideVodBar();              // clears vodFocus
 }
 function fmtClock(sec) { return fmtDuration((sec || 0) * 1000); }
+function changedAttr(el, name, value) {
+  value = String(value);
+  if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+function changedText(el, value) { if (el.textContent !== value) el.textContent = value; }
 function drawVodBar(cur, dur, origin) {
   var W = 1500, mid = 20;
   var prog = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
@@ -3732,23 +4363,23 @@ function drawVodBar(cur, dur, origin) {
   var hw = vodFocus === 'bar' ? 14 : 8;
   var hh = vodFocus === 'bar' ? 38 : 30;
   var hy = vodFocus === 'bar' ? 1 : 5;
-  document.getElementById('vodbar-played').setAttribute('d', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
-  document.getElementById('vodbar-remain').setAttribute('x1', px.toFixed(1));
+  changedAttr(document.getElementById('vodbar-played'), 'd', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
+  changedAttr(document.getElementById('vodbar-remain'), 'x1', px.toFixed(1));
   var handle = document.getElementById('vodbar-handle');
-  handle.setAttribute('width', hw);
-  handle.setAttribute('height', hh);
-  handle.setAttribute('y', hy);
-  handle.setAttribute('x', (px - hw / 2).toFixed(1));
+  changedAttr(handle, 'width', hw);
+  changedAttr(handle, 'height', hh);
+  changedAttr(handle, 'y', hy);
+  changedAttr(handle, 'x', (px - hw / 2).toFixed(1));
   var originEl = document.getElementById('vodbar-origin');
   var pending = typeof origin === 'number' && isFinite(origin) && dur > 0;
-  originEl.setAttribute('visibility', pending ? 'visible' : 'hidden');
+  changedAttr(originEl, 'visibility', pending ? 'visible' : 'hidden');
   if (pending) {
     var ox = (Math.max(0, Math.min(1, origin / dur)) * W).toFixed(1);
-    originEl.setAttribute('x1', ox);
-    originEl.setAttribute('x2', ox);
+    changedAttr(originEl, 'x1', ox);
+    changedAttr(originEl, 'x2', ox);
   }
-  document.getElementById('vodbar-cur').textContent = fmtClock(cur);
-  document.getElementById('vodbar-dur').textContent = fmtClock(dur);
+  changedText(document.getElementById('vodbar-cur'), fmtClock(cur));
+  changedText(document.getElementById('vodbar-dur'), fmtClock(dur));
 }
 // CSS positions the title and timeline together, leaving room for the sidebar.
 function placeVodBar() {}
@@ -3771,6 +4402,12 @@ function drawVodBarNow() {
 function showVodBar() {
   if (!state.vod) return;                // seek bar is for past videos only, never live
   document.getElementById('vodbar').className = '';   // un-hide first
+  // A rewound live stream ends at the live edge: its right-hand slot is Go live.
+  var rewound = !!state.vod.liveRewind;
+  document.getElementById('vodbar-dur').className = rewound ? 'hidden' : '';
+  var golive = document.getElementById('vodgolive');
+  if (!rewound) golive.className = 'hidden';
+  else if (golive.className === 'hidden') golive.className = '';
   applyVodCtrlFocus();                       // then re-apply focus, never blindly cleared
   placeDiagnostics();
   placeVodBar();
@@ -3876,12 +4513,27 @@ function pickQuality(row) {
     if (state.hls && row.idx >= 0) { try { state.hls.currentLevel = row.idx; } catch (e) {} }
   }
   saveQualityPref();
+  qualityAlertReset();          // the switch it just asked for takes a moment to land
   updateQualityButton();
 }
 
 /* Player options that ride on top of hls.js */
 // Low latency trims how far behind the live edge we play. It only takes hold on
 // a fresh hls instance, so toggling it reloads the current stream.
+/* hls.js options that guard against how this TV's video pipeline fails, shared by
+   live and past-video playback. nudgeOnVideoHole and liveSyncOnStallIncrease are
+   already on by default in hls.js 1.7. */
+var HLS_TV_GUARDS = {
+  // An MSE append that never completes (the TV's decoder wedged) is reported as an
+  // error after 10s instead of hanging for ever; normal appends take well under 1s.
+  appendTimeout: 10000,
+  // A picked fixed quality survives a load error instead of falling back to Auto.
+  preserveManualLevelOnError: true
+};
+function withTvGuards(cfg) {
+  for (var k in HLS_TV_GUARDS) if (!(k in cfg)) cfg[k] = HLS_TV_GUARDS[k];
+  return cfg;
+}
 function hlsConfig() {
   var cfg = {
     enableWorker: true, capLevelToPlayerSize: true,
@@ -3903,7 +4555,7 @@ function hlsConfig() {
     cfg.maxBufferLength = 30;
     cfg.maxLiveSyncPlaybackRate = 1;
   }
-  return cfg;
+  return withTvGuards(cfg);
 }
 function liveSeekRange(video) {
   var ranges = video && video.seekable;
@@ -3925,6 +4577,247 @@ function liveTarget(video, range) {
   if (typeof target !== 'number' || !isFinite(target) ||
       target < range.start || target > range.end) target = range.end - 1;
   return Math.max(range.start, Math.min(range.end - 0.1, target));
+}
+
+/* Live seek bar and Go live.
+   The timeline runs from when the stream started (left) to the live edge (right).
+   A live HLS playlist only holds the last few segments, so a rewind almost never
+   fits in the live buffer. Kick keeps a recording of the stream that is still
+   running (the is_live entry in the channel's videos list), and every segment of
+   it carries a PROGRAM-DATE-TIME, so a moment on the timeline maps exactly onto a
+   position in that recording. A short step back that the buffer does hold is a
+   plain seek instead. Go live leaves the recording, or jumps a paused / lagging
+   live picture back to the edge. */
+var LIVE_EDGE_SLACK_SEC = 12;         // this close to the edge counts as live
+var liveBar = { focused: false, timer: null, dragTarget: null, hover: false };   // dragTarget: seconds, while the pointer drags
+var liveSeek = { delta: 0, timer: null, base: null, key: 0, started: 0, last: 0 };
+function liveStreamStartMs() {
+  var c = state.current && state.channels[state.current];
+  return c && c.live ? parseKickTime(c.startedAt) : 0;
+}
+// How far the picture has fallen behind where live playback normally sits. hls.js
+// deliberately plays a few segments back from the newest (on Kick that is ~20s),
+// so "live" is its sync position, not the raw edge of the playlist.
+function liveBehindSec(latency) {
+  var video = document.getElementById('video'), sync = NaN;
+  try { if (state.hls) sync = state.hls.liveSyncPosition; } catch (e) {}
+  if (typeof sync === 'number' && isFinite(sync) && sync > 0) return Math.max(0, sync - (video.currentTime || 0));
+  return latency;
+}
+// Positions in seconds from the stream's start: `edge` is where live playback
+// sits (the right end of the timeline) and `cur` is the frame on screen.
+function livePositions() {
+  var startMs = liveStreamStartMs();
+  if (!startMs || state.vod) return null;
+  // Before the first frame, currentTime is 0 while the playlist already spans the
+  // live window, which reads as minutes behind and flashed Go live at startup.
+  // Until the picture is really playing, it counts as at the edge.
+  var video = document.getElementById('video');
+  if (!video || !(video.currentTime > 0) || video.readyState < 2) {
+    var running = Math.max(1, (Date.now() - startMs) / 1000);
+    return { startMs: startMs, edge: running, cur: running, behind: 0 };
+  }
+  var latency = liveLatencySec();
+  var lag = Math.max(0, latency - liveBehindSec(latency));   // what live normally trails by
+  var edge = Math.max(1, (Date.now() - startMs) / 1000 - lag);
+  var cur = Math.max(0, Math.min(edge, (Date.now() - startMs) / 1000 - latency));
+  return { startMs: startMs, edge: edge, cur: cur, behind: edge - cur };
+}
+function liveBarVisible() {
+  var el = document.getElementById('livebar');
+  return !!el && el.className.indexOf('hidden') === -1;
+}
+function showLiveBar(focus) {
+  var el = document.getElementById('livebar');
+  if (!el || !livePositions()) { hideLiveBar(); return; }
+  if (focus) liveBar.focused = true;
+  el.className = (liveBar.focused ? 'focused' : '') + (state.sidebarOpen ? ' withside' : '');
+  drawLiveBar();
+  if (!liveBar.timer) liveBar.timer = setInterval(drawLiveBar, 1000);
+  placeDiagnostics();
+}
+function hideLiveBar() {
+  resetLiveSeek();
+  liveBar.focused = false;
+  liveBar.dragTarget = null;
+  liveBar.hover = false;
+  var el = document.getElementById('livebar');
+  if (el && el.className.indexOf('hidden') === -1) { el.className = 'hidden'; placeDiagnostics(); }
+  if (liveBar.timer) { clearInterval(liveBar.timer); liveBar.timer = null; }
+}
+function drawLiveBar() {
+  var p = livePositions();
+  if (!p) { hideLiveBar(); return; }
+  var W = 1500, mid = 20;
+  var dragging = liveBar.dragTarget !== null;
+  var pending = dragging || liveSeek.base !== null;
+  var cur = dragging ? liveBar.dragTarget :
+    (pending ? Math.max(0, Math.min(p.edge, liveSeek.base + liveSeek.delta)) : p.cur);
+  var px = Math.max(0, Math.min(1, cur / p.edge)) * W;
+  var hw = liveBar.focused ? 14 : 8, hh = liveBar.focused ? 38 : 30, hy = liveBar.focused ? 1 : 5;
+  changedAttr(document.getElementById('livebar-played'), 'd', 'M0,' + mid + ' L' + px.toFixed(1) + ',' + mid);
+  var handle = document.getElementById('livebar-handle');
+  changedAttr(handle, 'width', hw); changedAttr(handle, 'height', hh); changedAttr(handle, 'y', hy);
+  changedAttr(handle, 'x', (px - hw / 2).toFixed(1));
+  var origin = document.getElementById('livebar-origin');
+  changedAttr(origin, 'visibility', pending ? 'visible' : 'hidden');
+  if (pending) {
+    var ox = (Math.max(0, Math.min(1, p.cur / p.edge)) * W).toFixed(1);
+    changedAttr(origin, 'x1', ox); changedAttr(origin, 'x2', ox);
+  }
+  changedText(document.getElementById('livebar-cur'), fmtClock(cur));
+  // The right-hand slot: the stream's running time while live, Go live (same
+  // width, so the track never resizes) once the picture is behind.
+  var behind = (pending ? p.edge - cur : p.behind) > LIVE_EDGE_SLACK_SEC;
+  var chip = document.getElementById('livebar-live'), end = document.getElementById('livebar-end');
+  var chipClass = behind ? '' : 'hidden', endClass = behind ? 'hidden' : '';
+  if (chip.className !== chipClass) chip.className = chipClass;
+  if (end.className !== endClass) end.className = endClass;
+  changedText(end, fmtClock(p.edge));
+}
+// Keep the info bar (and the timeline with it) up while the viewer is seeking.
+function revealLiveBar() {
+  var c = state.current && state.channels[state.current];
+  if (c) showOverlay(c);
+  showLiveBar(true);
+}
+function liveSeekKey(key, repeat) {
+  var now = Date.now();
+  if (!repeat || liveSeek.key !== key) { liveSeek.key = key; liveSeek.started = now; }
+  else if (now - liveSeek.last < 150) return;
+  liveSeek.last = now;
+  var held = now - liveSeek.started;
+  var step = held >= 3000 ? 300 : (held >= 1000 ? 120 : 30);   // a live stream is hours long
+  liveSeekBy(key === KEY.LEFT ? -step : step);
+}
+function liveSeekBy(delta) {
+  var p = livePositions();
+  if (!p) return;
+  if (liveSeek.base === null) liveSeek.base = p.cur;
+  // Clamp the running total too, so pressing Right at the edge does not bank
+  // seconds that a later Left then has to cancel out first.
+  var target = Math.max(0, Math.min(p.edge, liveSeek.base + liveSeek.delta + delta));
+  liveSeek.delta = target - liveSeek.base;
+  var pop = document.getElementById('seekpop');
+  var amount = document.createElement('span');
+  amount.className = 'seekvalue';
+  var d = Math.round(liveSeek.delta);
+  amount.textContent = (d >= 0 ? '+' : '-') + fmtClock(Math.abs(d));
+  pop.textContent = '';
+  pop.appendChild(amount);
+  var dest = document.createElement('span');
+  dest.className = 'seekdestination';
+  dest.textContent = p.edge - target <= LIVE_EDGE_SLACK_SEC ? 'Back to live' : 'Jump to ' + fmtClock(target);
+  pop.appendChild(dest);
+  pop.style.setProperty('--seek-wait', SEEK_APPLY_MS + 'ms');
+  pop.className = '';
+  clearTimeout(liveSeek.timer);
+  liveSeek.timer = setTimeout(applyLiveSeek, SEEK_APPLY_MS);
+  revealLiveBar();
+}
+function resetLiveSeek() {
+  clearTimeout(liveSeek.timer);
+  var had = liveSeek.base !== null;
+  liveSeek.timer = null; liveSeek.base = null; liveSeek.delta = 0; liveSeek.key = 0;
+  if (had && !state.vod) {
+    var pop = document.getElementById('seekpop');
+    if (pop) pop.className = 'hidden';
+  }
+}
+function applyLiveSeek() {
+  var base = liveSeek.base, delta = liveSeek.delta;
+  resetLiveSeek();
+  document.getElementById('seekpop').className = 'hidden';
+  if (base === null || !delta) { drawLiveBar(); return; }
+  var p = livePositions();
+  if (!p) return;
+  seekLiveTo(Math.max(0, Math.min(p.edge, base + delta)));
+}
+// Put the picture at `target` seconds into the stream.
+function seekLiveTo(target) {
+  var p = livePositions();
+  if (!p || !state.current) return;
+  if (p.edge - target <= LIVE_EDGE_SLACK_SEC) { goLive(); return; }
+  var video = document.getElementById('video');
+  var range = liveSeekRange(video);
+  var t = (video.currentTime || 0) + (target - p.cur);
+  if (range && t >= range.start + 1 && t <= range.end - 1) {
+    PB.userSeekUntil = Date.now() + 8000;      // a deliberate seek, not a freeze
+    try { video.currentTime = t; } catch (e) {}
+    playVideo(video);
+    drawLiveBar();
+    return;
+  }
+  openLiveRecording(state.current, p.startMs + target * 1000);
+}
+// Back to the live edge: out of a rewound recording, or forward to the edge of
+// a live picture that was paused or has drifted behind.
+function goLive() {
+  resetLiveSeek();
+  liveRecordingSession++;        // a recording lookup still in flight must not land after this
+  if (liveRecordingPending) { liveRecordingPending = false; setBanner(''); }
+  if (state.vod && state.vod.liveRewind) { exitVod(); return; }   // exitVod plays vodReturn
+  if (!state.current) return;
+  var video = document.getElementById('video');
+  var range = liveSeekRange(video);
+  PB.userSeekUntil = Date.now() + 8000;
+  if (range) { try { video.currentTime = liveTarget(video, range); } catch (e) {} }
+  playVideo(video);
+  if (liveBarVisible()) drawLiveBar();
+}
+var liveRecordingSession = 0, liveRecordingPending = false;
+function openLiveRecording(slug, wallMs) {
+  var c = state.channels[slug];
+  if (!c || !c.live) return;
+  var ses = ++liveRecordingSession, session = PB.session;
+  liveRecordingPending = true;
+  setBanner('Switching to VOD...');
+  serviceGet('/api/v2/channels/' + encodeURIComponent(slug) + '/videos', function (err, data) {
+    if (ses !== liveRecordingSession) return;
+    liveRecordingPending = false;
+    if (state.current !== slug || state.vod || session !== PB.session) return;
+    setBanner('');
+    var list = Array.isArray(data) ? data : ((data && data.data) || []);
+    var rec = null, anyLive = null;
+    for (var i = 0; i < list.length; i++) {
+      var v = list[i];
+      if (!v || !v.is_live || !playableVod(v)) continue;
+      if (!anyLive) anyLive = v;
+      if (v.created_at === c.startedAt) { rec = v; break; }   // created_at is the stream start
+    }
+    rec = rec || anyLive;
+    if (!rec) { toast(err ? 'Could not reach Kick' : 'Rewind is not available for this stream'); return; }
+    // created_at gets us close; the playlist's own timestamps correct it once it loads.
+    var recStart = parseKickTime(rec.created_at) || parseKickTime(c.startedAt);
+    state.vodReturn = slug;
+    playVod(rec, [rec], 0, slug, {
+      liveRewind: true,
+      resumeAt: Math.max(0, (wallMs - recStart) / 1000),
+      wallTarget: wallMs,
+      recStartMs: recStart
+    });
+  }, { priority: 0 });
+}
+// A rewound recording is a snapshot of the stream as it was when loaded. Reaching
+// its end either means there is more by now (load it again and carry on) or that
+// we have caught up with live.
+function liveRewindEnded() {
+  var v = state.vod;
+  if (!v || !v.liveRewind) return;
+  var video = document.getElementById('video');
+  var dur = video.duration || 0;
+  var endMs = v.recEndMs || (v.recStartMs ? v.recStartMs + dur * 1000 : 0);
+  // Reload only while it keeps growing; a copy that came back no longer than the
+  // last one means the stream is over or we are at the edge.
+  var grew = v.endReloadDur == null || dur - v.endReloadDur > 5;
+  if (grew && endMs && Date.now() - endMs > 60000) {
+    v.endReloadDur = dur;
+    v.resumeAt = Math.max(0, (video.currentTime || 0) - 1);
+    v.wallTarget = 0;
+    attachVod(v.source);
+    return;
+  }
+  goLive();
 }
 
 /* Optional playback diagnostics. This deliberately reads only public media and
@@ -4032,11 +4925,12 @@ function placeDiagnostics() {
   if (!el) return;
   var vodbar = document.getElementById('vodbar');
   var vodControls = state.vod && vodbar.className.indexOf('hidden') === -1;
+  var liveControls = !state.vod && liveBarVisible();
   var chatBox = document.getElementById('chat');
   var chatOnLeft = ChatWindow.side() === 'left' && chatBox.classList.contains('on');
   el.style.left = chatOnLeft ? 'auto' : (state.sidebarOpen ? '500px' : '30px');
   el.style.right = chatOnLeft ? '30px' : 'auto';
-  el.style.bottom = vodControls ? '380px' : (state.sidebarOpen ? '150px' : '30px');   // above the VOD title and timeline
+  el.style.bottom = vodControls ? '380px' : (state.sidebarOpen ? (liveControls ? '230px' : '150px') : (liveControls ? '160px' : '30px'));   // above the VOD title and timeline
 }
 function drawDiagnostics() {
   var el = document.getElementById('diagnostics');
@@ -4154,13 +5048,14 @@ var settings = { open: false, focus: 0, items: [],
                  dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
                  chatSize: 'medium', chatOpacity: 'high', chatSeparate: false,
                  chatBackground: 'black', chatTransparency: 84, chatBots: 'show',
-                 chatEmotes: 'images', chatTimestamps: false, chatDelay: 0,
-                 alerts: 'all', notifySec: 10, saverMin: 1 };
+                 chatEmotes: 'images', chatTimestamps: false, chatDelay: -1,
+                 alerts: 'all', notifySec: 10, saverMin: 1,
+                 uiText: 'normal', chatResizePreview: true };
 // Chat choices belong to the watched streamer. The previous shared choices
 // become a fixed starting point for streamers without a saved profile.
 var CHAT_PREF_KEY = 'kicktv.chatprefs';
 var CHAT_PREF_FIELDS = ['chat', 'chatSeparate', 'chatSize', 'chatOpacity', 'chatBackground',
-  'chatTransparency', 'chatBots', 'chatEmotes', 'chatTimestamps', 'chatDelay'];
+  'chatTransparency', 'chatBots', 'chatEmotes', 'chatTimestamps', 'chatDelay', 'chatResizePreview'];
 var chatPreferences = { defaults: null, profiles: Object.create(null), order: [], active: '' };
 function chatStreamerSlug() { return state.current || (state.vod && state.vod.slug) || ''; }
 function chatOptionsFrom(source, fallback) {
@@ -4172,7 +5067,7 @@ function chatOptionsFrom(source, fallback) {
   var oldTransparency = { off: 100, light: 84, dark: 68, black: 0, white: 0 };
   var delay = parseInt(s.chatDelay, 10);
   return {
-    chat: s.chat === true, chatSeparate: s.chatSeparate === true,
+    chat: s.chat === true, chatSeparate: s.chatSeparate === true, chatResizePreview: s.chatResizePreview !== false,
     chatSize: pickEnum(s.chatSize, ['small', 'medium', 'large'], 'medium'),
     chatOpacity: pickEnum(s.chatOpacity, ['low', 'medium', 'high'], 'high'),
     chatBackground: s.chatBackground === 'white' ? 'white' : 'black',
@@ -4181,12 +5076,18 @@ function chatOptionsFrom(source, fallback) {
     chatBots: pickEnum(s.chatBots, ['show', 'hide'], 'show'),
     chatEmotes: pickEnum(s.chatEmotes, ['images', 'text'], 'images'),
     chatTimestamps: s.chatTimestamps === true,
-    chatDelay: delay >= 0 && delay <= 60 ? delay : 0
+    chatDelay: delay >= -1 && delay <= 60 ? delay : -1   // -1: Auto, matched to the video
   };
 }
+var chatPreferencesSerialized = null, settingsSerialized = null;
 function writeChatPreferences() {
-  try { localStorage.setItem(CHAT_PREF_KEY, JSON.stringify({ version: 1, defaults: chatPreferences.defaults,
-    profiles: chatPreferences.profiles, order: chatPreferences.order })); } catch (e) {}
+  try {
+    var serialized = JSON.stringify({ version: 1, delayAuto: true, defaults: chatPreferences.defaults,
+      profiles: chatPreferences.profiles, order: chatPreferences.order });
+    if (serialized === chatPreferencesSerialized) return;
+    localStorage.setItem(CHAT_PREF_KEY, serialized);
+    chatPreferencesSerialized = serialized;
+  } catch (e) {}
 }
 function useChatOptions(options) {
   CHAT_PREF_FIELDS.forEach(function (key) { settings[key] = options[key]; });
@@ -4195,25 +5096,34 @@ function loadChatPreferences(legacy) {
   var stored = null;
   try { stored = JSON.parse(localStorage.getItem(CHAT_PREF_KEY)); } catch (e) {}
   var valid = stored && stored.version === 1 && stored.defaults && stored.profiles;
-  chatPreferences.defaults = chatOptionsFrom(valid ? stored.defaults : legacy);
+  // Message delay used to default to Off, so a saved Off is almost always that old
+  // default rather than a choice. Move it to Auto once; delayAuto marks it done.
+  var migrateDelay = !(valid && stored.delayAuto);
+  function upgradeDelay(options) {
+    if (migrateDelay && options.chatDelay === 0) options.chatDelay = -1;
+    return options;
+  }
+  chatPreferences.defaults = upgradeDelay(chatOptionsFrom(valid ? stored.defaults : legacy));
   chatPreferences.defaults.chat = false; // New streamers always start with chat closed.
   chatPreferences.profiles = Object.create(null); chatPreferences.order = [];
   if (valid) {
     (Array.isArray(stored.order) ? stored.order : Object.keys(stored.profiles)).slice(-100).forEach(function (slug) {
       if (typeof slug !== 'string' || !slug || !Object.prototype.hasOwnProperty.call(stored.profiles, slug) ||
           !stored.profiles[slug] || typeof stored.profiles[slug] !== 'object' || chatPreferences.order.indexOf(slug) !== -1) return;
-      chatPreferences.profiles[slug] = chatOptionsFrom(stored.profiles[slug], chatPreferences.defaults);
+      chatPreferences.profiles[slug] = upgradeDelay(chatOptionsFrom(stored.profiles[slug], chatPreferences.defaults));
       chatPreferences.order.push(slug);
     });
   }
   chatPreferences.active = chatStreamerSlug();
   useChatOptions(chatPreferences.profiles[chatPreferences.active] || chatPreferences.defaults);
-  if (!valid || stored.defaults.chat !== false) writeChatPreferences();
+  if (!valid || migrateDelay || stored.defaults.chat !== false) writeChatPreferences();
 }
 function rememberChatPreferences() {
   var slug = chatPreferences.active;
   if (!slug || !chatPreferences.defaults) return;
-  chatPreferences.profiles[slug] = chatOptionsFrom(settings);
+  var next = chatOptionsFrom(settings), previous = chatPreferences.profiles[slug] || chatPreferences.defaults;
+  if (CHAT_PREF_FIELDS.every(function (key) { return next[key] === previous[key]; })) return;
+  chatPreferences.profiles[slug] = next;
   var idx = chatPreferences.order.indexOf(slug);
   if (idx !== -1) chatPreferences.order.splice(idx, 1);
   chatPreferences.order.push(slug);
@@ -4269,25 +5179,32 @@ function loadSettings() {
   var st = parseFloat(s.dimStrength);
   settings.dimStrength = (st >= 0.1 && st <= 0.98) ? st : 0.8;
   settings.dimScope = (s.dimScope === 'all') ? 'all' : 'video';
+  settings.uiText = s.uiText === 'large' ? 'large' : 'normal';
+  settings.qualityAlert = s.qualityAlert !== false;   // on unless turned off in the Quality picker
   loadChatPreferences(s);
   // Alerts + burn-in guard
   settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
   var nsec = parseInt(s.notifySec, 10);
-  settings.notifySec = ([5, 10, 15, 20, 30].indexOf(nsec) !== -1) ? nsec : 10;
+  settings.notifySec = nsec >= 5 && nsec <= 30 ? nsec : 10;
   var sm = parseInt(s.saverMin, 10);
-  settings.saverMin = ([0, 1, 3, 5, 10].indexOf(sm) !== -1) ? sm : 1;
+  settings.saverMin = sm >= 0 && sm <= 10 ? sm : 1;
 }
 function saveSettings() {
   if (chatPreferences.active === chatStreamerSlug()) rememberChatPreferences();
   try {
-    localStorage.setItem('kicktv.settings', JSON.stringify({
+    var serialized = JSON.stringify({
       lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
       hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
       hideBots: settings.hideBots,
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
       dimStrength: settings.dimStrength, dimScope: settings.dimScope,
-      alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin
-    }));
+      alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin,
+      uiText: settings.uiText, qualityAlert: settings.qualityAlert
+    });
+    if (serialized !== settingsSerialized) {
+      localStorage.setItem('kicktv.settings', serialized);
+      settingsSerialized = serialized;
+    }
   } catch (e) {}
 }
 function popupDimFilter() {
@@ -4321,15 +5238,14 @@ function settingsBuild() {
     { kind: 'toggle', key: 'hideBots', label: 'Hide bot streams' },
     { kind: 'blockedcats', label: 'Blocked categories' },
     { kind: 'toggle', key: 'diagnostics', label: 'Diagnostics' },
+    { kind: 'choice', key: 'uiText', label: 'Big UI', values: [{ v: 'normal', label: 'Normal' }, { v: 'large', label: 'Large' }] },
     { kind: 'dimopt', label: 'Dim (night)' },
     { kind: 'choice', key: 'alerts', label: 'Live alerts',
       values: [{ v: 'all', label: 'All' }, { v: 'pinned', label: 'Pinned only' }, { v: 'off', label: 'Off' }] },
-    { kind: 'choice', key: 'notifySec', label: 'Alert duration',
-      values: [{ v: 5, label: '5 sec' }, { v: 10, label: '10 sec' }, { v: 15, label: '15 sec' },
-                { v: 20, label: '20 sec' }, { v: 30, label: '30 sec' }] },
-    { kind: 'choice', key: 'saverMin', label: 'Burn-in guard',
-      values: [{ v: 1, label: '1 min' }, { v: 3, label: '3 min' }, { v: 5, label: '5 min' },
-                { v: 10, label: '10 min' }, { v: 0, label: 'Off' }] }
+    { kind: 'range', key: 'notifySec', label: 'Alert duration',
+      range: { id: 'alert-duration', min: 5, max: 30, step: 1, unit: 'sec' } },
+    { kind: 'range', key: 'saverMin', label: 'Burn-in guard',
+      range: { id: 'burn-in-guard', min: 0, max: 10, step: 1, unit: 'min' } }
   ];
   // (The update entry lives as a chip in the Settings header, not a list row.)
   return items;
@@ -4342,6 +5258,7 @@ function openSettings() {
   applyStreamerChatPreferences();
   if (!state.ready || settings.open) return;
   hideQualityHint();
+  sidePreviewCard.cancel();
   settings.open = true;
   setMode('settings');
   settings.items = settingsBuild();
@@ -4349,17 +5266,87 @@ function openSettings() {
   document.getElementById('settingsmodal').className = '';
   renderSettingsVer();
   renderSettings();
+  if (window.UIPolish) UIPolish.place('settingsbox');
   touchSettings();
 }
 function closeSettings() {
+  if (settings.open) saveSettings();
+  clearTimeout(settingDescTimer);
   clearTimeout(settingsIdleTimer);
   settingsIdleTimer = null;
   settings.open = false;
   document.getElementById('settingsmodal').className = 'hidden';
   document.getElementById('settings-desc').className = 'hidden';
   setMode('player');
-  if (state.sidebarOpen) resetIdle();
+  if (state.sidebarOpen) { resetIdle(); scheduleSidePreview(); }
   pumpNotify();
+}
+// Use the same switch for booleans and named two-choice settings.
+function settingSwitch(label, on) {
+  var control = document.createElement('span');
+  control.className = 'spill chat-toggle' + (on ? ' on' : '');
+  control.setAttribute('role', 'switch');
+  control.setAttribute('aria-label', label);
+  control.setAttribute('aria-checked', String(!!on));
+  control.setAttribute('data-setting-switch', '1');
+  return control;
+}
+function settingChoices(label, choices, current, select) {
+  var group = document.createElement('div'); group.className = 'setting-choices';
+  group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', label);
+  choices.forEach(function (choice, index) {
+    var value = Array.isArray(choice) ? choice[0] : choice.v;
+    var title = Array.isArray(choice) ? choice[1] : choice.label;
+    var button = document.createElement('button'); button.type = 'button'; button.tabIndex = -1;
+    button.className = 'setting-choice' + (value === current ? ' selected' : '');
+    button.setAttribute('role', 'radio'); button.setAttribute('aria-checked', String(value === current));
+    button.setAttribute('data-value', String(value)); button.textContent = title;
+    button.addEventListener('click', function (event) { event.stopPropagation(); select(index); });
+    group.appendChild(button);
+  });
+  return group;
+}
+function settingsRangeLabel(it) {
+  return it.key === 'saverMin' && !settings[it.key] ? 'Off' : settings[it.key] + ' ' + it.range.unit;
+}
+function paintSettingsRange(it) {
+  var slider = document.getElementById(it.range.id);
+  if (!slider) return;
+  var value = settings[it.key], percent = (value - it.range.min) / (it.range.max - it.range.min) * 100;
+  slider.value = value;
+  slider.style.backgroundImage = 'linear-gradient(to right, #53fc18 ' + percent + '%, #4a5156 ' + percent + '%)';
+  slider.setAttribute('aria-valuetext', !value ? 'Off' : value + (it.key === 'notifySec' ? ' seconds' : value === 1 ? ' minute' : ' minutes'));
+  slider.parentNode.querySelector('.spill').textContent = settingsRangeLabel(it);
+}
+function setSettingsRange(it, value, persist) {
+  settings[it.key] = Math.max(it.range.min, Math.min(it.range.max, Math.round(Number(value) || 0)));
+  paintSettingsRange(it); touchSettings();
+  if (it.key === 'saverMin' && !settings.saverMin) wakeSaver();
+  if (persist) saveSettings();
+}
+function bindSettingsListPointer(list, onHover) {
+  var pointer = null, wheelPointer = null;
+  function hover(event) {
+    // Scrolling can move another row under a stationary Magic Remote pointer.
+    // Only real pointer movement should resume hover navigation after the wheel.
+    if (wheelPointer) {
+      if (event.type !== 'mousemove' || Math.abs(event.clientX - wheelPointer.x) + Math.abs(event.clientY - wheelPointer.y) <= 3) return;
+      wheelPointer = null;
+    }
+    pointer = { x: event.clientX, y: event.clientY };
+    onHover(event);
+  }
+  list.addEventListener('mouseover', hover);
+  list.addEventListener('mousemove', hover);
+  list.addEventListener('wheel', function (event) {
+    if (!event.deltaY) return;
+    event.preventDefault(); event.stopPropagation();
+    wheelPointer = pointer || { x: event.clientX, y: event.clientY };
+    list.scrollTop += event.deltaY > 0 ? 88 : -88;
+    clearTimeout(settingDescTimer);
+    document.getElementById('settings-desc').className = 'hidden';
+    markInput();
+  }, { passive: false });
 }
 function renderSettings() {
   var list = document.getElementById('settings-list');
@@ -4367,55 +5354,60 @@ function renderSettings() {
   settings.items.forEach(function (it, i) {
     var el = document.createElement('div');
     el.setAttribute('data-idx', i);
+    el.className = 'srow' + (it.kind === 'range' ? ' setting-range-row' : '');
     if (it.kind === 'header') {
-      el.className = 'shead';
-      el.textContent = it.label;
-      list.appendChild(el);
-      return;
+      el.className = 'shead'; el.textContent = it.label; list.appendChild(el); return;
     }
-    if (it.kind === 'toggle' || it.kind === 'dimopt' || it.kind === 'chatopt') {
-      el.setAttribute('data-focusable', '1');
-      var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = it.label;
-      el.appendChild(lab);
-      if (it.kind === 'dimopt' || it.kind === 'chatopt') {   // gear sits just left of the On/Off switch
-        var gear = document.createElement('span'); gear.className = 'sgear';
-        gear.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" style="width:22px;height:22px;vertical-align:middle"><path d="M19.14 12.94a7.5 7.5 0 000-1.88l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.3 7.3 0 00-1.62-.94l-.36-2.54A.5.5 0 0013.9 3h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.66 9.5a.5.5 0 00.12.64l2.03 1.58a7.5 7.5 0 000 1.88l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32a.5.5 0 00.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54a.5.5 0 00.5.42h3.84a.5.5 0 00.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96a.5.5 0 00.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8.5a3.5 3.5 0 010 7z"/></svg>';
-        el.appendChild(gear);
-      }
-      var on = it.kind === 'dimopt' ? settings.dim : (it.kind === 'chatopt' ? settings.chat : !!settings[it.key]);
-      var pill = document.createElement('span'); pill.className = 'spill' + (on ? ' on' : ''); pill.textContent = on ? 'On' : 'Off';
-      el.appendChild(pill);
-    } else if (it.kind === 'blockedcats') {
-      el.setAttribute('data-focusable', '1');
-      var blab = document.createElement('span'); blab.className = 'slabel'; blab.textContent = it.label;
-      var bpill = document.createElement('span'); bpill.className = 'spill';
-      bpill.textContent = String(getBlockedCats().length);
-      el.appendChild(blab); el.appendChild(bpill);
+    el.setAttribute('data-focusable', '1');
+    var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = it.label;
+    el.appendChild(lab);
+    var binary = it.kind === 'choice' && it.values.length === 2;
+    var value = document.createElement('span'); value.className = 'settings-value';
+    if (it.kind === 'toggle' || it.kind === 'dimopt' || it.kind === 'chatopt' || binary) {
+      var on = it.kind === 'dimopt' ? settings.dim : it.kind === 'chatopt' ? settings.chat :
+        binary ? settings[it.key] === it.values[1].v : !!settings[it.key];
+      value.setAttribute('data-setting-switch', '1');
+      value.appendChild(settingSwitch(it.label, on));
     } else if (it.kind === 'choice') {
-      el.setAttribute('data-focusable', '1');
-      var clab = document.createElement('span'); clab.className = 'slabel'; clab.textContent = it.label;
-      var cpill = document.createElement('span'); cpill.className = 'spill'; cpill.textContent = choiceLabel(it);
-      el.appendChild(clab); el.appendChild(cpill);
+      value.classList.add('setting-choice-value');
+      value.appendChild(settingChoices(it.label, it.values, settings[it.key], function (index) {
+        settings.focus = i; selectChoice(it, index); renderSettings();
+      }));
+    } else {
+      var pill = document.createElement('span'); pill.className = 'spill';
+      pill.textContent = it.kind === 'blockedcats' ? String(getBlockedCats().length) : settingsRangeLabel(it);
+      value.appendChild(pill);
+    }
+    el.appendChild(value);
+    if (it.kind === 'range') {
+      var slider = document.createElement('input'); slider.type = 'range'; slider.tabIndex = -1;
+      slider.id = it.range.id; slider.className = 'chat-setting-slider';
+      slider.min = String(it.range.min); slider.max = String(it.range.max); slider.step = String(it.range.step);
+      slider.setAttribute('aria-label', it.label);
+      slider.addEventListener('input', function () {
+        settings.focus = i; applySettingsFocus(true); setSettingsRange(it, this.value, false);
+      });
+      slider.addEventListener('change', function () { setSettingsRange(it, this.value, true); });
+      el.appendChild(slider);
     }
     list.appendChild(el);
   });
+  settings.items.forEach(function (it) { if (it.kind === 'range') paintSettingsRange(it); });
   applySettingsFocus();
 }
-function applySettingsFocus() {
-  var list = document.getElementById('settings-list');
-  var focused = null;
-  for (var i = 0; i < list.children.length; i++) {
-    var el = list.children[i], it = settings.items[i];
-    if (!it || it.kind === 'header') continue;
-    el.className = 'srow' + (i === settings.focus ? ' focused' : '');
-    if (i === settings.focus) {
-      focused = el;
-      var top = el.offsetTop - list.offsetTop;
-      if (top < list.scrollTop) list.scrollTop = top - 6;
-      else if (top + el.offsetHeight > list.scrollTop + list.clientHeight)
-        list.scrollTop = top + el.offsetHeight - list.clientHeight + 6;
-    }
+function focusPanelRow(list, index, preserveScroll) {
+  var next = list.children[index];
+  if (list._focusRow !== next) {
+    if (list._focusRow) list._focusRow.classList.remove('focused');
+    if (next) next.classList.add('focused');
+    list._focusRow = next;
   }
+  if (next && !preserveScroll) scrollIntoViewport(list, next, 6);
+  return next;
+}
+function applySettingsFocus(preserveScroll) {
+  var list = document.getElementById('settings-list');
+  var focused = focusPanelRow(list, settings.focus, preserveScroll);
   showSettingDesc('settings-desc', descForSettingItem(settings.items[settings.focus]), focused);
 }
 function settingsMove(delta) {
@@ -4428,7 +5420,8 @@ function settingsMove(delta) {
   settings.focus = n;
   applySettingsFocus();
 }
-function settingsActivate() {
+function settingsActivate(dir) {
+  dir = dir || 1;
   var it = settings.items[settings.focus];
   if (!it) return;
   if (it.kind === 'toggle') {
@@ -4445,14 +5438,17 @@ function settingsActivate() {
   } else if (it.kind === 'chatopt') {
     if (!chatStreamerSlug()) { toast('Choose a streamer first'); return; }
     applyStreamerChatPreferences();
+    if (!settings.chat && !chatCanTurnOn()) return;
     settings.chat = !settings.chat;            // the row itself just toggles chat on/off
     saveSettings();
     applyToggle('chat');
     renderSettings();
   } else if (it.kind === 'blockedcats') {
     openBlockedCats();                         // no toggle semantics; Right opens it too
+  } else if (it.kind === 'range') {
+    setSettingsRange(it, settings[it.key] + dir * it.range.step, true);
   } else if (it.kind === 'choice') {
-    cycleChoice(it);
+    cycleChoice(it, dir);
     renderSettings();
   }
 }
@@ -4473,15 +5469,23 @@ function cycleChoice(it, dir) {
   dir = dir || 1;
   var idx = 0, n = it.values.length;
   for (var i = 0; i < n; i++) if (it.values[i].v === settings[it.key]) { idx = i; break; }
-  var nv = it.values[((idx + dir) % n + n) % n];
+  selectChoice(it, ((idx + dir) % n + n) % n);
+}
+function selectChoice(it, index) {
+  var n = it.values.length, nv = it.values[index];
+  if (!nv) return;
   settings[it.key] = nv.v;
   saveSettings();
   if (it.key === 'alerts') pruneNotifications();
-  toast(it.label + ': ' + nv.label);
+  if (it.key === 'uiText' && window.UIPolish) {
+    UIPolish.apply(); sideLayout = null; sideTextStyle = null; renderSidebar();
+  }
+  toast(it.label + ': ' + (n === 2 ? (nv.v === it.values[1].v ? 'On' : 'Off') : nv.label));
 }
 /* A short description of the focused setting, shown in the detached context
    card used by the original Settings layout. */
 var SETTINGS_DESC = {
+  uiText: 'Larger labels and controls for easier reading from the sofa. Video size stays the same.',
   chat: 'Green toggles live chat. Drag anywhere to move, use any corner to resize, or release at an edge to dock. Each streamer remembers all chat settings and its layout.',
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
   autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
@@ -4489,10 +5493,10 @@ var SETTINGS_DESC = {
   hideBots: 'Hide fake streams from Browse — the ones with random channel names and random titles that pad their viewer counts.',
   blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
   diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
-  dim: 'Reduce screen brightness. Press OK or use the gear for strength, scope and startup behavior, or press 0 while watching.',
+  dim: 'Reduce screen brightness. Press OK or select the label for strength, scope and startup behavior, or press 0 while watching.',
   alerts: 'Choose which followed channels may show a live alert when they come online.',
-  notifySec: 'How long a live alert stays on screen before it slides away. Press OK while it is up to jump straight to that channel.',
-  saverMin: 'Dim a still screen after this much idle time. It clears by itself once something moves again, and any remote or pointer input wakes it.'
+  notifySec: 'Keep each live alert on screen for 5–30 seconds. Drag the slider, or use Left and Right to adjust by one second.',
+  saverMin: 'Dim a still screen after 1–10 idle minutes, or choose Off. Left and Right adjust by one minute. Movement or remote input wakes the screen.'
 };
 var DIMOPT_DESC = [
   'Turn night dimming on or off.',
@@ -4505,13 +5509,25 @@ function descForSettingItem(it) {
   if (it.kind === 'chatopt') return SETTINGS_DESC.chat;
   if (it.kind === 'dimopt') return SETTINGS_DESC.dim;
   if (it.kind === 'blockedcats') return SETTINGS_DESC.blockedcats;
-  if (it.kind === 'toggle' || it.kind === 'choice') return SETTINGS_DESC[it.key] || '';
+  if (it.kind === 'toggle' || it.kind === 'choice' || it.kind === 'range') return SETTINGS_DESC[it.key] || '';
   return '';
 }
-function showSettingDesc(id, text, target) {
+var settingDescTimer = null;
+// `owner` is 'quality' when the Quality picker asks; otherwise the balloon belongs
+// to Settings or Chat options and stays down while the picker covers them.
+function showSettingDesc(id, text, target, owner) {
+  clearTimeout(settingDescTimer);
+  var previous = document.getElementById(id);
+  if (previous) previous.className = 'hidden';
+  settingDescTimer = setTimeout(function () { paintSettingDesc(id, text, target, owner); }, 240);
+}
+function paintSettingDesc(id, text, target, owner) {
   var el = document.getElementById(id);
   if (!el) return;
-  if (!text || !target || (!settings.open && !chatopt.open) || updateopen || (qualityopt && qualityopt.open)) {
+  var ownerOpen = owner === 'quality' ? qualityopt.open
+    : ((settings.open || chatopt.open) && !(qualityopt && qualityopt.open));
+  if (!text || !target || !document.documentElement.contains(target) || !target.offsetHeight ||
+      !ownerOpen || updateopen) {
     el.className = 'hidden';
     return;
   }
@@ -4531,6 +5547,7 @@ function showSettingDesc(id, text, target) {
   el.style.left = Math.round(left) + 'px';
   el.style.top = Math.round(top) + 'px';
   el.style.setProperty('--arrow-top', Math.round(arrowTop) + 'px');
+  if (window.UIPolish) UIPolish.place(el, target);
 }
 function applyDimAwareUi() {
   var popupFilter = popupDimFilter();
@@ -4544,7 +5561,8 @@ function applyDimAwareUi() {
   var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox'];
   var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'toast'];
   var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
-                     'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner'];
+                     'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner',
+                     'livebar'];
   // The lower group already sits under the Everything dim layer. Applying a
   // second filter there would dim it twice.
   var lowerFilter = settings.dim && settings.dimScope === 'all' ? '' : popupFilter;
@@ -4557,7 +5575,10 @@ function applyDimAwareUi() {
   for (var j = 0; j < lowerPopups.length; j++) {
     document.getElementById(lowerPopups[j]).style.filter = lowerFilter;
   }
-  drawDiagnostics();
+  // Only the filter: drawDiagnostics() would also push a graph sample and measure
+  // the download rate over a few milliseconds, spiking the 60s graphs.
+  var diag = document.getElementById('diagnostics');
+  if (diag) diag.style.filter = settings.dim && settings.dimScope !== 'all' ? popupFilter : '';
   if (state.notifyCurrent) {
     document.getElementById('notify').style.filter =
       settings.dim && settings.dimScope !== 'all' ? popupFilter : '';
@@ -4659,6 +5680,70 @@ function qualityPlaybackStatus() {
       : ('Playing ' + currentLabel + ' · Source max ' + maxLabel)
   };
 }
+/* Quality drop alert. When the stream plays below what was asked for (a fixed
+   quality), or below the source's best (Auto), the Quality button shows by itself
+   for a few seconds with the bars and the resolution actually playing. A stream's
+   first seconds are ignored, since Auto always starts low and climbs, and a drop
+   must last a moment before it counts. One alert per drop: it re-arms once
+   quality recovers or falls further. */
+var QUALITY_ALERT_MS = 5000, QUALITY_ALERT_GRACE_MS = 8000, QUALITY_ALERT_SETTLE_MS = 2000;
+var qualityAlert = { from: 0, settle: null, hide: null, grace: null, showing: false, alertedIdx: -1 };
+function qualityAlertReset() {
+  qualityAlert.from = Date.now() + QUALITY_ALERT_GRACE_MS;
+  qualityAlert.alertedIdx = -1;
+  clearTimeout(qualityAlert.settle); qualityAlert.settle = null;
+  // A stream that never climbs sends no switch event after the grace; look once then.
+  clearTimeout(qualityAlert.grace);
+  qualityAlert.grace = setTimeout(checkQualityDrop, QUALITY_ALERT_GRACE_MS);
+  endQualityAlert();
+}
+// The level being played if it is below the target, else -1.
+function qualityDropLevel() {
+  var levels = state.hls && state.hls.levels;
+  if (!levels || !levels.length) return -1;
+  var cur = playingQualityLevelIndex();
+  var target = quality.sel === 'auto' ? maxQualityLevelIndex() : levelIndexForPref();
+  if (cur < 0 || target < 0 || cur === target) return -1;
+  var a = levels[cur], b = levels[target], ah = a.height || 0, bh = b.height || 0;
+  return ah < bh || (ah === bh && (a.bitrate || 0) < (b.bitrate || 0)) ? cur : -1;
+}
+function checkQualityDrop() {
+  if (!settings.qualityAlert) return;
+  var idx = qualityDropLevel();
+  if (idx === -1) { qualityAlert.alertedIdx = -1; return; }       // recovered: re-arm
+  if (qualityAlert.settle) return;
+  qualityAlert.settle = setTimeout(function () {
+    qualityAlert.settle = null;
+    var now = qualityDropLevel();
+    if (now === -1 || Date.now() < qualityAlert.from) return;
+    var levels = state.hls.levels, prev = levels[qualityAlert.alertedIdx];
+    // Already told about this drop, and it has not got worse.
+    if (prev && (levels[now].height || 0) >= (prev.height || 0)) return;
+    qualityAlert.alertedIdx = now;
+    showQualityAlert();
+  }, QUALITY_ALERT_SETTLE_MS);
+}
+function showQualityAlert() {
+  var tools = document.getElementById('player-tools');
+  if (!tools || !settings.qualityAlert || state.sidebarOpen || state.mode !== 'player' || anyPanelOpen() || saver.on || document.hidden) return;
+  qualityAlert.showing = true;
+  tools.classList.add('qalert');
+  tools.classList.remove('hidden');
+  updateQualityButton();
+  clearTimeout(qualityAlert.hide);
+  qualityAlert.hide = setTimeout(endQualityAlert, QUALITY_ALERT_MS);
+}
+function endQualityAlert() {
+  clearTimeout(qualityAlert.hide); qualityAlert.hide = null;
+  if (!qualityAlert.showing) return;
+  qualityAlert.showing = false;
+  var tools = document.getElementById('player-tools');
+  if (tools) {
+    tools.classList.remove('qalert');
+    if (!state.sidebarOpen) tools.classList.add('hidden');
+  }
+  updateQualityButton();
+}
 function hideQualityHint() {
   var hint = document.getElementById('quality-hint');
   if (hint) hint.className = 'hidden';
@@ -4686,10 +5771,12 @@ function showQualityHint() {
 }
 function updateQualityButton() {
   var el = document.getElementById('quality-button-value');
-  if (el) el.textContent = qualityCurrentLabel();
   var button = document.getElementById('quality-button');
   var mark = button && button.querySelector('.quality-mark');
   var status = qualityPlaybackStatus();
+  // During a drop alert the button says what is actually playing, not the setting.
+  var alerting = qualityAlert.showing && status.known;
+  if (el) el.textContent = alerting ? status.currentLabel : qualityCurrentLabel();
   if (button) {
     button.classList.toggle('quality-limited', status.tone === 'limited');
     button.classList.toggle('quality-low', status.tone === 'low');
@@ -4714,15 +5801,20 @@ function openQualityOpt() {
   qualityopt.open = true;
   clearTimeout(state.idleTimer);                 // keep the launch tools behind the modal
   hideQualityHint();
+  sidePreviewCard.cancel();
   document.getElementById('settings-desc').className = 'hidden';
   document.getElementById('qualityoptmodal').className = '';
   refreshQualityOpt();
+  if (window.UIPolish) UIPolish.place('qualityoptbox');
   touchSettings();
 }
 function closeQualityOpt() {
   qualityopt.open = false;
+  clearTimeout(settingDescTimer);
+  document.getElementById('settings-desc').className = 'hidden';
   document.getElementById('qualityoptmodal').className = 'hidden';
   updateQualityButton();
+  if (state.sidebarOpen && !settings.open) scheduleSidePreview();
   if (!settings.open) {
     clearTimeout(settingsIdleTimer);
     settingsIdleTimer = null;
@@ -4746,13 +5838,47 @@ function renderQualityOpt() {
     el.appendChild(label); el.appendChild(check);
     list.appendChild(el);
   });
+  list._focusRow = list.children[qualityopt.focus] || null;
+  renderQualityAlertSwitch();
+  describeQualityOpt();
+}
+// The header switch. qualityopt.focus of -1 means it holds the focus.
+function renderQualityAlertSwitch() {
+  var sw = document.getElementById('qualityopt-alert');
+  if (!sw) return;
+  var cls = (settings.qualityAlert ? 'on' : '') + (qualityopt.focus === -1 ? ' focused' : '');
+  if (sw.className !== cls) sw.className = cls;
+  sw.setAttribute('aria-checked', settings.qualityAlert ? 'true' : 'false');
 }
 function qualityoptMove(delta) {
   var cur = qualityopt.focus, next = cur + delta, n = qualityopt.items.length;
-  if (next < 0 || next >= n) return;
-  if (next !== cur) { qualityopt.focus = next; renderQualityOpt(); }
+  if (next < -1 || next >= n || next === cur) return;   // -1: the Alert switch above the list
+  qualityopt.focus = next;
+  var list = document.getElementById('qualityopt-list');
+  if (list.children[cur]) list.children[cur].classList.remove('focused');
+  if (next === -1) {
+    if (list._focusRow) list._focusRow.classList.remove('focused');
+    list._focusRow = null;
+  } else focusPanelRow(list, next);
+  renderQualityAlertSwitch();
+  describeQualityOpt();
+}
+var QUALITY_ALERT_DESC = 'Briefly shows the quality button when the stream drops below the quality you picked.';
+// Only the Alert switch needs explaining; the resolutions speak for themselves.
+function describeQualityOpt() {
+  var onSwitch = qualityopt.focus === -1;
+  showSettingDesc('settings-desc', onSwitch ? QUALITY_ALERT_DESC : '',
+    onSwitch ? document.getElementById('qualityopt-alert') : null, 'quality');
+}
+function toggleQualityAlert() {         // flips in place; the picker stays open
+  settings.qualityAlert = !settings.qualityAlert;
+  saveSettings();
+  if (!settings.qualityAlert) endQualityAlert();
+  renderQualityAlertSwitch();
+  toast('Quality alert: ' + (settings.qualityAlert ? 'On' : 'Off'));
 }
 function qualityoptActivate() {
+  if (qualityopt.focus === -1) { toggleQualityAlert(); return; }
   var row = qualityopt.items[qualityopt.focus];
   if (!row) return;
   pickQuality(row);
@@ -4772,6 +5898,7 @@ function openDimOpt() {
   dimopt.open = true; dimopt.focus = 0;
   document.getElementById('dimoptmodal').className = '';
   renderDimOpt();
+  if (window.UIPolish) UIPolish.place('dimoptbox');
   touchSettings();
 }
 function closeDimOpt() {
@@ -4782,8 +5909,8 @@ function closeDimOpt() {
 function renderDimOpt() {
   var rows = [
     { label: 'Dim', value: settings.dim ? 'On' : 'Off', on: settings.dim },
-    { label: 'Strength', value: dimStrengthLabel() },
-    { label: 'Apply to', value: settings.dimScope === 'all' ? 'Everything' : 'Video only' },
+    { label: 'Strength', choices: DIM_LEVELS },
+    { label: 'Dim everything', on: settings.dimScope === 'all' },
     { label: 'Remember dim', value: settings.rememberDim ? 'On' : 'Off', on: settings.rememberDim }
   ];
   var list = document.getElementById('dimopt-list');
@@ -4793,7 +5920,11 @@ function renderDimOpt() {
     el.className = 'srow' + (i === dimopt.focus ? ' focused' : '');
     el.setAttribute('data-idx', i);
     var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = r.label;
-    var pill = document.createElement('span'); pill.className = 'spill' + (r.on ? ' on' : ''); pill.textContent = r.value;
+    var pill;
+    if (typeof r.on === 'boolean') pill = settingSwitch(r.label, r.on);
+    else pill = settingChoices(r.label, r.choices, DIM_LEVELS.reduce(function (nearest, level) { return Math.abs(level.v - settings.dimStrength) < Math.abs(nearest.v - settings.dimStrength) ? level : nearest; }).v, function (index) {
+      dimopt.focus = i; settings.dimStrength = DIM_LEVELS[index].v; saveSettings(); applyDim(); renderDimOpt();
+    });
     el.appendChild(lab); el.appendChild(pill);
     list.appendChild(el);
   });
@@ -4803,7 +5934,10 @@ function dimoptMove(delta) {
   var n = dimopt.focus + delta;
   if (n < 0 || n >= DIMOPT_DESC.length) return;
   dimopt.focus = n;
-  renderDimOpt();
+  var list = document.getElementById('dimopt-list');
+  var old = list.querySelector('.focused');
+  if (old) old.classList.remove('focused');
+  showSettingDesc('settings-desc', DIMOPT_DESC[n], focusPanelRow(list, n));
 }
 // Step the dim strength to the next (dir +1) or previous (dir -1) level, and apply/save it.
 function cycleDimStrength(dir) {
@@ -4867,19 +6001,20 @@ var chatopt = { open: false, focus: 0 };
 var CHATOPT_ROWS = [
   { key: 'chat',           label: 'Chat',         bool: true, desc: 'Green toggles live chat. The latest 160 messages stay until replaced by newer ones or you leave the channel.' },
   { key: 'chatSeparate',   label: 'Separate chat', bool: true, desc: 'Fit the stream beside chat when docked left or right. Drag the inside edge to adjust the width. Floating chat stays over the stream.' },
-  { key: 'chatBackground', label: 'Background color', vals: [['black', 'Black'], ['white', 'White']], desc: 'Choose black or white, then adjust its transparency below. Text adapts to a light or dark background.' },
+  { key: 'chatResizePreview', label: 'Resize preview', bool: true, desc: 'Use an outline while resizing docked chat. The video resizes once when you release, which is lighter on the TV.' },
+  { key: 'chatBackground', label: 'White background', vals: [['black', 'Black'], ['white', 'White']], desc: 'On uses white; off uses black. Adjust transparency below. Text adapts to a light or dark background.' },
   { key: 'chatTransparency', label: 'Background transparency', range: { id: 'chat-transparency', max: 100, remoteStep: 5 }, desc: 'Drag the slider for any value from 0% (solid) to 100% (clear). Left and Right adjust by 5%. The message text keeps its own opacity.' },
   { key: 'chatSize',       label: 'Text size',    vals: [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], desc: 'Font size of chat messages.' },
   { key: 'chatOpacity',    label: 'Text opacity', vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'Adjust message transparency. Controls stay fully visible when you point at chat.' },
-  { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', max: 60, remoteStep: 1 }, desc: 'Delay new messages from Off to 60 seconds to match the video and avoid spoilers. Left and Right adjust by 1 second. Changing this adjusts messages still waiting to appear.' },
-  { key: 'chatBots',       label: 'Bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
-  { key: 'chatEmotes',     label: 'Emotes',       vals: [['images', 'Images'], ['text', 'Text']], desc: 'Show emotes as their real images, or just their names as text.' },
+  { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', min: -1, max: 60, remoteStep: 1 }, desc: 'Auto holds each message until the video reaches the moment it was sent, so chat stays in step with the picture. Or pick Off, or a fixed 1 to 60 seconds.' },
+  { key: 'chatBots',       label: 'Hide bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
+  { key: 'chatEmotes',     label: 'Emote images', vals: [['text', 'Text'], ['images', 'Images']], desc: 'Show emotes as their real images, or just their names as text.' },
   { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' },
   { key: 'chatReset',      label: 'Reset this layout', action: true, desc: 'Restore the default size and position for this channel. Other channels and message options stay the same.' }
 ];
 function chatoptValLabel(row) {
   if (row.action) return 'Reset';
-  if (row.key === 'chatDelay') return settings.chatDelay ? settings.chatDelay + 's' : 'Off';
+  if (row.key === 'chatDelay') return settings.chatDelay < 0 ? 'Auto' : (settings.chatDelay ? settings.chatDelay + 's' : 'Off');
   if (row.range) return settings[row.key] + '%';
   if (row.bool) return settings[row.key] ? 'On' : 'Off';
   for (var i = 0; i < row.vals.length; i++) if (row.vals[i][0] === settings[row.key]) return row.vals[i][1];
@@ -4888,10 +6023,12 @@ function chatoptValLabel(row) {
 function openChatOpt() {
   if (!chatStreamerSlug()) { toast('Choose a streamer first'); return; }
   applyStreamerChatPreferences();
+  sidePreviewCard.cancel();
   chatopt.open = true; chatopt.focus = 0;
   document.getElementById('chatoptbox').style.left = ChatWindow.side() === 'right' ? '80px' : '1300px';
   document.getElementById('chatoptmodal').className = '';
   renderChatOpt();
+  if (window.UIPolish) UIPolish.place('chatoptbox');
   touchSettings();
 }
 function closeChatOpt() {
@@ -4902,11 +6039,13 @@ function closeChatOpt() {
   else {
     clearTimeout(settingsIdleTimer); settingsIdleTimer = null;
     document.getElementById('settings-desc').className = 'hidden';
+    if (state.sidebarOpen) scheduleSidePreview();
   }
 }
 function renderChatOpt() {
   var slug = chatStreamerSlug(), channel = state.channels[slug];
   var name = channel && channel.name || (state.vod && state.vod.slug === slug && state.vod.name) || slug;
+  if (window.UIPolish) UIPolish.chatIdentity(name, channel && channel.avatar);
   document.getElementById('chatopt-note').textContent = 'These settings apply only to ' + name + '.';
   var list = document.getElementById('chatopt-list');
   list.innerHTML = '';
@@ -4914,31 +6053,23 @@ function renderChatOpt() {
     var el = document.createElement('div');
     el.className = 'srow' + (row.range ? ' chat-range-row' : '') + (i === chatopt.focus ? ' focused' : '');
     el.setAttribute('data-idx', i);
-    var on = !!(row.bool && settings[row.key]);
+    var binary = row.bool || (row.vals && row.vals.length === 2);
+    var on = row.bool ? !!settings[row.key] : !!(binary && settings[row.key] === row.vals[1][0]);
     var lab = document.createElement('span'); lab.className = 'slabel'; lab.textContent = row.label;
-    var pill = document.createElement('span');
-    pill.className = 'spill' + (row.bool ? ' chat-toggle' : '') + (on ? ' on' : '');
-    pill.textContent = chatoptValLabel(row);
-    el.appendChild(lab);
-    if (row.key === 'chatBackground') {
-      var colors = document.createElement('div'); colors.className = 'chat-colors';
-      ['black', 'white'].forEach(function (color) {
-        var choice = document.createElement('button'); choice.type = 'button'; choice.tabIndex = -1;
-        choice.className = 'chat-color' + (settings.chatBackground === color ? ' selected' : '');
-        choice.setAttribute('data-chat-color', color);
-        choice.setAttribute('aria-pressed', String(settings.chatBackground === color));
-        choice.textContent = color === 'black' ? 'Black' : 'White';
-        colors.appendChild(choice);
-      });
-      el.appendChild(colors);
-    } else el.appendChild(pill);
+    var pill;
+    if (binary) pill = settingSwitch(row.label, on);
+    else if (row.vals) pill = settingChoices(row.label, row.vals, settings[row.key], function (index) {
+      chatopt.focus = i; settings[row.key] = row.vals[index][0]; saveSettings(); applyChatStyle(); renderChatOpt();
+    });
+    else { pill = document.createElement('span'); pill.className = 'spill'; pill.textContent = chatoptValLabel(row); }
+    el.appendChild(lab); el.appendChild(pill);
     if (row.range) {
       var slider = document.createElement('input');
       slider.id = row.range.id; slider.type = 'range'; slider.className = 'chat-setting-slider';
-      slider.min = '0'; slider.max = String(row.range.max); slider.step = '1';
+      slider.min = String(row.range.min || 0); slider.max = String(row.range.max); slider.step = '1';
       slider.value = settings[row.key]; slider.tabIndex = -1;
       slider.setAttribute('aria-label', row.label);
-      slider.addEventListener('input', function () { setChatRange(row, this.value, false); });
+      slider.addEventListener('input', function () { chatopt.focus = i; applyChatOptFocus(true); setChatRange(row, this.value, false); });
       slider.addEventListener('change', function () { setChatRange(row, this.value, true); });
       el.appendChild(slider);
     }
@@ -4947,30 +6078,27 @@ function renderChatOpt() {
   CHATOPT_ROWS.forEach(function (row) { if (row.range) paintChatRange(row); });
   applyChatOptFocus();
 }
-function applyChatOptFocus() {
+function applyChatOptFocus(preserveScroll) {
   var list = document.getElementById('chatopt-list');
   for (var i = 0; i < list.children.length; i++) list.children[i].classList.toggle('focused', i === chatopt.focus);
   var f = list.children[chatopt.focus];
-  if (f) {
-    var top = f.offsetTop - list.offsetTop;
-    if (top < list.scrollTop) list.scrollTop = top - 6;
-    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
-  }
+  if (f && !preserveScroll) scrollIntoViewport(list, f, 6);
   showSettingDesc('settings-desc', (CHATOPT_ROWS[chatopt.focus] || {}).desc || '', f);
 }
 function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= CHATOPT_ROWS.length) return; chatopt.focus = n; applyChatOptFocus(); }
 function paintChatRange(row) {
   var slider = document.getElementById(row.range.id);
   if (!slider) return;
-  var value = settings[row.key], percent = value / row.range.max * 100;
+  var min = row.range.min || 0, value = settings[row.key];
+  var percent = (value - min) / (row.range.max - min) * 100;
   slider.value = value;
   slider.style.backgroundImage = 'linear-gradient(to right, #53fc18 ' + percent + '%, #4a5156 ' + percent + '%)';
   slider.setAttribute('aria-valuetext', row.key === 'chatDelay' ?
-    (value ? value + (value === 1 ? ' second' : ' seconds') : 'Off') : value + '% transparent');
+    (value < 0 ? 'Auto' : (value ? value + (value === 1 ? ' second' : ' seconds') : 'Off')) : value + '% transparent');
   slider.parentNode.querySelector('.spill').textContent = chatoptValLabel(row);
 }
 function setChatRange(row, value, persist) {
-  settings[row.key] = Math.max(0, Math.min(row.range.max, Math.round(Number(value) || 0)));
+  settings[row.key] = Math.max(row.range.min || 0, Math.min(row.range.max, Math.round(Number(value) || 0)));
   paintChatRange(row);
   if (row.key === 'chatDelay') rescheduleChatDelay();
   else applyChatStyle();
@@ -4982,8 +6110,10 @@ function chatoptActivate(dir) {
   var row = CHATOPT_ROWS[chatopt.focus];
   if (row.action) { ChatWindow.reset(); renderChatOpt(); return; }
   if (row.range) { setChatRange(row, settings[row.key] + dir * row.range.remoteStep, true); return; }
-  if (row.bool) settings[row.key] = !settings[row.key];
-  else {
+  if (row.bool) {
+    if (row.key === 'chat' && !settings.chat && !chatCanTurnOn()) return;
+    settings[row.key] = !settings[row.key];
+  } else {
     var idx = 0, n = row.vals.length;
     for (var i = 0; i < n; i++) if (row.vals[i][0] === settings[row.key]) { idx = i; break; }
     settings[row.key] = row.vals[((idx + dir) % n + n) % n][0];
@@ -5044,12 +6174,7 @@ function renderBlockedCats() {
   list.appendChild(link);
 
   var f = list.children[blockedcats.focus] || list.lastChild;
-  if (f) {
-    var top = f.offsetTop - list.offsetTop;
-    if (top < list.scrollTop) list.scrollTop = top - 6;
-    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight)
-      list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
-  }
+  if (f) scrollIntoViewport(list, f, 6);
   showSettingDesc('settings-desc', SETTINGS_DESC.blockedcats, f);
 }
 function blockedcatsMove(delta) {
@@ -5230,19 +6355,37 @@ var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=j
 var CHAT_MAX = 160;                       // bounded scrollback, including off-screen messages
 var CHAT_DELAY_MAX = 1000;
 var chatPending = [], chatDelayTimer = null;
-var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null };
+var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null,
+             activityMs: 120000, activityTimer: null, pongTimer: null };
+/* How long to hold a message. Auto (-1) holds it as long as the picture trails
+   real time: every segment carries the wall-clock time it was broadcast, so
+   now minus the playing frame's time is exactly how far behind the video is.
+   Until the first frame plays that is unknown, and messages wait. */
+var CHAT_DELAY_UNKNOWN_MS = 60000;
+function chatDelayMs() {
+  if (settings.chatDelay >= 0) return settings.chatDelay * 1000;
+  if (state.vod) return 0;
+  var video = document.getElementById('video'), date = null;
+  try { date = state.hls && state.hls.playingDate; } catch (e) {}
+  if (!video || !(video.currentTime > 0)) return CHAT_DELAY_UNKNOWN_MS;
+  var lag = date && date.getTime ? Date.now() - date.getTime() : liveLatencySec() * 1000;
+  return isFinite(lag) ? Math.max(0, Math.min(CHAT_DELAY_UNKNOWN_MS, lag)) : 0;
+}
 // One timer for the ordered delay queue. Channel changes and closing chat discard
 // pending messages, so nothing from the previous room can appear after switching.
+// On Auto the lag moves (buffering, a pause, Go live), so the wait is re-judged
+// at least every second.
 function scheduleChatDelay() {
   if (chatDelayTimer !== null || !chatPending.length) return;
-  var wait = Math.max(0, chatPending[0].at + settings.chatDelay * 1000 - Date.now());
+  var wait = Math.max(0, chatPending[0].at + chatDelayMs() - Date.now());
+  if (settings.chatDelay < 0) wait = Math.min(wait, 1000);
   chatDelayTimer = setTimeout(drainChatDelay, wait);
 }
 function drainChatDelay() {
   if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
   chatDelayTimer = null;
-  var now = Date.now(), count = 0;
-  while (chatPending.length && chatPending[0].at + settings.chatDelay * 1000 <= now && count < 40) {
+  var now = Date.now(), count = 0, delay = chatDelayMs();
+  while (chatPending.length && chatPending[0].at + delay <= now && count < 40) {
     var item = chatPending.shift(); count++;
     if (chat.want && settings.chat && chat.room === item.room && currentRoomId() === item.room)
       addChatMessage(item.data, item.at);
@@ -5258,7 +6401,7 @@ function queueChatMessage(data) {
   if (!data || !data.sender || !chat.want || !settings.chat) return;
   chatPending.push({ data: data, at: Date.now(), room: chat.room });
   if (chatPending.length > CHAT_DELAY_MAX) chatPending.shift();
-  if (!settings.chatDelay && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
+  if (settings.chatDelay === 0 && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
   else scheduleChatDelay();
 }
 function clearChatDelay() {
@@ -5289,13 +6432,23 @@ function applyChatStyle() {
     for (var i = 0; i < names.length; i++) names[i].style.color = chatNameColor(names[i].getAttribute('data-color'), chatLightBackground());
   }
 }
-function clearChat() { chatMessagesEl().innerHTML = ''; ChatWindow.clear(); }
+function clearChat() {
+  chatRenderQueue = [];
+  if (chatRenderFrame !== null) { cancelAnimationFrame(chatRenderFrame); chatRenderFrame = null; }
+  if (window.UIImages) UIImages.release(chatMessagesEl());
+  chatMessagesEl().innerHTML = ''; ChatWindow.clear();
+}
+// Chat only exists on a live stream with a chat room; say why when it cannot.
+function chatCanTurnOn() {
+  if (!state.current || state.vod) { toast('Chat is available on live streams'); return false; }
+  if (!currentRoomId()) { toast('Chat is unavailable for this channel'); return false; }
+  return true;
+}
 function toggleChat() {
   applyStreamerChatPreferences();
   if (chatEl().classList.contains('on')) settings.chat = false;
   else {
-    if (!state.current || state.vod) { toast('Chat is available on live streams'); return; }
-    if (!currentRoomId()) { toast('Chat is unavailable for this channel'); return; }
+    if (!chatCanTurnOn()) return;
     settings.chat = true;
   }
   saveSettings();
@@ -5330,16 +6483,63 @@ function connectChat(room) {
   ChatWindow.status('connecting', 'Connecting...');
   openChatSocket(room);
 }
+// A socket can die without ever closing (router restart, WAN failover): nothing
+// arrives and onclose never fires. So we watch for silence ourselves. After the
+// server's activity_timeout with no traffic we ping; no answer within 30s means
+// the link is dead and we reconnect.
+function stopChatHeartbeat() {
+  clearTimeout(chat.activityTimer); chat.activityTimer = null;
+  clearTimeout(chat.pongTimer); chat.pongTimer = null;
+}
+function armChatHeartbeat(ws, room) {
+  stopChatHeartbeat();
+  chat.activityTimer = setTimeout(function () {
+    chat.activityTimer = null;
+    if (chat.ws !== ws) return;
+    try { ws.send(JSON.stringify({ event: 'pusher:ping', data: {} })); } catch (e) {}
+    chat.pongTimer = setTimeout(function () {
+      chat.pongTimer = null;
+      if (chat.ws !== ws) return;
+      ws.onclose = null;                       // a dead socket may take minutes to report closing
+      try { ws.close(); } catch (e) {}
+      chatSocketClosed(ws, room);
+    }, 30000);
+  }, chat.activityMs);
+}
+function chatSocketClosed(ws, room) {
+  if (chat.ws !== ws) return;
+  chat.ws = null;
+  stopChatHeartbeat();
+  scheduleChatRetry(room);
+}
+function scheduleChatRetry(room) {
+  if (!(chat.want && settings.chat && currentRoomId() === room)) return;
+  ChatWindow.status('reconnecting', 'Reconnecting...');
+  chat.retry++;
+  var delay = Math.min(15000, 1500 * chat.retry);
+  clearTimeout(chat.retryTimer);
+  chat.retryTimer = setTimeout(function () {
+    chat.retryTimer = null;
+    if (chat.want && settings.chat && currentRoomId() === room) openChatSocket(room);
+  }, delay);
+}
 function openChatSocket(room) {
   var ws;
-  try { ws = new WebSocket(CHAT_URL); } catch (e) { ChatWindow.status('unavailable', 'Chat connection unavailable'); return; }
+  try { ws = new WebSocket(CHAT_URL); }
+  catch (e) { ChatWindow.status('unavailable', 'Chat connection unavailable'); scheduleChatRetry(room); return; }
   chat.ws = ws;
+  armChatHeartbeat(ws, room);
   ws.onmessage = function (ev) {
     if (chat.ws !== ws || !chat.want || chat.room !== room) return;
+    armChatHeartbeat(ws, room);                 // any traffic proves the link is alive
     var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m.event === 'pusher:ping') { try { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); } catch (e) {} return; }
+    if (m.event === 'pusher:pong') return;
     if (m.event === 'pusher:connection_established') {
       chat.retry = 0;               // connected for real: future drops start from a short delay again
+      var info = null; try { info = JSON.parse(m.data); } catch (e) {}
+      var secs = info && +info.activity_timeout;
+      if (secs > 0) { chat.activityMs = Math.min(300, Math.max(30, secs)) * 1000; armChatHeartbeat(ws, room); }
       try { ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel: 'chatrooms.' + room + '.v2' } })); } catch (e) {}
       return;
     }
@@ -5350,24 +6550,14 @@ function openChatSocket(room) {
       queueChatMessage(d);
     }
   };
-  ws.onclose = function () {
-    if (chat.ws !== ws) return;
-    chat.ws = null;
-    if (chat.want && settings.chat && currentRoomId() === room) {
-      ChatWindow.status('reconnecting', 'Reconnecting...');
-      chat.retry++;
-      var delay = Math.min(15000, 1500 * chat.retry);
-      chat.retryTimer = setTimeout(function () {
-        if (chat.want && settings.chat && currentRoomId() === room) openChatSocket(room);
-      }, delay);
-    }
-  };
+  ws.onclose = function () { chatSocketClosed(ws, room); };
   ws.onerror = function () { try { ws.close(); } catch (e) {} };
 }
 function disconnectChat() {
   chat.want = false; chat.room = null;
   clearChatDelay();
   if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
+  stopChatHeartbeat();
   if (chat.ws) { try { chat.ws.onclose = null; chat.ws.close(); } catch (e) {} chat.ws = null; }
   hideChatOverlay(); clearChat();
 }
@@ -5385,7 +6575,8 @@ function appendChatContent(row, content) {
       var img = document.createElement('img');
       img.className = 'cemote';
       img.decoding = 'async';   // keep an unseen emote's decode off the paint that shows the message
-      img.src = 'https://files.kick.com/emotes/' + m[1] + '/fullsize';
+      img.setAttribute('data-ui-src', 'https://files.kick.com/emotes/' + m[1] + '/fullsize');
+      img.setAttribute('data-ui-emote', '1');
       img.alt = m[2];
       (function (name) {
         img.onerror = function () {
@@ -5447,10 +6638,35 @@ function chatNameColor(hex, lightBackground) {
   b = Math.round(b + (255 - b) * t);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
+var chatRenderQueue = [], chatRenderFrame = null;
+function chatCovered() { return document.hidden || browse.open || cats.open || vods.open; }
 function addChatMessage(d, receivedAt) {
   if (!d || !d.sender) return;
   if (settings.chatBots === 'hide' && isBotMessage(d)) return;
-  var box = chatMessagesEl();
+  chatRenderQueue.push({ data: d, at: receivedAt });
+  while (chatRenderQueue.length > CHAT_MAX) chatRenderQueue.shift();
+  flushChatRender();
+}
+function flushChatRender() {
+  if (chatCovered() || chatRenderFrame !== null || !chatRenderQueue.length) return;
+  chatRenderFrame = requestAnimationFrame(function () {
+    chatRenderFrame = null;
+    if (chatCovered()) return;
+    var box = chatMessagesEl(), fragment = document.createDocumentFragment();
+    var batch = chatRenderQueue.splice(0, 40);
+    batch.forEach(function (entry) { fragment.appendChild(buildChatMessage(entry.data, entry.at)); });
+    var emotes = fragment.querySelectorAll('img[data-ui-src]');   // only the new rows need watching
+    box.appendChild(fragment);
+    while (box.children.length > CHAT_MAX) {
+      if (window.UIImages) UIImages.release(box.firstChild);
+      box.removeChild(box.firstChild);
+    }
+    ChatWindow.messageAdded(batch.length);
+    if (window.UIImages && emotes.length) UIImages.watchNodes(emotes);
+    if (chatRenderQueue.length) flushChatRender();
+  });
+}
+function buildChatMessage(d, receivedAt) {
   var row = document.createElement('div');
   row.className = 'cmsg';
   if (settings.chatTimestamps) {
@@ -5476,9 +6692,7 @@ function addChatMessage(d, receivedAt) {
   // run together into one blob at sofa distance. Kick's own chat does the same.
   row.appendChild(document.createTextNode(': '));
   appendChatContent(row, d.content);
-  box.appendChild(row);
-  while (box.children.length > CHAT_MAX) box.removeChild(box.firstChild);
-  ChatWindow.messageAdded();
+  return row;
 }
 /* OLED burn-in guard.
    Static bright pixels can burn into an OLED over time. When nothing has moved
@@ -5539,12 +6753,7 @@ var chpopPreviewCard = makePreviewCard('chpoppreview',
   function (e) {
     var box = document.getElementById('chpop-list');
     var row = box.children[chpop.idx];
-    var top = 400;
-    if (row) {
-      var r = row.getBoundingClientRect();
-      top = Math.max(90, Math.min(1080 - 280, r.top - 60));
-    }
-    e.style.top = Math.round(top) + 'px';
+    positionStreamPreview(e, row, document.getElementById('chpop-panel'));
   });
 function liveList() {
   var out = [];
@@ -5607,9 +6816,10 @@ function renderChpop() {
     row.appendChild(av);
     var mid = document.createElement('div');
     mid.className = 'chmid';
-    mid.innerHTML = '<div class="chname"></div><div class="chgame"></div>';
+    mid.innerHTML = '<div class="chname"></div><div class="chgame"><span class="chcat"></span><span class="chtitle"></span></div>';
     mid.children[0].textContent = c.name || slug;
-    mid.children[1].textContent = (c.category || 'Live') + (c.title ? ' · ' + c.title : '');
+    mid.children[1].children[0].textContent = c.category || 'Live';
+    mid.children[1].children[1].textContent = c.title ? ' · ' + c.title : '';
     row.appendChild(mid);
     var vw = document.createElement('span');
     vw.className = 'chview';
@@ -5618,7 +6828,36 @@ function renderChpop() {
     row.appendChild(vw);
     box.appendChild(row);
   });
+  clipChpopText(box);
   applyChpopFocus();
+}
+// Same hand-made ".." as the sidebar (the TV draws the browser's ellipsis badly).
+// All widths are read in one pass, then the text is written.
+function clipChpopText(box) {
+  var names = box.querySelectorAll('.chname'), games = box.querySelectorAll('.chgame');
+  if (!names.length) return;
+  var nameFont = fontOf(names[0]), catFont = fontOf(games[0].children[0]), restFont = fontOf(games[0].children[1]);
+  var nameW = [], gameW = [], i;
+  for (i = 0; i < names.length; i++) { nameW.push(names[i].clientWidth); gameW.push(games[i].clientWidth); }
+  for (i = 0; i < names.length; i++) {
+    if (nameW[i] > 0) names[i].textContent = clipWithDots(names[i].textContent, nameFont, nameW[i]);
+    if (gameW[i] > 0) clipTwoParts(games[i].children[0], games[i].children[1],
+      games[i].children[0].textContent, games[i].children[1].textContent, catFont, restFont, gameW[i]);
+  }
+}
+function fontOf(el) {
+  var cs = getComputedStyle(el);
+  return cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+}
+// A category and " · title" pair sharing one line: the category keeps its room
+// first and the title gets whatever is left.
+function clipTwoParts(catEl, restEl, cat, rest, catFont, restFont, w) {
+  var catText = cat ? clipWithDots(cat, catFont, w) : '';
+  var left = w - (catText ? measureTextWidth(catText, catFont) : 0);
+  var restText = rest && catText === cat && left > 0 ? clipWithDots(rest, restFont, left) : '';
+  if (restText === '..') restText = '';   // no room for any of the title
+  if (catEl.textContent !== catText) catEl.textContent = catText;
+  if (restEl.textContent !== restText) restEl.textContent = restText;
 }
 function chpopActivate() {
   var slug = chpop.list[chpop.idx];
@@ -5669,21 +6908,6 @@ function isChUp(k) { return k === 33 || k === 427; }
 function isChDown(k) { return k === 34 || k === 428; }
 
 /* One balloon, shared by anything that wants to explain itself on hover. */
-function showTip(text, anchor) {
-  var tip = document.getElementById('browse-tip');
-  if (!tip || !anchor) return;
-  tip.textContent = text;
-  tip.className = '';
-  var r = anchor.getBoundingClientRect();
-  var left = Math.max(24, Math.min(1920 - tip.offsetWidth - 24,
-                                   r.left + r.width / 2 - tip.offsetWidth / 2));
-  tip.style.left = Math.round(left) + 'px';
-  tip.style.top = Math.round(r.bottom + 14) + 'px';
-}
-function hideTip() {
-  var tip = document.getElementById('browse-tip');
-  if (tip) tip.className = 'hidden';
-}
 
 /* Small helpers */
 function toast(msg) {
@@ -5739,13 +6963,13 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) catsMove(0, 1);
     else if (k === KEY.OK) catsActivate();
     else if (k === KEY.GREEN) {                       // green pins/unpins the focused category
-      if (cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
+      if (cats.zone === 'grid' && cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
         var pc = displayedCats()[cats.gridIdx - 1];
         toggleCatPin(pc.slug, pc.name || pc.slug);
       }
     }
     else if (k === KEY.RED) {                         // red blocks or unblocks the focused category
-      if (cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
+      if (cats.zone === 'grid' && cats.gridIdx > 0 && displayedCats()[cats.gridIdx - 1]) {
         var bcat = displayedCats()[cats.gridIdx - 1];
         var nowBlocked = toggleCatBlock(bcat.slug, bcat.name || bcat.slug);
         toast((nowBlocked ? 'Blocked ' : 'Unblocked ') + (bcat.name || bcat.slug));
@@ -5827,20 +7051,20 @@ document.addEventListener('keydown', function (e) {
     else if (k === KEY.DOWN) settingsMove(1);
     else if (k === KEY.OK) settingsOk();
     else if (k === KEY.RIGHT) settingsActivate(); // Right operates the row's primary toggle/cycle only
-    else if (k === KEY.LEFT) {                  // left mirrors right: toggle, or previous choice
-      var lit = settings.items[settings.focus];
-      if (lit && lit.kind === 'choice') { cycleChoice(lit, -1); renderSettings(); }
-      else settingsActivate();
-    }
+    else if (k === KEY.LEFT) settingsActivate(-1);
     return;
   }
   if (chpop.open) {
     e.preventDefault();
-    if (isChUp(k) || k === KEY.UP) chpopMove(-1);
-    else if (isChDown(k) || k === KEY.DOWN) chpopMove(1);
-    else if (k === KEY.OK) chpopActivate();
-    else if (k === KEY.BACK || k === KEY.LEFT || k === KEY.RIGHT) closeChpop();
-    return;
+    // Colour keys and 0 close the list and then do their usual job below.
+    if (k === KEY.RED || k === KEY.GREEN || k === KEY.YELLOW || k === KEY.BLUE || k === KEY.N0) closeChpop();
+    else {
+      if (isChUp(k) || k === KEY.UP) chpopMove(-1);
+      else if (isChDown(k) || k === KEY.DOWN) chpopMove(1);
+      else if (k === KEY.OK) chpopActivate();
+      else if (k === KEY.BACK || k === KEY.LEFT || k === KEY.RIGHT) closeChpop();
+      return;
+    }
   }
   if (state.mode === 'add') {
     if (k === KEY.BACK) { e.preventDefault(); if (add.zone === 'list') backToInput(); else closeAdd(); }
@@ -5868,9 +7092,20 @@ document.addEventListener('keydown', function (e) {
     if (isChUp(k)) { chpopMove(-1); return; }          // channel up/down surf the live list
     if (isChDown(k)) { chpopMove(1); return; }
   }
-  if (k === KEY.OK && state.notifyCurrent && !state.vod) { activateNotify(); return; }
-  if (k === KEY.REW) { if (state.vod) seekVod(-60); return; }
-  if (k === KEY.FF) { if (state.vod) seekVod(60); return; }
+  // With the list open, OK belongs to the highlighted row, never to an alert.
+  if (k === KEY.OK && state.notifyCurrent && !state.vod && !state.sidebarOpen) { activateNotify(); return; }
+  // Rewind/fast-forward: a past video seeks; live rewinds along the stream's
+  // timeline, and fast-forward heads back to the live edge.
+  if (k === KEY.REW) { if (state.vod) seekVod(-60); else if (state.current) liveSeekBy(-60); return; }
+  if (k === KEY.FF) {
+    if (state.vod) seekVod(60);
+    else if (state.current) { if (liveSeek.base !== null) liveSeekBy(60); else goLive(); }
+    return;
+  }
+  // Transport keys mean the same thing whether or not the list is open.
+  if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
+  if (k === KEY.PLAY) { playVideo(video); return; }
+  if (k === KEY.STOP) { if (state.vod) exitVod(); else armOrExit(); return; }
   if (state.sidebarOpen) {
     resetIdle();
     // The bottom player tools are pointer-only: hovering highlights them, but
@@ -5892,7 +7127,6 @@ document.addEventListener('keydown', function (e) {
     return;
   }
   if (state.vod) {                                       // watching a past video
-    if (k === KEY.STOP) { exitVod(); return; }           // stop always means stop
     if (k === KEY.BACK) {
       var dismissVodControls = vodBarVisible() || seekAccum.baseTime !== null;
       resetSeekAccum();
@@ -5902,7 +7136,10 @@ document.addEventListener('keydown', function (e) {
         hideVodControls();
         state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;
         hideCursor();
-      } else openSidebar();
+      } else {
+        openSidebar();                                 // same ladder as live: the next Back arms the exit
+        if (state.sidebarOpen) state.backOpenedSidebar = true;
+      }
       return;
     }
     if (k === KEY.UP) {
@@ -5918,13 +7155,24 @@ document.addEventListener('keydown', function (e) {
       if (k === KEY.OK) { vodBtnActivate(); return; }
     }
     if (k === KEY.LEFT || k === KEY.RIGHT) { seekVodKey(k, e.repeat); return; }
-    if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} return; }
-    if (k === KEY.PLAY) { playVideo(video); return; }
     // OK lands on the play/pause button and takes the action in the same press —
     // one press pauses, the next resumes. The rest of the controls come up around
     // it, so the press after that can be a seek without hunting for the ladder.
     if (k === KEY.OK) { focusVodButtons(); toggleVodPlay(); return; }
     return;
+  }
+  // OK brought up the live timeline: Left/Right seek along it, Back puts it away.
+  if (state.current && liveBar.focused && liveBarVisible()) {
+    if (k === KEY.LEFT || k === KEY.RIGHT) { liveSeekKey(k, e.repeat); return; }
+    if (k === KEY.BACK) {
+      resetLiveSeek();
+      document.getElementById('overlay').className = 'hidden';
+      clearTimeout(overlayTimer);
+      hideLiveBar();
+      state.suppressNudgeUntil = Date.now() + NUDGE_SUPPRESS_MS;
+      hideCursor();
+      return;
+    }
   }
   // While a live stream is playing, Back steps up to the channel list rather than
   // straight at the exit; the next Back leaves. On the idle screen there is nothing
@@ -5934,17 +7182,16 @@ document.addEventListener('keydown', function (e) {
     if (state.sidebarOpen) state.backOpenedSidebar = true;
     return;
   }
-  if (k === KEY.BACK || k === KEY.STOP) { armOrExit(); return; }
+  if (k === KEY.BACK) { armOrExit(); return; }
   if (k === KEY.LEFT || k === KEY.RIGHT) openSidebar();  // left or right brings the list up
   else if (k === KEY.UP) chpopMove(-1);                 // up/down surf the live channels
   else if (k === KEY.DOWN) chpopMove(1);
   else if (k === KEY.OK) { if (state.current) toggleOverlay(); else openSidebar(); }
-  else if (k === KEY.PAUSE) { try { video.pause(); } catch (e2) {} }
-  else if (k === KEY.PLAY) { playVideo(video); }
 });
 
 document.addEventListener('keyup', function (e) {
   if (e.keyCode === vodSeekKey.key) vodSeekKey.key = 0;
+  if (e.keyCode === liveSeek.key) liveSeek.key = 0;
 });
 
 /* Pointer, both mouse and the magic remote */
@@ -5966,7 +7213,7 @@ function browseCardFromEvent(e) {
   while (el && el !== document.body && !(el.getAttribute && el.getAttribute('data-idx'))) el = el.parentNode;
   if (!el || el === document.body) return null;
   var i = parseInt(el.getAttribute('data-idx'), 10);
-  if (isNaN(i) || i < 0 || i >= browse.streams.length) return null;
+  if (isNaN(i) || i < 0 || i >= getBrowseGrid().items.length) return null;
   return { el: el, idx: i };
 }
 (function wirePointer() {
@@ -5992,14 +7239,14 @@ function browseCardFromEvent(e) {
   playerEl.addEventListener('mousemove', function (e) {
     if (ChatWindow.activePointer(e.target)) return;
     if (diagDrag) return;                 // dragging the diagnostics window, not browsing
+    if (liveBar.dragTarget !== null) return;   // dragging the live timeline
     if (!state.ready || state.mode !== 'player') return;
     if (lastX >= 0 && Math.abs(e.clientX - lastX) < 6 && Math.abs(e.clientY - lastY) < 6) return;
     lastX = e.clientX; lastY = e.clientY;
     showCursor();      // a real move brings the pointer back
     if (!state.sidebarOpen && Date.now() < state.suppressNudgeUntil) return;   // click-to-hide grace
     if (state.vod) {
-      if (browse.open || vods.open || cats.open || chpop.open || settings.open ||
-          qualityopt.open || dimopt.open || chatopt.open || blockedcats.open || updateopen || saver.on) return;
+      if (anyPanelOpen() || saver.on) return;
       if (vodDragging) return;
       var target = e.target;
       vodPointerHover = '';
@@ -6011,7 +7258,12 @@ function browseCardFromEvent(e) {
         target = target.parentNode;
       }
       if (state.sidebarOpen || e.clientX <= 48) nudgeSidebar();
-      showVodOverlay();
+      requestVodOverlay();
+    } else if (liveBarVisible() && !state.sidebarOpen && e.clientX > 48) {
+      // The timeline is up: pointing keeps it up rather than sliding it aside for
+      // the channel list (which would pull it out from under the pointer). The
+      // left edge still opens the list, as in a past video.
+      armLiveOverlayHide();
     } else nudgeSidebar();
   });
   document.getElementById('side-refresh').addEventListener('click', function (e) {
@@ -6046,6 +7298,7 @@ function browseCardFromEvent(e) {
     e.preventDefault();
     favList.scrollTop += (e.deltaY > 0 ? 1 : -1) * 88;
   });
+  favList.addEventListener('scroll', function () { if (state.sidebarOpen) scheduleSidePreview(); });
   document.getElementById('addok').addEventListener('click', function () {
     if (state.mode !== 'add') return;
     var q = document.getElementById('addinput').value.trim();
@@ -6091,6 +7344,12 @@ function browseCardFromEvent(e) {
     if (state.mode === 'player') openAdd();
   });
   // Browse popup pointer
+  BROWSE_HEADERS.forEach(function (id, i) {
+    var header = document.getElementById(id);
+    if (header) header.addEventListener('mouseenter', function () { browse.zone = 'header'; browse.headerIdx = i; applyBrowseFocus(true); });
+  });
+  ['cats-search', 'cats-close'].forEach(function (id, i) { document.getElementById(id).addEventListener('mouseenter', function () { cats.zone = 'header'; cats.headerIdx = i; applyCatsFocus(true); }); });
+  ['vods-filter', 'vods-close'].forEach(function (id, i) { document.getElementById(id).addEventListener('mouseenter', function () { vods.zone = 'header'; vods.headerIdx = i; applyVodFocus(true); }); });
   document.getElementById('browse-langbtn').addEventListener('click', function (e) {
     e.stopPropagation();
     browse.zone = 'lang';
@@ -6140,16 +7399,7 @@ function browseCardFromEvent(e) {
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
   document.getElementById('browse-discover').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseDiscover(); });
-  // Balloon tip explaining what Hide Followed does.
-  document.getElementById('browse-discover').addEventListener('mouseenter', function () {
-    showTip('Hides channels you already follow, so Browse only shows new finds.', this);
-  });
-  document.getElementById('browse-discover').addEventListener('mouseleave', hideTip);
   document.getElementById('browse-hideblocked').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseHideBlocked(); });
-  document.getElementById('browse-hideblocked').addEventListener('mouseenter', function () {
-    showTip('Hides streams in categories you have blocked. Picking one of those categories still shows it.', this);
-  });
-  document.getElementById('browse-hideblocked').addEventListener('mouseleave', hideTip);
   document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
   // The x on the diagnostics panel switches the overlay off.
   document.getElementById('diag-close').addEventListener('click', function (e) {
@@ -6194,6 +7444,7 @@ function browseCardFromEvent(e) {
     if (!el || el === this) return;
     e.stopPropagation();
     var cslug = el.getAttribute('data-cslug');
+    browse.zone = 'pins'; browse.pinIdx = Array.prototype.indexOf.call(this.children, el);
     if (cslug) toggleBrowseCat(cslug, el.getAttribute('data-cname') || '');
     else clearBrowseCats();
   });
@@ -6203,22 +7454,12 @@ function browseCardFromEvent(e) {
     var el = e.target;
     while (el && el !== catsGrid && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
     if (!el || el === catsGrid) return -2;
-    var list = catsGrid.children;
-    for (var i = 0; i < list.length; i++) if (list[i] === el) return i;
-    return -2;
+    var i = parseInt(el.getAttribute('data-idx'), 10);
+    return isNaN(i) || i < 0 || i >= getCatsGrid().items.length ? -2 : i;
   }
   catsGrid.addEventListener('mouseover', function (e) {
     var i = catCardIdx(e);
-    if (i >= 0 && i !== cats.gridIdx) { cats.gridIdx = i; applyCatsFocus(); }
-    // mouseenter does not bubble, so the badge tip rides on the grid's mouseover
-    var t = e.target;
-    while (t && t !== catsGrid && !(t.getAttribute && t.getAttribute('data-act') === 'catblock')) t = t.parentNode;
-    if (t && t !== catsGrid) {
-      showTip('Blocked categories drop to the bottom of your channel list, greyed out, and stop showing live alerts.', t);
-    } else hideTip();
-  });
-  catsGrid.addEventListener('mouseout', function (e) {
-    if (!e.relatedTarget || !catsGrid.contains(e.relatedTarget)) hideTip();
+    if (i >= 0 && (i !== cats.gridIdx || cats.zone !== 'grid')) { cats.zone = 'grid'; cats.gridIdx = i; applyCatsFocus(); }
   });
   catsGrid.addEventListener('click', function (e) {
     var be = e.target;    // the block badge blocks instead of selecting
@@ -6246,27 +7487,28 @@ function browseCardFromEvent(e) {
       return;
     }
     var i = catCardIdx(e);
-    if (i >= 0) { cats.gridIdx = i; catsActivate(); }
+    if (i >= 0) { cats.zone = 'grid'; cats.gridIdx = i; catsActivate(); }
   });
   catsGrid.addEventListener('wheel', function (e) {
     if (!cats.open) return;
     e.preventDefault();
     catsGrid.scrollTop += (e.deltaY > 0 ? 1 : -1) * 160;
-    if (catsGrid.scrollTop + catsGrid.clientHeight >= catsGrid.scrollHeight - 400) loadCatsMore(false);
+    if (!cats.error && catsGrid.scrollTop + catsGrid.clientHeight >= catsGrid.scrollHeight - 400) loadCatsMore(false);
   });
   document.getElementById('cats-close').addEventListener('click', function () { closeCats(); });
   document.getElementById('cats-search').addEventListener('input', function () {
     if (!cats.open) return;
     var q = this.value.trim();
-    cats.query = q;
+    cats.query = q; cats.searchError = false; cats.searching = !!q; cats.focusKey = null;
     clearTimeout(catsSearchTimer);
     if (!q) {                                  // cleared: back to the paginated list
-      cats.results = null;
+      cats.results = null; cats.searching = false;
       cats.gridIdx = 0;
       renderCats();
-      setCatsStatus(cats.list.length ? '' : 'Loading...');
+      if (!cats.list.length && cats.hasMore && !cats.error) loadCatsMore(true);
       return;
     }
+    cats.results = []; cats.gridIdx = 0; renderCats();
     catsSearchTimer = setTimeout(function () { runCatsSearch(q); }, 250);
   });
   // Past videos popup pointer
@@ -6276,15 +7518,15 @@ function browseCardFromEvent(e) {
     while (el && el !== vodsGrid && !(el.getAttribute && el.getAttribute('data-idx') != null)) el = el.parentNode;
     if (!el || el === vodsGrid) return -1;
     var i = parseInt(el.getAttribute('data-idx'), 10);
-    return (isNaN(i) || i < 0 || i >= vods.list.length) ? -1 : i;
+    return (isNaN(i) || i < 0 || i >= getVodGrid().items.length) ? -1 : i;
   }
   vodsGrid.addEventListener('mouseover', function (e) {
     var i = vodCardIdx(e);
-    if (i >= 0 && i !== vods.gridIdx) { vods.gridIdx = i; applyVodFocus(); }
+    if (i >= 0 && (i !== vods.gridIdx || vods.zone !== 'grid')) { vods.zone = 'grid'; vods.gridIdx = i; applyVodFocus(); }
   });
   vodsGrid.addEventListener('click', function (e) {
     var i = vodCardIdx(e);
-    if (i >= 0) { vods.gridIdx = i; vodActivate(); }
+    if (i >= 0) { vods.zone = 'grid'; vods.gridIdx = i; vodActivate(); }
   });
   vodsGrid.addEventListener('wheel', function (e) {
     if (!vods.open) return;
@@ -6295,16 +7537,21 @@ function browseCardFromEvent(e) {
   // Drag (or click) the VOD seek track to scrub. While dragging we preview the
   // position on the bar and only seek the video on release, so it stays smooth.
   var vodTrack = document.getElementById('vodbar-track');
+  var vodTrackRect = null, scrubFrame = null, scrubX = 0;
   function vodTrackFrac(e) {
-    var r = vodTrack.getBoundingClientRect();
+    var r = vodTrackRect || vodTrack.getBoundingClientRect();
     return r.width > 0 ? Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) : 0;
   }
   function vodPreview(e) {
     var v = document.getElementById('video');
     if (isFinite(v.duration) && v.duration) drawVodBar(vodTrackFrac(e) * v.duration, v.duration);
   }
-  vodTrack.addEventListener('mousedown', function (e) {
+  document.getElementById('vodbar').addEventListener('mousedown', function (e) {
     if (!state.vod) return;
+    for (var t = e.target; t; t = t.parentNode) if (t.id === 'vodgolive') return;   // Go live is a button
+    // The handle overhangs the track's ends, so accept a grab just beyond them.
+    vodTrackRect = vodTrack.getBoundingClientRect();
+    if (e.clientX < vodTrackRect.left - 30 || e.clientX > vodTrackRect.right + 30) { vodTrackRect = null; return; }
     vodDragging = true;
     clearTimeout(overlayTimer);                 // keep the bar visible while dragging
     clearTimeout(state.idleTimer);
@@ -6313,12 +7560,20 @@ function browseCardFromEvent(e) {
     e.preventDefault();
   });
   document.addEventListener('mousemove', function (e) {
-    if (vodDragging) vodPreview(e);
+    if (vodDragging) {
+      scrubX = e.clientX;
+      if (scrubFrame === null) scrubFrame = requestAnimationFrame(function () {
+        scrubFrame = null;
+        if (vodDragging) vodPreview({ clientX: scrubX });
+      });
+    }
   });
   document.addEventListener('mouseup', function (e) {
     if (vodDragging) {
       vodDragging = false;
       seekVodFrac(vodTrackFrac(e));
+      vodTrackRect = null;
+      if (scrubFrame !== null) { cancelAnimationFrame(scrubFrame); scrubFrame = null; }
       if (state.sidebarOpen) resetIdle();
     }
   });
@@ -6354,29 +7609,22 @@ function browseCardFromEvent(e) {
     var i = parseInt(el.getAttribute('data-idx'), 10);
     return isNaN(i) ? -1 : i;
   }
-  slist.addEventListener('mouseover', function (e) {
+  bindSettingsListPointer(slist, function (e) {
     var i = sRowIdx(e);
     if (i >= 0 && i !== settings.focus) { settings.focus = i; applySettingsFocus(); }
   });
-  slist.addEventListener('wheel', function (e) {
-    if (!settings.open) return;
-    e.preventDefault();
-    settingsMove(e.deltaY > 0 ? 1 : -1);
-  });
   slist.addEventListener('click', function (e) {
+    if (e.target.tagName === 'INPUT') return;
     var i = sRowIdx(e);
     if (i < 0) return;
     settings.focus = i; applySettingsFocus();
-    var g = e.target, onGear = false;      // clicking the Dim gear opens its options
-    while (g && g !== this) {
-      var cl = g.getAttribute && g.getAttribute('class');
-      if (cl && cl.indexOf('sgear') !== -1) { onGear = true; break; }
-      g = g.parentNode;
+    var node = e.target, onSwitch = false;
+    while (node && node !== this) {
+      if (node.getAttribute && node.getAttribute('data-setting-switch')) { onSwitch = true; break; }
+      node = node.parentNode;
     }
-    if (onGear) {
-      var git = settings.items[i];
-      if (git && git.kind === 'chatopt') openChatOpt(); else openDimOpt();
-    } else settingsActivate();
+    if (onSwitch) settingsActivate();
+    else settingsOk();
   });
   document.getElementById('settingsmodal').addEventListener('click', function (e) {
     if (e.target === this) closeSettings();
@@ -6398,6 +7646,27 @@ function browseCardFromEvent(e) {
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();
     else if (act === 'dim') dimQuickKey();
+  });
+  // Pointing at the category chip offers to block it (see showCatPop).
+  document.getElementById('ov-title').addEventListener('mouseover', function (e) {
+    var el = e.target;
+    if (el.getAttribute && el.getAttribute('data-catslug') && state.mode === 'player' && !state.vod) showCatPop(el);
+  });
+  document.getElementById('ov-title').addEventListener('mouseout', function (e) {
+    var to = e.relatedTarget;
+    if (!(to && to.getAttribute && to.getAttribute('data-catslug'))) leaveCatPop();
+  });
+  var ovcatPop = document.getElementById('ovcat-pop');
+  ovcatPop.addEventListener('mouseenter', function () { clearTimeout(catPop.timer); catPop.hover = true; });
+  ovcatPop.addEventListener('mouseleave', leaveCatPop);
+  ovcatPop.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!catPop.slug) return;
+    var nowBlocked = toggleCatBlock(catPop.slug, catPop.name || catPop.slug);
+    toast((nowBlocked ? 'Blocked ' : 'Unblocked ') + (catPop.name || catPop.slug));
+    hideCatPop();
+    applyBlockedChange();
+    armLiveOverlayHide();
   });
   // The category chip in the top bar opens Browse filtered to that category.
   document.getElementById('ov-title').addEventListener('click', function (e) {
@@ -6453,6 +7722,69 @@ function browseCardFromEvent(e) {
   document.getElementById('vodplay').addEventListener('click', function (e) { e.stopPropagation(); toggleVodPlay(); });
   document.getElementById('vodback').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(-30); });
   document.getElementById('vodfwd').addEventListener('click', function (e) { e.stopPropagation(); if (state.vod) seekVod(30); });
+  document.getElementById('vodgolive').addEventListener('click', function (e) { e.stopPropagation(); goLive(); });
+  // Live timeline: click to jump there, the chip to go live. Hovering holds it open.
+  // Press anywhere on the track (the handle included) and drag: the bar previews
+  // where you are pointing and the seek happens once, on release.
+  var liveTrack = document.getElementById('livebar-track');
+  var liveTrackRect = null, liveDragFrame = null, liveDragX = 0;
+  function liveTrackTarget(clientX) {
+    var p = livePositions();
+    var r = liveTrackRect || liveTrack.getBoundingClientRect();
+    if (!p || !(r.width > 0)) return null;
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * p.edge;
+  }
+  // The handle is drawn past the ends of the track (at the live edge it sits
+  // right beside the Go live slot), so the grab area is the whole bar, measured
+  // against the track. Only Go live keeps its own press.
+  function inside(el, id) { for (; el; el = el.parentNode) if (el.id === id) return true; return false; }
+  document.getElementById('livebar').addEventListener('mousedown', function (e) {
+    if (!state.current || state.vod || inside(e.target, 'livebar-live')) return;
+    var tr = liveTrack.getBoundingClientRect();
+    if (e.clientX < tr.left - 30 || e.clientX > tr.right + 30) return;   // the time label is not a grab
+    e.preventDefault(); e.stopPropagation();
+    resetLiveSeek();
+    liveTrackRect = tr;
+    liveBar.dragTarget = liveTrackTarget(e.clientX);
+    clearTimeout(overlayTimer);
+    clearTimeout(state.idleTimer);            // the list must not close mid-drag
+    showLiveBar(true);
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (liveBar.dragTarget === null) return;
+    liveDragX = e.clientX;
+    if (liveDragFrame === null) liveDragFrame = requestAnimationFrame(function () {
+      liveDragFrame = null;
+      if (liveBar.dragTarget === null) return;
+      var t = liveTrackTarget(liveDragX);
+      if (t !== null) { liveBar.dragTarget = t; drawLiveBar(); }
+    });
+  });
+  document.addEventListener('mouseup', function (e) {
+    if (liveBar.dragTarget === null) return;
+    var t = liveTrackTarget(e.clientX);
+    if (t === null) t = liveBar.dragTarget;
+    liveBar.dragTarget = null;
+    liveTrackRect = null;
+    if (liveDragFrame !== null) { cancelAnimationFrame(liveDragFrame); liveDragFrame = null; }
+    seekLiveTo(t);
+    if (state.sidebarOpen) resetIdle();
+    else { var c = state.current && state.channels[state.current]; if (c) showOverlay(c); }
+  });
+  liveTrack.addEventListener('click', function (e) { e.stopPropagation(); });
+  document.getElementById('livebar-live').addEventListener('click', function (e) { e.stopPropagation(); goLive(); });
+  document.getElementById('livebar').addEventListener('click', function (e) { e.stopPropagation(); });
+  document.getElementById('livebar').addEventListener('mouseenter', function () {
+    liveBar.hover = true;
+    clearTimeout(overlayTimer);
+    if (state.sidebarOpen) clearTimeout(state.idleTimer);
+    showLiveBar(true);
+  });
+  document.getElementById('livebar').addEventListener('mouseleave', function () {
+    liveBar.hover = false;
+    if (state.sidebarOpen) { resetIdle(); return; }
+    armLiveOverlayHide();
+  });
   // Dim options popup pointer
   var dimoptList = document.getElementById('dimopt-list');
   function dimoptIdx(e) {
@@ -6462,7 +7794,7 @@ function browseCardFromEvent(e) {
     var i = parseInt(el.getAttribute('data-idx'), 10);
     return isNaN(i) ? -1 : i;
   }
-  dimoptList.addEventListener('mouseover', function (e) { var i = dimoptIdx(e); if (i >= 0 && i !== dimopt.focus) { dimopt.focus = i; renderDimOpt(); } });
+  bindSettingsListPointer(dimoptList, function (e) { var i = dimoptIdx(e); if (i >= 0 && i !== dimopt.focus) dimoptMove(i - dimopt.focus); });
   dimoptList.addEventListener('click', function (e) { var i = dimoptIdx(e); if (i >= 0) { dimopt.focus = i; dimoptActivate(); } });
   document.getElementById('dimoptmodal').addEventListener('click', function (e) { if (e.target === this) closeDimOpt(); });
   // Chat options popup pointer
@@ -6474,15 +7806,12 @@ function browseCardFromEvent(e) {
     var i = parseInt(el.getAttribute('data-idx'), 10);
     return isNaN(i) ? -1 : i;
   }
-  chatoptList.addEventListener('mouseover', function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; applyChatOptFocus(); } });
+  bindSettingsListPointer(chatoptList, function (e) { var i = chatoptIdx(e); if (i >= 0 && i !== chatopt.focus) { chatopt.focus = i; applyChatOptFocus(); } });
   chatoptList.addEventListener('click', function (e) {
     if (e.target.tagName === 'INPUT') return;
     var i = chatoptIdx(e); if (i < 0) return;
     chatopt.focus = i;
-    var color = e.target.getAttribute('data-chat-color');
-    if (color === 'black' || color === 'white') {
-      settings.chatBackground = color; saveSettings(); applyChatStyle(); renderChatOpt();
-    } else chatoptActivate();
+    chatoptActivate();
   });
   document.getElementById('chatopt-close').addEventListener('click', closeChatOpt);
   document.getElementById('chatoptmodal').addEventListener('click', function (e) { if (e.target === this) closeChatOpt(); });
@@ -6496,7 +7825,7 @@ function browseCardFromEvent(e) {
     // the link row sits one past the last entry, so it is a valid index here
     return (isNaN(i) || i < 0 || i > blockedcatsLinkIndex()) ? -1 : i;
   }
-  blockedcatsList.addEventListener('mouseover', function (e) {
+  bindSettingsListPointer(blockedcatsList, function (e) {
     var i = blockedcatsIdx(e);
     if (i >= 0 && i !== blockedcats.focus) { blockedcats.focus = i; renderBlockedCats(); }
   });
@@ -6516,13 +7845,21 @@ function browseCardFromEvent(e) {
     var i = parseInt(el.getAttribute('data-idx'), 10);
     return (isNaN(i) || i < 0 || i >= qualityopt.items.length) ? -1 : i;
   }
-  qualityoptList.addEventListener('mouseover', function (e) {
+  bindSettingsListPointer(qualityoptList, function (e) {
     var i = qualityoptIdx(e);
-    if (i >= 0 && i !== qualityopt.focus) { qualityopt.focus = i; renderQualityOpt(); }
+    if (i >= 0 && i !== qualityopt.focus) qualityoptMove(i - qualityopt.focus);
   });
   qualityoptList.addEventListener('click', function (e) {
     var i = qualityoptIdx(e);
     if (i >= 0) { qualityopt.focus = i; qualityoptActivate(); }
+  });
+  var qualityAlertSwitch = document.getElementById('qualityopt-alert');
+  qualityAlertSwitch.addEventListener('mouseover', function () {
+    if (qualityopt.open && qualityopt.focus !== -1) qualityoptMove(-1 - qualityopt.focus);
+  });
+  qualityAlertSwitch.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (qualityopt.open) toggleQualityAlert();
   });
   document.getElementById('qualityoptmodal').addEventListener('click', function (e) {
     if (e.target === this) closeQualityOpt();
@@ -6569,6 +7906,7 @@ function browseCardFromEvent(e) {
     // A queued ended task from a source we just replaced must not complete or
     // skip the new VOD (or be mistaken for the newly resumed live channel).
     if (!video.ended) return;
+    if (state.vod && state.vod.liveRewind) { liveRewindEnded(); return; }
     if (state.vod) {
       if (state.vod.completed || state.vod.ending) return;
       state.vod.ending = true;
@@ -6580,7 +7918,6 @@ function browseCardFromEvent(e) {
   });
   video.addEventListener('playing', function () {
     PB.stallCount = 0; PB.netRetries = 0; PB.mediaRetries = 0; setBanner('');
-    if (state.vod) state.vod.mediaRecoveries = 0;   // recovered for real, forget the failures
     setPosterStill(null);                           // real frames are on the plane now
     hideSpinner();
   });
@@ -6632,6 +7969,9 @@ function scheduleDownRetry() {
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) {
     saveVodProgress(true); saveLiveMark(true); pauseNotify();
+    // Nobody is reading chat while another app is in front; parsing a busy room
+    // for hours is wasted CPU. The setting is untouched, so it reconnects on return.
+    if (chat.want) disconnectChat();
     // Another app owns the screen. Polling on regardless costs a Luna round trip for
     // every channel every ninety seconds for nobody; the visible branch below already
     // refetches on the way back, so nothing goes stale.
@@ -6639,6 +7979,8 @@ document.addEventListener('visibilitychange', function () {
     return;
   }
   if (state.ready) startPlayerPoll();
+  flushChatRender();
+  if (state.current && !state.vod) syncChat();   // reconnect what the background dropped
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
     if (state.ready && !state.current && !state.vod) {
@@ -6737,9 +8079,7 @@ function resumeLastVodAtStartup(done) {
   });
 }
 function startupRecoveryUiBusy() {
-  return document.hidden || state.mode !== 'player' || state.sidebarOpen || saver.on ||
-    browse.open || vods.open || cats.open || chpop.open || settings.open ||
-    dimopt.open || chatopt.open || blockedcats.open || qualityopt.open || updateopen;
+  return document.hidden || state.mode !== 'player' || state.sidebarOpen || saver.on || anyPanelOpen();
 }
 function retryLastVodAfterReconnect() {
   if (!state.ready || state.current || state.vod || state.netDown || state.vodRecoveryInFlight) return;
@@ -6769,7 +8109,8 @@ function finishStartupWithoutVod(preserveLastVod) {
   var last = loadLast();
   if (last && state.order.indexOf(last) === -1 && !state.netDown) {
     apiGet(last, function (err, raw) {
-      if (state.current || state.vod) return;        // something else started meanwhile
+      // Something else started, or the viewer took over after the boot deadline.
+      if (state.current || state.vod || (state.ready && bootChoiceSuperseded())) return;
       if (!err && raw) {
         var c = normalize(last, raw);
         state.channels[last] = c;
@@ -6806,8 +8147,17 @@ function quickStart(done) {
   }
   var last = loadLast();
   if (!last) { done(false); return; }
+  // Relaunched within the last link's lifetime: start on it without a lookup.
+  var cached = state.channels[last], url = recallPlayback(last);
+  if (url && cached && cached.live) {
+    cached.playbackUrl = url;
+    play(last);
+    done(true);
+    return;
+  }
   apiGet(last, function (err, raw) {
-    if (state.current || state.vod) { done(true); return; }
+    // A slow lookup can land long after the boot deadline handed over control.
+    if (state.current || state.vod || (state.ready && bootChoiceSuperseded())) { done(true); return; }
     if (!err && raw) {
       var c = normalize(last, raw);
       state.channels[last] = c;
@@ -6830,19 +8180,20 @@ function markBootReady() {
   state.ready = true;
   startPlayerPoll();
   prepareSidebarSoon();
+  setTimeout(function () { warmPreviews(false); }, 3000);   // after playback has its start
   return true;
 }
 // True once the viewer (or the deadline's idle screen) owns what is on screen, so
 // a late startup decision must not yank them somewhere else.
 function bootChoiceSuperseded() {
-  return !!(state.current || state.vod || state.sidebarOpen || state.mode !== 'player' ||
-            browse.open || vods.open || cats.open || chpop.open);
+  return !!(state.current || state.vod || state.sidebarOpen || state.mode !== 'player' || anyPanelOpen());
 }
 (function boot() {
   setMode('player');
   loadQualityPref();
   loadSettings();
   ChatWindow.init();
+  if (window.UIPolish) UIPolish.init();
   getFirstRun();      // stamp the baseline before any offline row can render
   loadChannelCache();                         // instant sidebar/home data while the real fetch runs
   applyDim();

@@ -113,6 +113,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #ov-title { display: block; font-size: 26px; color: #bcbcbe; margin-top: 8px; }
 .ovcat[data-catslug] { cursor: pointer; }
 .ovcat[data-catslug]:hover { color: #53fc18; text-decoration: underline; }
+/* Pointer-only: resting on the category chip offers to block (or unblock) it. */
+#ovcat-pop {
+  position: absolute; z-index: 2; display: flex; align-items: center;
+  padding: 10px 18px 10px 14px; border-radius: 10px; cursor: pointer; white-space: nowrap;
+  background: #172026; border: 1px solid #52626c; color: #e7e9ea; font-size: 22px; font-weight: 700;
+}
+#ovcat-pop:hover { border-color: #e91916; color: #fff; }
+#ovcat-pop .blockicon { width: 24px; height: 24px; margin-right: 10px; color: #e91916; }
+#ovcat-pop.unblock .blockicon { color: #9a9a9d; }
 
 /* Mini home screen on the idle screen: continue watching + live tiles */
 #home { width: 1920px; }                 /* in the centred column now, not pinned */
@@ -146,16 +155,21 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .hometname { font-size: 26px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hometsub { font-size: 20px; color: #9a9a9d; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Live thumbnail preview card beside the sidebar (shows after a short dwell) */
+/* Live thumbnail preview card beside the sidebar and the surf list. It sits at
+   0,0 and is placed with a transform, so moving to the next row is a compositor
+   glide rather than a relayout; the frame itself is a canvas that gets the
+   pre-scaled pixels (see drawPreviewFrame), never a background image to decode. */
 #sidepreview, #chpoppreview {
-  position: absolute; width: 426px; height: 240px;
+  position: absolute; left: 0; top: 0; width: 426px; height: 240px;
   border-radius: 12px; border: 2px solid #2f3438;
-  background: #101213 center/cover no-repeat;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.55);
-  pointer-events: none;
+  background: #101213;
+  pointer-events: none;   /* no blurred shadow: the card moves on every keypress */
+  will-change: transform;
+  transition: transform 90ms ease-out;
 }
-#sidepreview { left: 500px; z-index: 47; }
-#chpoppreview { left: 1300px; }   /* right of the centred surf panel */
+#sidepreview { z-index: 47; }
+.prevframe { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+#sidepreview.loading .prevframe, #chpoppreview.loading .prevframe { visibility: hidden; }
 .prevtitle {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 26px 14px 10px; font-size: 21px; color: #e7e9ea;
@@ -164,7 +178,6 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   /* setTitle appends ".." itself; overflow stays hidden only as a backstop. */
   white-space: nowrap; overflow: hidden;
 }
-#sidepreview.loading, #chpoppreview.loading { background-image: none !important; }
 #sidepreview.loading::after, #chpoppreview.loading::after {
   content: ''; position: absolute; left: 50%; top: 50%; margin: -24px 0 0 -24px;
   width: 48px; height: 48px; border-radius: 50%;
@@ -185,6 +198,9 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   border-right: 2px solid #2f3438;
   transform: translateX(-472px);
   transition: transform 100ms ease-out;
+  /* Its own GPU layer, kept rastered while hidden: the slide-in is then a pure
+     compositor move instead of a first paint of fifty rows mid-animation. */
+  will-change: transform;
 }
 #sidebar.open { transform: translateX(0); }
 #side-head {
@@ -206,7 +222,11 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #side-refresh:hover { color: #53fc18; }
 #side-refresh.spinning svg { animation: spin 0.7s linear infinite; transform-origin: 50% 50%; }
 @keyframes spin { to { transform: rotate(360deg); } }
-#fav-list { height: 984px; overflow: hidden; padding: 8px 0; }
+/* A real scroll container on an opaque background: Chromium 87 then scrolls it on
+   the compositor. overflow:hidden with a scripted scrollTop repainted every row on
+   every step. The colour is the panel's own, so nothing visibly changes. */
+#fav-list { height: 984px; overflow-x: hidden; overflow-y: scroll; padding: 8px 0; background: #1b1e20; }
+#fav-list::-webkit-scrollbar { display: none; }
 .favrow {
   height: 76px; padding: 0 20px; margin: 2px 8px;
   border-radius: 8px; border-left: 5px solid transparent;
@@ -225,6 +245,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    avatars at 0.25. Recede by colour instead, so "Offline" stays legible from a sofa. */
 .favrow.offline .favname, .favrow.blocked .favname { color: #9aa0a4; }
 .favrow.offline .favgame, .favrow.blocked .favgame { color: #868c90; }
+/* The category leads the line in its own colour and weight, so it reads apart from
+   the stream title after it. Same in the quick-switch list (.chcat). */
+.favcat, .chcat { color: #a6e88a; font-weight: 700; }
+.favrow.blocked .favcat, .chrow.blocked .chcat { color: #9aa0a4; }
 .favrow.offline .favview, .favrow.blocked .favview { color: #9aa0a4; }
 .favrow.offline .favav,   .favrow.blocked .favav   { opacity: 0.55; }
 .favrow.offline .pinmark { opacity: 0.45; }  /* fade the pin marker a bit more when offline */
@@ -251,23 +275,17 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   text-align: center; line-height: 52px;
 }
 .favav.off { opacity: 0.5; }
-/* The text used to stop 110px short of the right edge to clear the viewer count
-   and the focus buttons, which wasted that strip on every row that had neither.
-   Now it runs nearly the full width and its tail is masked out where a control
-   sits. A mask rather than a gradient overlay because rows have four different
-   backgrounds (plain, focused, temp, temp-focused) and a mask matches all of
-   them for free. Only rows that actually carry something on the right get it —
-   an unpinned offline row has a clear run to the edge. */
+/* Text runs nearly the full width. Rows carrying a viewer count or pin marker stop
+   short of it; clipSidebarText measures each row's own width and adds the "..".
+   (This used to be a mask-image fade, but a mask costs an offscreen layer per row
+   and made opening and scrolling the list drop frames on the TV.) The focus
+   buttons get a fade in the focused row's colour instead; see .favactions. */
 .favmid {
   margin-left: 68px; margin-right: 24px; padding-top: 13px;
 }
 .favrow:not(.offline) .favmid,
 .favrow.pinned .favmid,
-.favrow.focused .favmid,
-.favrow.temp .favmid {
-  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 102px), transparent calc(100% - 42px));
-          mask-image: linear-gradient(to right, #000 calc(100% - 102px), transparent calc(100% - 42px));
-}
+.favrow.temp .favmid { margin-right: 92px; }
 /* No text-overflow here: clipSidebarText measures and appends ".." itself, which
    fills the box exactly rather than dropping a character to fit a "…". overflow
    stays hidden purely as a backstop if the clip pass is ever skipped. */
@@ -297,8 +315,10 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Pin and remove buttons, shown when a row is focused or hovered. */
 .favactions {
   visibility: hidden;
-  position: absolute; right: 14px; top: 0; height: 76px; padding-top: 16px;
+  position: absolute; right: 0; top: 0; height: 76px; padding: 16px 14px 0 44px;
+  background: linear-gradient(to right, rgba(60,73,82,0), #3c4952 40px);
 }
+.favrow.temp .favactions { background: linear-gradient(to right, rgba(77,62,32,0), #4d3e20 40px); }
 .favrow.focused .favactions { visibility: visible; }
 .favrow.addrow .favactions { display: none; }
 .actbtn {
@@ -528,7 +548,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;   /* without this the 3px border lands outside, off-centring the panel */
   background: #0c110d; border: 3px solid #303735; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+  overflow: hidden;   /* no blurred drop shadow: it cost a dropped frame on every open */
 }
 /* One static gradient at the foot of each grid, so the row the panel clips reads as
    "there is more below" instead of a card sliced against a hard bright edge. No
@@ -575,11 +595,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #browse-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
 #browse-close:hover { color: #fff; }
 #browse-grid {
-  height: 858px; overflow: hidden; padding: 16px 18px;
+  height: 858px; overflow-x: hidden; overflow-y: scroll; padding: 16px 18px; background: #0c110d;
   display: flex; flex-wrap: wrap; align-content: flex-start;
 }
 /* Pinned-category chips row borrows a slice of the grid's height when shown */
 #browse-panel.haspins #browse-grid { height: 804px; }
+/* The grids are real scroll containers on the panel's opaque colour, so Chromium 87
+   scrolls them on the compositor instead of repainting every banner each step (the
+   same fix as #fav-list). Scrolling stays scripted; the bars are hidden. */
+#browse-grid::-webkit-scrollbar, #vods-grid::-webkit-scrollbar, #cats-grid::-webkit-scrollbar { display: none; }
 #browse-pinnedcats {
   display: flex; flex-wrap: nowrap; overflow: hidden; align-items: center;
   padding: 10px 26px 0;
@@ -609,13 +633,6 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .bsep {
   width: 1px; height: 28px; background: #2f3a33;
   margin: 0 14px 0 0; flex: none;
-}
-/* Balloon tip under the Discover chip */
-#browse-tip {
-  position: absolute; z-index: 82; max-width: 400px;
-  background: rgba(15,18,16,0.97); border: 1px solid #2f3438; border-radius: 10px;
-  color: #d6d7d8; font-size: 21px; line-height: 1.35; padding: 10px 16px;
-  pointer-events: none;
 }
 
 /* Category search: a quiet pill that lights up on focus */
@@ -744,7 +761,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;
   background: #0c110d; border: 3px solid #303735; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+  overflow: hidden;   /* no blurred drop shadow: it cost a dropped frame on every open */
 }
 #vods-head {
   display: flex; align-items: center;
@@ -754,7 +771,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vods-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
 #vods-close:hover { color: #fff; }
 #vods-grid {
-  height: 858px; overflow: hidden; padding: 16px 18px;
+  height: 858px; overflow-x: hidden; overflow-y: scroll; padding: 16px 18px; background: #0c110d;
   display: flex; flex-wrap: wrap; align-content: flex-start;
 }
 #vods-status {
@@ -784,14 +801,14 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   position: absolute; top: 54px; left: 90px; width: 1740px; height: 972px;
   box-sizing: border-box;
   background: #0c110d; border: 3px solid #303735; border-radius: 20px;
-  overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+  overflow: hidden;   /* no blurred drop shadow: it cost a dropped frame on every open */
 }
 #cats-head { display: flex; align-items: center; padding: 20px 26px; border-bottom: 1px solid #26302a; }
 #cats-title { font-size: 32px; font-weight: 800; color: #fff; flex: 1; }
 #cats-close { font-size: 30px; color: #9a9a9d; cursor: pointer; padding: 0 8px; margin-left: 12px; }
 #cats-close:hover { color: #fff; }
 #cats-grid {
-  height: 858px; overflow: hidden; padding: 16px 18px;
+  height: 858px; overflow-x: hidden; overflow-y: scroll; padding: 16px 18px; background: #0c110d;
   display: flex; flex-wrap: wrap; align-content: flex-start;
 }
 #cats-status {
@@ -857,13 +874,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #chpop-panel {
   width: 640px; background: rgba(12,17,13,0.96);
   border: 3px solid #53fc18; border-radius: 18px; overflow: hidden;
-  box-shadow: 0 0 50px rgba(0,0,0,0.6); pointer-events: auto;
+  pointer-events: auto;
 }
 #chpop-title {
   font-size: 30px; font-weight: 800; color: #fff; padding: 20px 26px 14px;
   border-bottom: 1px solid #26302a;
 }
-#chpop-list { max-height: 720px; overflow: hidden; padding: 10px; }
+/* Composited scrolling, as in #fav-list: opaque (the panel colour) and a real scroller. */
+#chpop-list { max-height: 720px; overflow-x: hidden; overflow-y: scroll; padding: 10px; background: #0c110d; }
+#chpop-list::-webkit-scrollbar { display: none; }
 .chrow { display: flex; align-items: center; height: 74px; padding: 0 16px; border-radius: 10px; cursor: pointer; }
 .chrow.focused { background: #48505b; box-shadow: inset 3px 0 0 rgba(83,252,24,0.6); }
 /* Same treatment as a blocked sidebar row: fading the whole row also fades the text
@@ -878,8 +897,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   color: #fff; font-size: 24px; font-weight: 700; text-align: center; line-height: 50px;
 }
 .chmid { flex: 1; overflow: hidden; }
-.chname { font-size: 27px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chgame { font-size: 20px; color: #9a9a9d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chname { font-size: 27px; font-weight: 700; color: #e7e9ea; white-space: nowrap; overflow: hidden; }
+.chgame { font-size: 20px; color: #9a9a9d; white-space: nowrap; overflow: hidden; }   /* clipChpopText adds the '..' */
 .chview { font-size: 23px; color: #efeff1; margin-left: 14px; white-space: nowrap; }
 .chview .chdot { display: inline-block; width: 11px; height: 11px; border-radius: 6px; background: #e91916; margin-right: 7px; vertical-align: 1px; }
 
@@ -1050,8 +1069,13 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #vodbar.focused #vodbar-handle { fill: #53fc18; }
 #vodbar-cur, #vodbar-dur {
-  font-size: 26px; font-weight: 700; color: #fff; min-width: 120px;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+  font-size: 26px; font-weight: 700; color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums;
+}
+/* Both ends of a seek bar are fixed-width slots, so the track never changes
+   length when a time grows a digit or the right end turns into Go live. */
+#vodbar-cur, #vodbar-dur, #vodgolive, #livebar-cur, #livebar-end, #livebar-live {
+  flex: none; width: 150px; box-sizing: border-box;
 }
 #vodbar-cur { text-align: right; margin-right: 22px; }
 #vodbar-dur { text-align: left; margin-left: 22px; }
@@ -1061,6 +1085,53 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #vodbar-played { stroke: #53fc18; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 #vodbar-handle { fill: #fff; }
 #vodbar-origin { stroke: rgba(255,255,255,0.55); stroke-width: 3; stroke-dasharray: 4 4; }
+
+/* Live timeline: stream start on the left, the live edge on the right. It rides
+   with the info bar; rewinding past what the live buffer holds opens the stream's
+   own recording at that moment. */
+#livebar {
+  position: absolute; left: 60px; bottom: 56px;
+  width: calc(100% - 120px); box-sizing: border-box;
+  display: flex; align-items: center;
+  padding: 8px 20px; border-radius: 14px;
+  border: 2px solid transparent;
+  background: rgba(9,12,13,0.66);
+  transition: opacity 200ms ease 70ms, transform 300ms cubic-bezier(.19,.9,.3,1) 70ms,
+              border-color 160ms ease, left 200ms ease, bottom 200ms ease, width 200ms ease;
+}
+#livebar.withside { left: 530px; bottom: 120px; width: calc(100% - 590px); }
+#livebar.hidden {
+  display: flex !important; opacity: 0; pointer-events: none; transform: translateY(16px);
+  transition: opacity 150ms ease, transform 190ms ease;
+}
+#livebar.focused { border-color: rgba(83,252,24,0.35); }
+#livebar.focused #livebar-handle { fill: #53fc18; }
+#livebar-cur, #livebar-end {
+  font-size: 26px; font-weight: 700; color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums;
+}
+#livebar-cur { text-align: right; margin-right: 22px; }
+#livebar-end { text-align: left; margin-left: 22px; }
+#livebar-track { flex: 1; height: 48px; cursor: pointer; }
+#livebar-track svg { width: 100%; height: 100%; overflow: visible; }
+#livebar-remain { stroke: rgba(255,255,255,0.45); stroke-width: 4; stroke-linecap: round; }
+#livebar-played { stroke: #e91916; stroke-width: 5; stroke-linecap: round; }
+#livebar-handle { fill: #fff; }
+#livebar-origin { stroke: rgba(255,255,255,0.55); stroke-width: 3; stroke-dasharray: 4 4; }
+/* Go live takes the right-hand slot in place of the time, at the same width. */
+#livebar-live, #vodgolive {
+  display: inline-flex; align-items: center; justify-content: center; white-space: nowrap;
+  margin-left: 22px; height: 44px; padding: 0 10px;
+  font-size: 22px; font-weight: 800; color: #fff;
+  border-radius: 8px; cursor: pointer;
+  background: #e91916;
+}
+#livebar-track { touch-action: none; }
+#livebar-live .lvdot, #vodgolive .lvdot {
+  width: 11px; height: 11px; border-radius: 6px; background: #fff; margin-right: 9px;
+}
+#livebar-live:hover, #vodgolive:hover { background: #ff3b37; }
+#vodgolive.focused { box-shadow: 0 0 0 3px #53fc18, 0 0 22px rgba(83,252,24,0.35); }
 
 /* Player tools, shown at the bottom-right while the sidebar is open. Quality is
    a first-class control; Settings remains a separate themed gear. */
@@ -1085,6 +1156,32 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #quality-button {
   min-width: 174px; padding: 0 20px 0 16px;
   border-radius: 16px;
+}
+/* The quality drop alert shows the Quality button on its own: it rises in, then
+   rings ripple out from it in the bars' colour (red for a low picture, yellow for
+   one below the best). Only transform and opacity animate, so the GPU composites
+   the waves without repainting anything. */
+#player-tools.qalert #settings-button { display: none; }
+#player-tools.qalert { animation: qalert-in 240ms ease-out; }
+#player-tools.qalert #quality-button { position: relative; }
+#player-tools.qalert #quality-button::before,
+#player-tools.qalert #quality-button::after {
+  content: ''; position: absolute; left: -2px; top: -2px; right: -2px; bottom: -2px;
+  border-radius: 16px; border: 3px solid #ff4d45;
+  box-shadow: 0 0 14px rgba(255,77,69,0.6), inset 0 0 10px rgba(255,77,69,0.35);
+  opacity: 0; pointer-events: none; will-change: transform, opacity;
+  animation: qalert-wave 1.4s ease-out 200ms 3;
+}
+#player-tools.qalert #quality-button::after { animation-delay: 900ms; }
+#player-tools.qalert #quality-button.quality-limited::before,
+#player-tools.qalert #quality-button.quality-limited::after {
+  border-color: #ffd21e;
+  box-shadow: 0 0 14px rgba(255,210,30,0.55), inset 0 0 10px rgba(255,210,30,0.3);
+}
+@keyframes qalert-in { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+@keyframes qalert-wave {
+  0%   { opacity: 0.95; transform: scale(1); }
+  100% { opacity: 0;    transform: scale(1.32, 1.7); }
 }
 #settings-button {
   position: relative; width: 74px; justify-content: center;
@@ -1240,7 +1337,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   padding: 14px 0; box-shadow: 0 0 40px rgba(0,0,0,0.6);
 }
 #qualityopt-head {
-  display: flex; align-items: baseline;
+  display: flex; align-items: center;
   padding: 4px 26px 14px; margin-bottom: 6px; border-bottom: 1px solid #2f3438;
 }
 #qualityopt-title { color: #fff; font-size: 26px; font-weight: 800; white-space: nowrap; }
@@ -1259,6 +1356,24 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 .qpick-check svg { width: 23px; height: 23px; }
 .qpick:not(.selected) .qpick-check { visibility: hidden; }
+/* The quality alert switch in the picker's top-right corner. Up from the first
+   row reaches it; the description balloon explains it while it is focused. */
+#qualityopt-alert {
+  margin-left: auto; display: flex; align-items: center; cursor: pointer;
+  padding: 5px 8px 5px 12px; margin-right: -10px; border-radius: 10px; border: 2px solid transparent;
+}
+#qualityopt-alert.focused { border-color: #53fc18; background: #26323a; }
+.qa-label { font-size: 21px; font-weight: 700; color: #9a9a9d; margin-right: 10px; }
+#qualityopt-alert.on .qa-label, #qualityopt-alert.focused .qa-label { color: #e7e9ea; }
+.qa-switch {
+  position: relative; width: 42px; height: 24px; border-radius: 12px; background: #3a3f43;
+}
+.qa-knob {
+  position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 9px;
+  background: #cfd3d5; transition: transform 120ms ease-out;
+}
+#qualityopt-alert.on .qa-switch { background: #53fc18; }
+#qualityopt-alert.on .qa-knob { background: #0b0e0f; transform: translateX(18px); }
 
 /* Dim (night) options popup, opened from the Settings menu */
 #dimoptmodal {
@@ -1306,25 +1421,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   padding: 6px 12px; font-size: 19px; font-weight: 600;
   color: #c7d2d9; border: 0; border-radius: 8px; background: #26323a;
 }
-#chatopt-list .chat-toggle {
+.srow .chat-toggle {
   position: relative; width: 52px; height: 28px; box-sizing: border-box;
   padding: 0; font-size: 0; border-radius: 16px; background: #43515b;
 }
-#chatopt-list .chat-toggle::after {
+.srow .chat-toggle::after {
   content: ''; position: absolute; top: 4px; left: 4px; width: 20px; height: 20px;
   border-radius: 50%; background: #dae3e8;
 }
-#chatopt-list .chat-toggle.on { background: #53fc18; }
-#chatopt-list .chat-toggle.on::after { left: 28px; background: #122016; }
-.chat-colors { display: flex; }
-.chat-color {
-  display: flex; align-items: center; margin-left: 6px; padding: 7px 10px;
-  border-radius: 8px; border: 1px solid #43515b; background: #1b252c;
-  color: #c7d2d9; font: 500 19px 'Helvetica Neue', Helvetica, Arial, sans-serif; cursor: pointer;
-}
-.chat-color::before { content: ''; width: 12px; height: 12px; margin-right: 6px; border: 1px solid #84929c; border-radius: 50%; background: #000; }
-.chat-color[data-chat-color="white"]::before { background: #fff; }
-.chat-color.selected { border-color: #53fc18; color: #f5f8fa; background: #2c3b30; }
+.srow .chat-toggle.on { background: #53fc18; }
+.srow .chat-toggle.on::after { left: 28px; background: #122016; }
 #chatopt-list .chat-range-row { flex-wrap: wrap; }
 
 .chat-setting-slider {
