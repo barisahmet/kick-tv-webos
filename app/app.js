@@ -1169,10 +1169,39 @@ function armLiveOverlayHide() {
   overlayTimer = setTimeout(function () {
     if (state.sidebarOpen) return;                     // with the sidebar open it hides on close instead
     // still seeking, or the pointer is resting on the bar
-    if (liveSeek.base !== null || liveBar.dragTarget !== null || liveBar.hover) { armLiveOverlayHide(); return; }
+    if (liveSeek.base !== null || liveBar.dragTarget !== null || liveBar.hover || catPop.hover) { armLiveOverlayHide(); return; }
     document.getElementById('overlay').className = 'hidden';
     hideLiveBar();
   }, liveBar.focused ? 6000 : 4000);
+}
+/* Block the playing category from the top bar. Resting the pointer on the category
+   chip opens a small "Block category" button under it; the bar stays up while the
+   pointer is on either, and a short grace lets the pointer cross the gap. */
+var catPop = { hover: false, timer: null, slug: '', name: '' };
+function showCatPop(chip) {
+  var pop = document.getElementById('ovcat-pop'), ov = document.getElementById('overlay');
+  if (!pop || !ov) return;
+  clearTimeout(catPop.timer);
+  catPop.hover = true;
+  catPop.slug = chip.getAttribute('data-catslug');
+  catPop.name = chip.textContent;
+  var blocked = isCatBlocked(catPop.slug);
+  pop.innerHTML = blockIcon();
+  pop.appendChild(document.createTextNode(blocked ? 'Unblock category' : 'Block category'));
+  pop.className = blocked ? 'unblock' : '';
+  var r = chip.getBoundingClientRect(), o = ov.getBoundingClientRect();
+  pop.style.left = Math.round(r.left - o.left) + 'px';
+  pop.style.top = Math.round(r.bottom - o.top + 10) + 'px';
+}
+function leaveCatPop() {
+  clearTimeout(catPop.timer);
+  catPop.timer = setTimeout(hideCatPop, 250);
+}
+function hideCatPop() {
+  clearTimeout(catPop.timer);
+  catPop.hover = false;
+  var pop = document.getElementById('ovcat-pop');
+  if (pop && pop.className !== 'hidden') pop.className = 'hidden';
 }
 // OK on a live stream: the info bar comes up with the timeline focused, so
 // Left/Right seek; OK again (or Back) puts it all away.
@@ -1554,7 +1583,9 @@ function loadPreviewFrame(url, done) {
    Each new frame has its own versionId in the URL. Until the new one is ready the
    cache keeps the previous frame, so a card never waits on the network once a
    channel has been warmed. */
-function fetchPreviewUrl(slug, done) {
+// `urgent` is for a frame someone is waiting on (a highlighted row that was not
+// warmed yet, a Browse card); the background warmer leaves it off.
+function fetchPreviewUrl(slug, done, urgent) {
   if (previewPending[slug]) { if (done) previewPending[slug].push(done); return; }
   previewPending[slug] = done ? [done] : [];
   function finish() {
@@ -1575,7 +1606,7 @@ function fetchPreviewUrl(slug, done) {
       else old.t = Date.now();          // keep showing the last good frame; retry next round
       finish();
     });
-  }, { priority: 2 });
+  }, { priority: urgent ? 1 : 3 });  // idle: never ahead of the channel list refresh
 }
 // Every channel whose frame a list could show: live favourites plus a temporary one.
 function previewTargets() {
@@ -1766,7 +1797,7 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
         if (slugShowing !== slug) return;
         if (previewReady(slug)) present(slug);
         else hide();                    // no thumbnail: no stuck spinner
-      });
+      }, true);
     }, 150);
   }
   return { update: update, cancel: function () { clearTimeout(timer); hide(); } };
@@ -2830,7 +2861,7 @@ function scheduleBrowsePeek() {
     fetchPreviewUrl(slug, function () {
       var c2 = previewCache[slug];
       if (c2) apply(c2.url);
-    });
+    }, true);
   }, 800);
 }
 // Toggle a language chip in or out of the selection. The All chip (index 0)
@@ -3029,8 +3060,11 @@ function renderCats(preserveScroll) {
 function makeCatCard(c, i) {
   if (c.catalogueTerminal) return makeCatalogueTerminal(c);
   var card = document.createElement('div'); card.className = 'ccard';
-  var banner = document.createElement('div'); banner.className = 'cbanner';
-  if (!c.all) {
+  var banner = document.createElement('div'); banner.className = c.all ? 'cbanner call' : 'cbanner';
+  if (c.all) {
+    // No artwork for "every category": a grid mark instead of an empty black tile.
+    banner.innerHTML = '<svg class="callicon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>';
+  } else {
     catalogueImage(banner, catBanner(c), c.name || c.slug);
     var vw = document.createElement('span'); vw.className = 'cviewers';
     vw.innerHTML = '<span class="bdot"></span>'; vw.appendChild(document.createTextNode(fmtViewers(c.viewers || 0))); banner.appendChild(vw);
@@ -4033,7 +4067,7 @@ function attachVod(source) {
   liveWatchStartedMs = 0;            // a recording is not a live session
   setPosterStill(state.vod && state.vod.poster);   // also covers a reload
   if (window.Hls && Hls.isSupported()) {
-    var hls = new Hls({
+    var hls = new Hls(withTvGuards({
       enableWorker: true, capLevelToPlayerSize: true, maxBufferLength: 30,
       // hls.js keeps everything behind the playhead by default. On a four-hour VOD
       // that grows until the TV's MSE quota starts force-evicting, which shows up as
@@ -4041,7 +4075,7 @@ function attachVod(source) {
       backBufferLength: 30,
       manifestLoadingMaxRetry: 4, levelLoadingMaxRetry: 4, fragLoadingMaxRetry: 6,
       startPosition: state.vod && state.vod.resumeAt > 0 ? state.vod.resumeAt : -1
-    });
+    }));
     state.hls = hls;
     qualityAlertReset();
     hls.on(Hls.Events.ERROR, function (ev, data) {
@@ -4486,6 +4520,20 @@ function pickQuality(row) {
 /* Player options that ride on top of hls.js */
 // Low latency trims how far behind the live edge we play. It only takes hold on
 // a fresh hls instance, so toggling it reloads the current stream.
+/* hls.js options that guard against how this TV's video pipeline fails, shared by
+   live and past-video playback. nudgeOnVideoHole and liveSyncOnStallIncrease are
+   already on by default in hls.js 1.7. */
+var HLS_TV_GUARDS = {
+  // An MSE append that never completes (the TV's decoder wedged) is reported as an
+  // error after 10s instead of hanging for ever; normal appends take well under 1s.
+  appendTimeout: 10000,
+  // A picked fixed quality survives a load error instead of falling back to Auto.
+  preserveManualLevelOnError: true
+};
+function withTvGuards(cfg) {
+  for (var k in HLS_TV_GUARDS) if (!(k in cfg)) cfg[k] = HLS_TV_GUARDS[k];
+  return cfg;
+}
 function hlsConfig() {
   var cfg = {
     enableWorker: true, capLevelToPlayerSize: true,
@@ -4507,7 +4555,7 @@ function hlsConfig() {
     cfg.maxBufferLength = 30;
     cfg.maxLiveSyncPlaybackRate = 1;
   }
-  return cfg;
+  return withTvGuards(cfg);
 }
 function liveSeekRange(video) {
   var ranges = video && video.seekable;
@@ -7598,6 +7646,27 @@ function browseCardFromEvent(e) {
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();
     else if (act === 'dim') dimQuickKey();
+  });
+  // Pointing at the category chip offers to block it (see showCatPop).
+  document.getElementById('ov-title').addEventListener('mouseover', function (e) {
+    var el = e.target;
+    if (el.getAttribute && el.getAttribute('data-catslug') && state.mode === 'player' && !state.vod) showCatPop(el);
+  });
+  document.getElementById('ov-title').addEventListener('mouseout', function (e) {
+    var to = e.relatedTarget;
+    if (!(to && to.getAttribute && to.getAttribute('data-catslug'))) leaveCatPop();
+  });
+  var ovcatPop = document.getElementById('ovcat-pop');
+  ovcatPop.addEventListener('mouseenter', function () { clearTimeout(catPop.timer); catPop.hover = true; });
+  ovcatPop.addEventListener('mouseleave', leaveCatPop);
+  ovcatPop.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!catPop.slug) return;
+    var nowBlocked = toggleCatBlock(catPop.slug, catPop.name || catPop.slug);
+    toast((nowBlocked ? 'Blocked ' : 'Unblocked ') + (catPop.name || catPop.slug));
+    hideCatPop();
+    applyBlockedChange();
+    armLiveOverlayHide();
   });
   // The category chip in the top bar opens Browse filtered to that category.
   document.getElementById('ov-title').addEventListener('click', function (e) {

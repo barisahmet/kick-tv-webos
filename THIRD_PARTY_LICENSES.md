@@ -5,7 +5,7 @@ This project bundles the following third-party software.
 ## hls.js
 
 - File: `app/hls.min.js`
-- Version: 1.5.x
+- Version: 1.7.x
 - Project: https://github.com/video-dev/hls.js
 - License: **Apache License 2.0** — Copyright (c) Dailymotion and the hls.js
   contributors.

@@ -134,6 +134,14 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
 .catsel { left: 120px; }
 .catpin.on { color: #c5e2b9; background: #304034; }
 .catsel { color: #c5e2b9; background: #304034; }
+/* "All categories": a grid mark on a soft green wash, and its tick in the corner
+   (it has no pin or block badges for the tick to sit after). */
+.cbanner.call {
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 50% 42%, #22352a, #121815 70%);
+}
+.callicon { width: 84px; height: 84px; margin-bottom: 40px; fill: #53fc18; opacity: 0.8; }
+.cbanner.call .catsel { left: 8px; }
 
 .bcard { height: 350px; background: #172026; }
 #vods-grid .bcard { height: 366px; }

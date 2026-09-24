@@ -154,5 +154,7 @@ and prints a temporary directory containing results and screenshots. Set
 
 ## License
 
-MIT, see LICENSE. Bundles hls.js, which has its own license
-(see THIRD_PARTY_LICENSES.md).
+MIT, see LICENSE. The license covers this project's original source code only. It
+does not grant any rights to third-party trademarks (see the note at the top) or to
+bundled third-party software: the app bundles hls.js, which has its own license (see
+THIRD_PARTY_LICENSES.md).

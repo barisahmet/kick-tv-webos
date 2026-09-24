@@ -2,7 +2,11 @@
 (function (root) {
   'use strict';
   var own = Object.prototype.hasOwnProperty;
-  var limits = { requests: 4, background: 2, queued: 96, listeners: 64,
+  // Priorities: 0 playback, 1 normal, 2 background, 3 idle. Idle work (preview
+  // thumbnails, ~0.7s per lookup) takes one slot, and only while nothing more
+  // important is waiting: it used to share the background slots with the channel
+  // list refresh and stretched a 2-6s refresh to 12s.
+  var limits = { requests: 4, background: 2, idle: 1, queued: 96, listeners: 64,
     cacheEntries: 64, cacheBytes: 2097152, entryBytes: 262144 };
   function later(fn) { return setTimeout(fn, 0); }
   function safe(fn, err, value) {
@@ -28,7 +32,7 @@
   }
 
   var transport = null, queue = [], jobs = Object.create(null);
-  var active = 0, nonPlayback = 0, background = 0, pumpTimer = null;
+  var active = 0, nonPlayback = 0, background = 0, idle = 0, pumpTimer = null;
   function schedule() { if (pumpTimer === null) pumpTimer = later(pump); }
   function finishJob(job, err, value) {
     if (job.done) return;
@@ -39,6 +43,7 @@
       active--;
       if (job.startedPriority > 0) nonPlayback--;
       if (job.startedPriority === 2) background--;
+      if (job.startedPriority === 3) idle--;
     } else {
       var idx = queue.indexOf(job);
       if (idx !== -1) queue.splice(idx, 1);
@@ -50,11 +55,13 @@
     pumpTimer = null;
     if (!transport) return;
     while (active < limits.requests) {
-      var selected = -1, priority = 3;
+      var selected = -1, priority = 4, higherWaiting = false;
+      for (var w = 0; w < queue.length; w++) if (queue[w].priority < 3) { higherWaiting = true; break; }
       for (var i = 0; i < queue.length; i++) {
         var job = queue[i];
         if (job.priority > 0 && nonPlayback >= limits.requests - 1) continue;
         if (job.priority === 2 && background >= limits.background) continue;
+        if (job.priority === 3 && (idle >= limits.idle || higherWaiting)) continue;
         if (job.priority < priority) { selected = i; priority = job.priority; }
       }
       if (selected === -1) break;
@@ -66,6 +73,7 @@
     active++;
     if (job.priority > 0) nonPlayback++;
     if (job.priority === 2) background++;
+    if (job.priority === 3) idle++;
     job.timer = setTimeout(function () {
       finishJob(job, 'timeout'); cancelHandle(job.handle);
     }, 15000);
@@ -77,7 +85,7 @@
     var sub = listener(cb), opts = options || {};
     if (typeof path !== 'string' || !path) return onlyListener(sub, 'bad path');
     var key = path + '\n' + (opts.compact === true ? 'compact' : 'raw');
-    var priority = opts.priority === 0 ? 0 : opts.priority === 2 ? 2 : 1;
+    var priority = opts.priority === 0 ? 0 : opts.priority === 2 ? 2 : opts.priority === 3 ? 3 : 1;
     var job = jobs[key];
     if (job && job.listeners.length >= limits.listeners) return onlyListener(sub, 'busy');
     if (!job) {

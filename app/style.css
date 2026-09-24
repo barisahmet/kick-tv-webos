@@ -113,6 +113,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #ov-title { display: block; font-size: 26px; color: #bcbcbe; margin-top: 8px; }
 .ovcat[data-catslug] { cursor: pointer; }
 .ovcat[data-catslug]:hover { color: #53fc18; text-decoration: underline; }
+/* Pointer-only: resting on the category chip offers to block (or unblock) it. */
+#ovcat-pop {
+  position: absolute; z-index: 2; display: flex; align-items: center;
+  padding: 10px 18px 10px 14px; border-radius: 10px; cursor: pointer; white-space: nowrap;
+  background: #172026; border: 1px solid #52626c; color: #e7e9ea; font-size: 22px; font-weight: 700;
+}
+#ovcat-pop:hover { border-color: #e91916; color: #fff; }
+#ovcat-pop .blockicon { width: 24px; height: 24px; margin-right: 10px; color: #e91916; }
+#ovcat-pop.unblock .blockicon { color: #9a9a9d; }
 
 /* Mini home screen on the idle screen: continue watching + live tiles */
 #home { width: 1920px; }                 /* in the centred column now, not pinned */

@@ -75,6 +75,9 @@
     };
     this.dirty = false;
   };
+  // Writes only what changed on a card, so a refresh that merely re-confirms the
+  // visible cards does no DOM work. `this.changed` tells refresh a card was made
+  // or rebuilt (and may hold new images to watch).
   VirtualGrid.prototype.mount = function (i, updates) {
     var k = this.keys[i], node = this.nodes[k];
     if (!node) {
@@ -82,15 +85,16 @@
       node.style.position = 'absolute';
       this.nodes[k] = node;
       this.content.appendChild(node);
-    } else if (updates && this.update) this.update(node, this.items[i], i);
-    node.setAttribute('data-idx', i);
-    node.setAttribute('data-grid-key', k.slice(1));
+      this.changed = true;
+    } else if (updates && this.update) { this.update(node, this.items[i], i); this.changed = true; }
+    if (node._vgIdx !== i) { node.setAttribute('data-idx', i); node._vgIdx = i; }
+    if (node._vgKey !== k) { node.setAttribute('data-grid-key', k.slice(1)); node._vgKey = k; }
     return node;
   };
   VirtualGrid.prototype.refresh = function (updates) {
     var count = this.items.length, node, i;
     if (!this.container.clientWidth) { this.dirty = true; return; }
-    if (!count) { this.removeOutside({}); this.content.style.height = '0px'; return; }
+    if (!count) { this.removeOutside({}); this.lastSpan = null; this.content.style.height = '0px'; return; }
     if (this.dirty || !this.metrics) {
       var sample = null;
       for (var mounted in this.nodes) if (Object.prototype.hasOwnProperty.call(this.nodes, mounted)) { sample = this.nodes[mounted]; break; }
@@ -104,15 +108,25 @@
     var overscan = this.options.overscan == null ? 1 : this.options.overscan;
     var firstRow = Math.max(0, Math.floor(this.container.scrollTop / m.pitchY) - overscan);
     var lastRow = Math.min(rows, Math.ceil((this.container.scrollTop + m.height) / m.pitchY) + overscan);
+    // A scroll event follows every scripted scroll, so the same window is often
+    // refreshed twice in a row. Nothing to do unless the rows or items changed.
+    var span = firstRow + ':' + lastRow + ':' + count + ':' + m.pitchX + ':' + m.pitchY + ':' + m.cols;
+    if (!updates && this.lastSpan === span && this.lastKeys === this.keys) {
+      if (this.options.onRender) this.options.onRender(this);
+      return;
+    }
+    this.lastSpan = span; this.lastKeys = this.keys;
     var keep = {};
+    this.changed = false;
     for (i = firstRow * m.cols; i < Math.min(count, lastRow * m.cols); i++) {
       node = this.mount(i, updates);
       keep[this.keys[i]] = true;
-      node.style.left = ((i % m.cols) * m.pitchX) + 'px';
-      node.style.top = (Math.floor(i / m.cols) * m.pitchY) + 'px';
+      var left = (i % m.cols) * m.pitchX, top = Math.floor(i / m.cols) * m.pitchY;
+      if (node._vgLeft !== left) { node.style.left = left + 'px'; node._vgLeft = left; }
+      if (node._vgTop !== top) { node.style.top = top + 'px'; node._vgTop = top; }
     }
     this.removeOutside(keep);
-    if (root.UIImages) root.UIImages.scan(this.content);
+    if (this.changed && root.UIImages) root.UIImages.scan(this.content);
     if (this.options.onRender) this.options.onRender(this);
   };
   VirtualGrid.prototype.removeOutside = function (keep) {
@@ -137,7 +151,7 @@
   };
   VirtualGrid.prototype.get = function (index) { return this.nodes[this.keys[index]] || null; };
   VirtualGrid.prototype.clear = function () {
-    this.items = []; this.keys = []; this.focused = -1;
+    this.items = []; this.keys = []; this.focused = -1; this.lastSpan = null;
     this.removeOutside({}); this.content.style.height = '0px'; this.container.scrollTop = 0;
   };
   root.VirtualGrid = VirtualGrid;
