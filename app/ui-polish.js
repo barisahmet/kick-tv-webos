@@ -1,14 +1,7 @@
-/* Stable details and local overlay geometry. ES5 for webOS Chromium 87. */
+/* Local overlay geometry. ES5 for webOS Chromium 87. */
 (function (root) {
   'use strict';
   var doc = root.document;
-  var dwell = 650;
-  var detailTimer = null;
-  var detailObserver = null;
-  var detailScrolls = [];
-  var detailAnchor = null;
-  var detailKey = '';
-  var oldDescription = null;
   var initialized = false;
   var appliedText = null;
   var panelIds = ['settingsbox', 'qualityoptbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox'];
@@ -145,93 +138,13 @@
       var panel = byId(panelIds[i]);
       if (panel && panel.offsetWidth && panel.offsetHeight) place(panel);
     }
-    if (detailAnchor && visible(byId('ui-details'))) place(byId('ui-details'), detailAnchor);
     return true;
-  }
-  function cancelDetails() {
-    root.clearTimeout(detailTimer); detailTimer = null;
-    if (detailObserver) detailObserver.disconnect();
-    detailScrolls = [];
-    if (detailAnchor) {
-      if (oldDescription === null) detailAnchor.removeAttribute('aria-describedby');
-      else detailAnchor.setAttribute('aria-describedby', oldDescription);
-    }
-    detailAnchor = null; detailKey = ''; oldDescription = null;
-    var panel = byId('ui-details');
-    if (panel) panel.classList.add('hidden');
-  }
-  function watchDetailAnchor(anchor) {
-    if (!detailObserver && root.MutationObserver) detailObserver = new root.MutationObserver(function () {
-      if (detailAnchor && !doc.documentElement.contains(detailAnchor)) cancelDetails();
-    });
-    // Watch only direct children along this anchor's path, while details are
-    // pending or visible. Chat updates and unrelated subtrees do not trigger it.
-    for (var parent = anchor.parentNode; parent; parent = parent.parentNode) {
-      if (detailObserver) detailObserver.observe(parent, { childList: true });
-      detailScrolls.push({ node: parent, top: parent.scrollTop || 0, left: parent.scrollLeft || 0 });
-    }
-  }
-  function detailText(kind, item) {
-    var channel = item.channel || {}, user = channel.user || {};
-    var title = item.session_title || item.title || item.name || user.username || item.slug || 'Untitled';
-    var meta = [];
-    var name = item.name || user.username || channel.slug || item.slug;
-    if (name && name !== title) meta.push(name);
-    var category = item.category || (item.categories && item.categories[0] && item.categories[0].name);
-    if (category && typeof category === 'object') category = category.name;
-    if (category && category !== title) meta.push(category);
-    if (kind === 'vod' && item.created_at) {
-      var date = new Date(item.created_at);
-      if (!isNaN(date.getTime())) meta.push(date.toLocaleDateString());
-    }
-    return { title: String(title), meta: meta.join(' · ') };
-  }
-  function details(kind, item, anchor) {
-    if (kind === 'vod' || !anchor || !item) { cancelDetails(); return; }
-    var content = detailText(kind, item);
-    var key = kind + ':' + (item.id || item.uuid || item.slug || '') + ':' + content.title + ':' + content.meta;
-    if (detailAnchor === anchor && detailKey === key) return;
-    cancelDetails();
-    detailAnchor = anchor; detailKey = key; oldDescription = anchor.getAttribute('aria-describedby');
-    watchDetailAnchor(anchor);
-    detailTimer = root.setTimeout(function () {
-      detailTimer = null;
-      if (detailAnchor !== anchor || !visible(anchor)) { cancelDetails(); return; }
-      var rect = anchor.getBoundingClientRect(), view = viewport();
-      if (rect.bottom <= 0 || rect.top >= view.height || rect.right <= 0 || rect.left >= view.width) { cancelDetails(); return; }
-      var panel = byId('ui-details');
-      if (!panel) {
-        panel = doc.createElement('div'); panel.id = 'ui-details'; panel.setAttribute('role', 'tooltip');
-        var title = doc.createElement('div'); title.className = 'ui-details-title';
-        var meta = doc.createElement('div'); meta.className = 'ui-details-meta';
-        panel.appendChild(title); panel.appendChild(meta); doc.body.appendChild(panel);
-      }
-      panel.children[0].textContent = content.title; panel.children[1].textContent = content.meta;
-      panel.style.filter = typeof root.popupDimFilter === 'function' ? root.popupDimFilter() : '';
-      panel.className = ''; panel.scrollTop = 0;
-      anchor.setAttribute('aria-describedby', (oldDescription ? oldDescription + ' ' : '') + 'ui-details');
-      place(panel, anchor);
-    }, dwell);
   }
   function init() {
     if (initialized) { apply(); return; }
     initialized = true;
-    root.addEventListener('resize', function () { cancelDetails(); apply(true); });
-    doc.addEventListener('pointerdown', cancelDetails, true);
-    doc.addEventListener('scroll', function (event) {
-      var target = event.target;
-      if (!detailAnchor) return;
-      if (target === doc) target = doc.scrollingElement || doc.documentElement;
-      for (var i = 0; i < detailScrolls.length; i++) {
-        var saved = detailScrolls[i];
-        if (saved.node !== target) continue;
-        // Focus may have already scrolled before requesting these details.
-        // Ignore that queued event; dismiss only when the position changes again.
-        if (saved.top !== target.scrollTop || saved.left !== target.scrollLeft) cancelDetails();
-        return;
-      }
-    }, true);
+    root.addEventListener('resize', function () { apply(true); });
     apply();
   }
-  root.UIPolish = { init: init, apply: apply, details: details, cancelDetails: cancelDetails, place: place, chatIdentity: chatIdentity };
+  root.UIPolish = { init: init, apply: apply, place: place, chatIdentity: chatIdentity };
 }(window));

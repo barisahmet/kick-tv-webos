@@ -1,6 +1,21 @@
 /* Fixed-size catalogue window. Logical indexes never depend on mounted children. */
 (function (root) {
   'use strict';
+  /* The one rule for keeping a focused row in view, shared by every list and grid.
+     A row that is visible, or only clipped by a sliver, is left alone: nudging the
+     list for a few pixels made it jump under the viewer. Only a row that is mostly
+     out of view scrolls in, and then just far enough to show it whole. Focus that
+     came from the pointer never scrolls, since the row is already under it.
+     Returns the scrollTop to use (unchanged means leave it). */
+  function revealScroll(scroll, viewHeight, top, height, pad) {
+    var ev = root.event;
+    if (ev && /^(mouse|pointer)/.test(ev.type)) return scroll;
+    var hidden = Math.max(0, scroll - top) + Math.max(0, top + height - (scroll + viewHeight));
+    if (hidden <= Math.max(2, height / 3)) return scroll;
+    if (top < scroll) return Math.max(0, top - (pad || 0));
+    return top + height - viewHeight + (pad || 0);
+  }
+  root.revealScroll = revealScroll;
   function VirtualGrid(container, options) {
     this.container = container;
     this.options = options || {};
@@ -115,8 +130,8 @@
     if (!this.metrics || this.dirty) this.measure(this.mount(index, false));
     var m = this.metrics, top = Math.floor(index / m.cols) * m.pitchY;
     var visible = m.height - m.padding * 2;
-    if (top < this.container.scrollTop) this.container.scrollTop = top;
-    else if (top + m.pitchY > this.container.scrollTop + visible) this.container.scrollTop = top + m.pitchY - visible;
+    var scroll = this.container.scrollTop, next = revealScroll(scroll, visible, top, m.pitchY, 0);
+    if (next !== scroll) this.container.scrollTop = next;
     this.refresh();
     return this.get(index);
   };

@@ -280,7 +280,12 @@
       scheduleImages();
     }
     rec.finish = finish;
-    image.onload = function () { finish(true, false); };
+    // Decode before the element shows it, so the first paint of a scrolled-in
+    // card does not decode a banner inside the frame. Emotes stay immediate.
+    image.onload = function () {
+      if (!rec.emote && image.decode) image.decode().then(function () { finish(true, false); }, function () { finish(true, false); });
+      else finish(true, false);
+    };
     image.onerror = function () { finish(false, false); };
     rec.timer = setTimeout(function () { finish(false, false); }, 15000);
     try { image.src = rec.url; } catch (e) { finish(false, false); }

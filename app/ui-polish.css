@@ -12,7 +12,7 @@ body {
   box-sizing: border-box; display: flex; flex-direction: column;
   width: 520px; max-height: calc(100vh - 48px);
   background: var(--ui-panel); border: 1px solid #4b5961; border-radius: 18px;
-  padding: 16px 0; box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+  padding: 16px 0;   /* no blurred drop shadow: it cost a dropped frame on every open */
 }
 #qualityoptbox { width: 440px; }
 #chatoptbox { width: 600px; }
@@ -152,7 +152,7 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
 /* Only entrances animate. Focus borders and text remain immediate. */
 #settingsmodal:not(.hidden) #settingsbox, #qualityoptmodal:not(.hidden) #qualityoptbox,
 #dimoptmodal:not(.hidden) #dimoptbox, #chatoptmodal:not(.hidden) #chatoptbox,
-#blockedcatsmodal:not(.hidden) #blockedcatsbox, #ui-details:not(.hidden) {
+#blockedcatsmodal:not(.hidden) #blockedcatsbox {
   animation: ui-panel-enter 100ms ease-out;
 }
 @keyframes ui-panel-enter { from { opacity: 0; } to { opacity: 1; } }
@@ -165,21 +165,12 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
 #vodplay .vpglyph.on { transform: none; }
 #seekpop .seekvalue { animation-duration: 100ms; }
 
-#settings-desc, #quality-hint, #browse-tip, #ui-details {
+#settings-desc, #quality-hint {
   color: var(--ui-text); background: #172026; border: 1px solid #52626c;
   border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.35);
 }
 #settings-desc::before, #settings-desc::after,
 #quality-hint::before, #quality-hint::after { display: none; }
-#ui-details {
-  position: fixed; z-index: 74; box-sizing: border-box; width: 620px;
-  max-width: calc(100vw - 48px); padding: 22px 26px; overflow-y: auto;
-  max-height: calc(100vh - 48px);
-  pointer-events: none; overflow-wrap: break-word;
-}
-.ui-details-title { color: #f1f5f7; font-size: 28px; line-height: 1.3; font-weight: 700; }
-.ui-details-meta { margin-top: 12px; color: var(--ui-muted); font-size: 21px; line-height: 1.4; }
-.ui-details-meta:empty { display: none; }
 
 /* Text size changes UI metrics; video and chat message sizing remain independent. */
 body.ui-text-large #settingsbox, body.ui-text-large #dimoptbox, body.ui-text-large #blockedcatsbox { width: 600px; }
@@ -196,10 +187,7 @@ body.ui-text-large #chatopt-note { font-size: 21px; }
 body.ui-text-large .ui-chat-name { font-size: 24px; }
 body.ui-text-large #settings-head, body.ui-text-large #qualityopt-head,
 body.ui-text-large #dimopt-head, body.ui-text-large #blockedcats-head { font-size: 34px; }
-body.ui-text-large #settings-desc, body.ui-text-large #quality-hint, body.ui-text-large #browse-tip { font-size: 26px; }
-body.ui-text-large #ui-details { width: 720px; }
-body.ui-text-large .ui-details-title { font-size: 32px; }
-body.ui-text-large .ui-details-meta { font-size: 25px; }
+body.ui-text-large #settings-desc, body.ui-text-large #quality-hint { font-size: 26px; }
 body.ui-text-large .bcard { height: 382px; }
 body.ui-text-large #vods-grid .bcard { height: 394px; }
 body.ui-text-large .ccard { height: 249px; }
@@ -219,6 +207,7 @@ body.ui-text-large #toast { font-size: 32px; }
 
 @media (prefers-reduced-motion: reduce) {
   #settingsbox, #qualityoptbox, #dimoptbox, #chatoptbox, #blockedcatsbox,
-  #ui-details, #vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop, #livebar,
-  #vodplay .vpglyph, #seekpop .seekvalue { animation: none !important; transition: none !important; }
+  #vodplay, #vodback, #vodfwd, #vodbar, #overlay, #seekpop, #livebar,
+  #vodplay .vpglyph, #seekpop .seekvalue, #sidepreview, #chpoppreview,
+  #player-tools.qalert, #player-tools.qalert #quality-button::before, #player-tools.qalert #quality-button::after { animation: none !important; transition: none !important; }
 }

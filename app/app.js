@@ -301,6 +301,7 @@ function fetchFavorites(done, liveOnly) {
     fetchInFlight = false;             // first, so a throwing callback can never wedge refreshes
     try { done(); } catch (e) { logError(e); }
     prepareSidebarSoon();
+    warmPreviews(false);               // newly live channels get a frame within the minute
     var queued = fetchFollowUp;
     fetchFollowUp = null;
     if (queued && queued.length) {
@@ -830,7 +831,7 @@ function livePoster(slug) {
   var c = previewCache[slug];
   var ch = state.channels[slug];
   return {
-    frame: (c && Date.now() - c.t < 60000) ? c.url : null,
+    frame: (c && Date.now() - c.t < 3 * PREVIEW_REFRESH_MS) ? c.url : null,
     avatar: (ch && ch.avatar) || null
   };
 }
@@ -851,6 +852,7 @@ function attachStream(slug, url) {
   if (window.Hls && Hls.isSupported()) {
     var hls = new Hls(hlsConfig());
     state.hls = hls;
+    qualityAlertReset();
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;   // old stream, or not fatal, so ignore
@@ -865,7 +867,7 @@ function attachStream(slug, url) {
     });
     if (Hls.Events.LEVEL_SWITCHED) {
       hls.on(Hls.Events.LEVEL_SWITCHED, function () {
-        if (state.hls === hls) updateQualityButton();
+        if (state.hls === hls) { updateQualityButton(); checkQualityDrop(); }
       });
     }
     if (Hls.Events.FRAG_LOADED) {
@@ -1176,7 +1178,8 @@ function activatePlayerTool() {
 function updateGear() {
   var open = state.sidebarOpen;
   var tools = document.getElementById('player-tools');
-  if (tools) { if (open) tools.classList.remove('hidden'); else tools.classList.add('hidden'); }
+  if (open) endQualityAlert();
+  if (tools) { if (open) tools.classList.remove('hidden'); else if (!tools.classList.contains('qalert')) tools.classList.add('hidden'); }
   if (!open) {
     state.playerToolFocus = -1;
     hideQualityHint();
@@ -1314,33 +1317,48 @@ function clipWithDots(text, font, maxPx) {
   return text.slice(0, lo).replace(/[\s·]+$/, '') + dots;
 }
 var sideTextStyle = null;
-// The sidebar has a fixed width and fonts. Measure those once, and only clip text
-// whose full value changed. Keep the original so refreshing never clips its own dots.
+// The sidebar has fixed fonts, so read those once. Widths depend on the row: one with
+// a viewer count or pin marker stops short of it. Read every width in one batch
+// before writing any text, and only clip a value whose text or width changed. Keep
+// the original so refreshing never clips its own dots.
+// The second line is two spans, category then " · title", in different fonts. The
+// category keeps its room first; the title gets whatever is left.
 function clipSidebarText() {
   var list = document.getElementById('fav-list');
-  var groups = ['.favname', '.favgame'];
   if (!sideTextStyle) {
     var probe = list.querySelector('.favname');
     if (!probe || probe.clientWidth <= 0) return;
-    sideTextStyle = { width: probe.clientWidth, fonts: [] };
     // Finish reading styles before writing any text.
-    for (var g = 0; g < groups.length; g++) {
-      var cs = getComputedStyle(list.querySelector(groups[g]));
-      sideTextStyle.fonts[g] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
-    }
+    var fonts = {};
+    ['.favname', '.favcat', '.favtitle'].forEach(function (sel) {
+      var cs = getComputedStyle(list.querySelector(sel));
+      fonts[sel] = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+    });
+    sideTextStyle = { fonts: fonts };
   }
-  for (var gi = 0; gi < groups.length; gi++) {
-    var font = sideTextStyle.fonts[gi], w = sideTextStyle.width;
-    var els = list.querySelectorAll(groups[gi]);
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i], full = el.getAttribute('data-full');
-      if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
-      var key = JSON.stringify([full, font, w]);
-      if (el._sideClipKey === key) continue;
-      var clipped = clipWithDots(full, font, w);
-      if (el.textContent !== clipped) el.textContent = clipped;
-      el._sideClipKey = key;
-    }
+  var f = sideTextStyle.fonts;
+  var names = list.querySelectorAll('.favname'), subs = list.querySelectorAll('.favgame');
+  var nameW = [], subW = [], i;
+  for (i = 0; i < names.length; i++) nameW.push(names[i].clientWidth);
+  for (i = 0; i < subs.length; i++) subW.push(subs[i].clientWidth);
+  for (i = 0; i < names.length; i++) {
+    var el = names[i], w = nameW[i], full = el.getAttribute('data-full');
+    if (w <= 0) continue;
+    if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
+    var key = full + '\n' + w;
+    if (el._sideClipKey === key) continue;
+    var clipped = clipWithDots(full, f['.favname'], w);
+    if (el.textContent !== clipped) el.textContent = clipped;
+    el._sideClipKey = key;
+  }
+  for (i = 0; i < subs.length; i++) {
+    var sub = subs[i], sw = subW[i];
+    if (sw <= 0 || !sub._sideParts) continue;
+    var skey = sub.getAttribute('data-full') + '\n' + sw;
+    if (sub._sideClipKey === skey) continue;
+    clipTwoParts(sub.children[0], sub.children[1], sub._sideParts.cat, sub._sideParts.rest,
+      f['.favcat'], f['.favtitle'], sw);
+    sub._sideClipKey = skey;
   }
 }
 function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
@@ -1354,12 +1372,12 @@ function swapFocus(container, prevEl, nextEl, baseOf, wantFocus) {
   }
   return nextEl;
 }
+// Keep a focused row in view by the shared rule (revealScroll, virtual-grid.js).
 function scrollIntoViewport(container, el, pad) {
   if (!el) return;
-  var top = el.offsetTop - container.offsetTop;
-  if (top < container.scrollTop) container.scrollTop = top - pad;
-  else if (top + el.offsetHeight > container.scrollTop + container.clientHeight)
-    container.scrollTop = top + el.offsetHeight - container.clientHeight + pad;
+  var scroll = container.scrollTop;
+  var next = revealScroll(scroll, container.clientHeight, el.offsetTop - container.offsetTop, el.offsetHeight, pad);
+  if (next !== scroll) container.scrollTop = next;
 }
 var sideFocusEl = null;
 var sideLayout = null;
@@ -1385,10 +1403,8 @@ function applySideFocus() {
   // the source of truth without remeasuring every row on each keypress.
   var scroll = list.scrollTop, nextScroll = scroll;
   if (pos) {
-    if (pos.top < scroll) nextScroll = pos.top - 8;
-    else if (pos.top + pos.height > scroll + sideLayout.height)
-      nextScroll = pos.top + pos.height - sideLayout.height + 8;
-    nextScroll = Math.max(0, Math.min(sideLayout.maxScroll, nextScroll));
+    nextScroll = revealScroll(scroll, sideLayout.height, pos.top, pos.height, 8);
+    if (nextScroll !== scroll) nextScroll = Math.max(0, Math.min(sideLayout.maxScroll, nextScroll));
   }
   sideFocusEl = swapFocus(list, sideFocusEl, row, sideBaseOf, state.playerToolFocus < 0);
   if (nextScroll !== scroll) list.scrollTop = nextScroll;
@@ -1398,74 +1414,253 @@ function applySideFocus() {
    focused list row — used by the sidebar and the quick-switch popup. The window
    appears instantly with a loading spinner; the frame swaps in when loaded
    (usually at once, thanks to prefetching). */
-var previewCache = {};   // slug -> { t, url }; v1 thumbnails live on images.kick.com, which loads directly
-var previewOrder = [], previewPending = Object.create(null);
-function touchPreview(slug) {
-  var i = previewOrder.indexOf(slug);
-  if (i !== -1) previewOrder.splice(i, 1);
-  previewOrder.push(slug);
-  while (previewOrder.length > 24) delete previewCache[previewOrder.shift()];
+var previewCache = {};   // slug -> { t, url, bitmap, img, ready }; v1 thumbnails live on images.kick.com, which loads directly
+var previewPending = Object.create(null);
+var PREVIEW_REFRESH_MS = 60000;   // how old a frame may get before the warmer fetches the next one
+/* The preview card's size in device pixels. Read once from the stylesheet (it is
+   fixed there) and the screen's pixel ratio, so every frame is scaled to exactly
+   what this TV draws — no bigger. */
+var previewPx = null;
+function previewTargetSize() {
+  if (previewPx) return previewPx;
+  var e = document.getElementById('sidepreview');
+  var cs = e ? getComputedStyle(e) : null;
+  var w = cs ? parseFloat(cs.width) : NaN, h = cs ? parseFloat(cs.height) : NaN;
+  var radius = cs ? (parseFloat(cs.borderTopLeftRadius) || 0) - (parseFloat(cs.borderTopWidth) || 0) : 10;
+  if (!(w > 0) || !(h > 0)) { w = 426; h = 240; }
+  var dpr = window.devicePixelRatio || 1;
+  previewPx = { w: Math.round(w * dpr), h: Math.round(h * dpr), r: Math.max(0, radius) * dpr };
+  return previewPx;
 }
-// The v2 payload only carries a thumbnail host the webview cannot load, so ask
-// v1 for the images.kick.com variants and prefer the 480-wide one — the card is
-// 426px and the smaller file arrives much faster.
+// The v2 payload only carries a thumbnail host the webview cannot load, so ask v1
+// for the images.kick.com variants and take the smallest that still covers the card.
 function pickPreviewUrl(raw) {
   var t = raw && raw.livestream && raw.livestream.thumbnail;
   if (!t) return null;
-  var m = /(https:\/\/[^\s]+\/480\.webp[^\s]*)/.exec(String(t.responsive || ''));
-  return (m && m[1]) || t.url || null;
+  return pickSrcsetUrl(t.responsive, previewTargetSize().w) || t.url || null;
 }
+function previewReady(slug) {
+  var c = previewCache[slug];
+  return !!(c && c.ready);
+}
+function releasePreview(entry) {
+  if (entry && entry.bitmap && entry.bitmap.close) { try { entry.bitmap.close(); } catch (e) {} }
+}
+/* Kick's variants come in fixed sizes. Download the one that covers the card, let
+   the browser decode it as-is off the main thread (a Blob source decodes on a
+   worker), then crop and shrink it to the card's exact pixels with one GPU draw.
+   Measured on the TV: createImageBitmap's own resize option stalled every frame for
+   ~500ms per image, while a plain decode plus a canvas draw costs no frames at all
+   (bar a one-off shader compile on the first). Frames are prepared one at a time so
+   a warm pass never lands as a burst. If the blob route fails, the Image is kept
+   and scaled at draw time instead. */
+var previewPrepQueue = [], previewPrepBusy = false;
+function queuePreviewPrep(job) {
+  previewPrepQueue.push(job);
+  if (!previewPrepBusy) nextPreviewPrep();
+}
+function nextPreviewPrep() {
+  var job = previewPrepQueue.shift();
+  if (!job) { previewPrepBusy = false; return; }
+  previewPrepBusy = true;
+  job(function () { setTimeout(nextPreviewPrep, 50); });
+}
+function scalePreviewBitmap(full) {
+  var size = previewTargetSize(), w = size.w, h = size.h, iw = full.width, ih = full.height;
+  var s = Math.max(w / iw, h / ih), sw = w / s, sh = h / s;
+  var canvas = window.OffscreenCanvas ? new OffscreenCanvas(w, h) : document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  var ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(full, (iw - sw) / 2, (ih - sh) / 2, sw, sh, 0, 0, w, h);
+  if (full.close) full.close();
+  return canvas.transferToImageBitmap ? canvas.transferToImageBitmap() : canvas;
+}
+function loadPreviewFrame(url, done) {
+  var settled = false;
+  function once(bitmap, img) { if (!settled) { settled = true; done(bitmap, img); } }
+  function viaImage() {
+    var img = new Image();
+    img.onload = function () { once(null, img); };
+    img.onerror = function () { once(null, null); };
+    img.src = url;
+  }
+  if (!window.createImageBitmap) { viaImage(); return; }
+  var xhr = new XMLHttpRequest();
+  try {
+    xhr.open('GET', url, true);
+    xhr.responseType = 'blob';
+    xhr.timeout = 15000;
+  } catch (e) { viaImage(); return; }
+  xhr.onload = function () {
+    if (xhr.status !== 200 || !xhr.response) { viaImage(); return; }
+    var blob = xhr.response;
+    queuePreviewPrep(function (next) {
+      createImageBitmap(blob).then(function (full) {
+        var bitmap = null;
+        try { bitmap = scalePreviewBitmap(full); } catch (e) { logError(e); }
+        next();
+        if (bitmap) once(bitmap, null); else viaImage();
+      }, function () { next(); viaImage(); });
+    });
+  };
+  xhr.onerror = xhr.ontimeout = viaImage;
+  xhr.send();
+}
+/* Resolve a channel's current frame AND prepare it, then swap it into the cache.
+   Each new frame has its own versionId in the URL. Until the new one is ready the
+   cache keeps the previous frame, so a card never waits on the network once a
+   channel has been warmed. */
 function fetchPreviewUrl(slug, done) {
   if (previewPending[slug]) { if (done) previewPending[slug].push(done); return; }
   previewPending[slug] = done ? [done] : [];
-  serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
-    var url = err ? null : pickPreviewUrl(raw);
-    if (url) {
-      previewCache[slug] = { t: Date.now(), url: url };
-      touchPreview(slug);
-    }
+  function finish() {
     var callbacks = previewPending[slug] || [];
     delete previewPending[slug];
-    callbacks.forEach(function (callback) { callback(); });
+    callbacks.forEach(function (callback) { try { callback(); } catch (e) { logError(e); } });
+  }
+  serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
+    var url = err ? null : pickPreviewUrl(raw);
+    var old = previewCache[slug];
+    if (!url) { finish(); return; }
+    if (old && old.url === url && old.ready) { old.t = Date.now(); finish(); return; }
+    loadPreviewFrame(url, function (bitmap, img) {
+      if (bitmap || img) {
+        releasePreview(old);
+        previewCache[slug] = { t: Date.now(), url: url, bitmap: bitmap, img: img, ready: true };
+      } else if (!old) previewCache[slug] = { t: Date.now(), url: url, bitmap: null, img: null, ready: false };
+      else old.t = Date.now();          // keep showing the last good frame; retry next round
+      finish();
+    });
   }, { priority: 2 });
 }
-// Resolve and warm thumbnails for the live rows as soon as a channel list
-// opens, one at a time (the Luna bus dislikes bursts), so browsing feels instant.
-function prefetchSidePreviews() {
-  var queue = [];
-  for (var i = 0; i < state.order.length && queue.length < 8; i++) {
-    var s = state.order[i], c = state.channels[s];
-    if (c && c.live && s !== state.current) {
-      var cached = previewCache[s];
-      if (!cached || Date.now() - cached.t >= 60000) queue.push(s);
-    }
+// Every channel whose frame a list could show: live favourites plus a temporary one.
+function previewTargets() {
+  var out = [];
+  for (var i = 0; i < state.order.length; i++) {
+    var c = state.channels[state.order[i]];
+    if (c && c.live) out.push(state.order[i]);
   }
-  (function next() {
-    if (!queue.length || (!state.sidebarOpen && !chpop.open)) return;
-    fetchPreviewUrl(queue.shift(), next);
-  })();
+  var t = state.tempChannel;
+  if (t && state.channels[t] && state.channels[t].live && out.indexOf(t) === -1) out.push(t);
+  return out;
+}
+// Drop frames for channels that went offline or left the list, so the cache stays
+// the size of the live list instead of growing through a long evening.
+function prunePreviews(keep) {
+  for (var slug in previewCache) {
+    if (keep.indexOf(slug) === -1 && !previewPending[slug]) { releasePreview(previewCache[slug]); delete previewCache[slug]; }
+  }
+}
+/* Keep every live channel's frame warm in the background, on a one-minute beat,
+   so opening the sidebar or surf list shows real frames at once. Stale ones only;
+   the request queue runs them two at a time at background priority, behind playback. */
+var previewWarmLast = 0;
+function warmPreviews(force) {
+  if (!state.ready || document.hidden || saver.on) return;
+  if (!force && Date.now() - previewWarmLast < PREVIEW_REFRESH_MS - 5000) return;
+  previewWarmLast = Date.now();
+  var targets = previewTargets();
+  prunePreviews(targets);
+  // Whatever the viewer is about to look at goes first: the highlighted row, then
+  // the list order (pinned and busiest channels are at the top).
+  var focusItem = state.sidebarOpen && state.sideItems[state.sideFocus];
+  if (focusItem && focusItem.slug && targets.indexOf(focusItem.slug) > 0) {
+    targets.splice(targets.indexOf(focusItem.slug), 1);
+    targets.unshift(focusItem.slug);
+  }
+  targets.forEach(function (slug) {
+    var cached = previewCache[slug];
+    if (!cached || Date.now() - cached.t >= PREVIEW_REFRESH_MS - 5000) fetchPreviewUrl(slug);
+  });
+}
+// Opening a list forces a pass over anything stale (the timer may be up to a
+// minute away); fresh frames are left alone, so this costs nothing when warm.
+function prefetchSidePreviews() { warmPreviews(true); }
+setInterval(function () { warmPreviews(false); }, PREVIEW_REFRESH_MS);
+// Copy a prepared frame onto the card's canvas, clipped to the card's inner
+// rounded corners (a canvas is not clipped by its parent's border-radius).
+function drawPreviewFrame(card, entry) {
+  var size = previewTargetSize();
+  var canvas = card.querySelector('canvas.prevframe');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'prevframe';
+    card.insertBefore(canvas, card.firstChild);
+  }
+  if (canvas.width !== size.w || canvas.height !== size.h) { canvas.width = size.w; canvas.height = size.h; }
+  var ctx = canvas.getContext('2d'), w = size.w, h = size.h, r = size.r;
+  ctx.clearRect(0, 0, w, h);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(w - r, 0); ctx.arcTo(w, 0, w, r, r);
+  ctx.lineTo(w, h - r); ctx.arcTo(w, h, w - r, h, r);
+  ctx.lineTo(r, h); ctx.arcTo(0, h, 0, h - r, r);
+  ctx.lineTo(0, r); ctx.arcTo(0, 0, r, 0, r);
+  ctx.closePath();
+  ctx.clip();
+  // Cover-crop. A prepared bitmap is already the card's width, so for a 16:9
+  // stream this is a straight copy; anything else is scaled here as a fallback.
+  var src = entry.bitmap || entry.img;
+  var iw = entry.bitmap ? src.width : src.naturalWidth, ih = entry.bitmap ? src.height : src.naturalHeight;
+  if (iw && ih) {
+    var s = Math.max(w / iw, h / ih);
+    ctx.drawImage(src, (iw - w / s) / 2, (ih - h / s) / 2, w / s, h / s, 0, 0, w, h);
+  }
+  ctx.restore();
 }
 // One controller per card element; each follows its own list's focus. Repeat
 // updates for the same row are no-ops (re-renders must not flash the card).
+// Where an element sits once any entrance animation has finished. The sidebar
+// slides and the surf panel scales in, and a warmed preview now appears within
+// that animation, so a getBoundingClientRect would pin it to the moving start
+// frame. Offsets ignore transforms; scrolled ancestors are subtracted by hand.
+function layoutRect(el) {
+  var x = 0, y = 0, w = el.offsetWidth, h = el.offsetHeight, n = el;
+  while (n) {
+    x += n.offsetLeft; y += n.offsetTop;
+    var p = n.offsetParent;
+    for (var a = n.parentNode; a && a !== p && a.nodeType === 1; a = a.parentNode) { x -= a.scrollLeft; y -= a.scrollTop; }
+    if (p) { x += p.clientLeft - p.scrollLeft; y += p.clientTop - p.scrollTop; }
+    n = p;
+  }
+  return { left: x, top: y, right: x + w, bottom: y + h, width: w, height: h };
+}
+// The card sits at 0,0 and moves by transform, so the CSS transition can glide it
+// from row to row on the compositor.
 function positionStreamPreview(panel, row, container) {
   if (!row || !container) return;
-  var anchor = row.getBoundingClientRect(), edge = container.getBoundingClientRect();
-  var clip = row.parentNode.getBoundingClientRect();
-  panel.style.visibility = anchor.bottom <= clip.top || anchor.top >= clip.bottom ? 'hidden' : '';
+  var anchor = layoutRect(row), edge = layoutRect(container);
+  var clip = layoutRect(row.parentNode);
+  var vis = anchor.bottom <= clip.top || anchor.top >= clip.bottom ? 'hidden' : '';
+  if (panel.style.visibility !== vis) panel.style.visibility = vis;
   var width = panel.offsetWidth, height = panel.offsetHeight;
   var viewWidth = window.innerWidth || 1920, viewHeight = window.innerHeight || 1080;
   var left = edge.right + 24;
   if (left + width > viewWidth - 24) left = edge.left - width - 24;
-  panel.style.left = Math.round(Math.max(24, Math.min(viewWidth - width - 24, left))) + 'px';
-  panel.style.top = Math.round(Math.max(24, Math.min(viewHeight - height - 24, anchor.top + (anchor.height - height) / 2))) + 'px';
+  var x = Math.round(Math.max(24, Math.min(viewWidth - width - 24, left)));
+  var y = Math.round(Math.max(24, Math.min(viewHeight - height - 24, anchor.top + (anchor.height - height) / 2)));
+  var transform = 'translate(' + x + 'px,' + y + 'px)';
+  if (panel.style.transform !== transform) panel.style.transform = transform;
 }
 function makePreviewCard(elId, currentSlugFn, positionFn) {
-  var slugShowing = null, timer = null;
+  var slugShowing = null, urlShowing = null, timer = null, titleFont = null;
   function el() { return document.getElementById(elId); }
   function hide() {
-    slugShowing = null;
+    slugShowing = null; urlShowing = null;
     var e = el();
-    if (e) e.className = 'hidden';
+    if (e && e.className !== 'hidden') e.className = 'hidden';
+  }
+  // Show the card in a state and move it to the highlighted row. Coming out of
+  // hiding it jumps straight there; while it is up it glides.
+  function reveal(e, cls) {
+    var wasHidden = e.className === 'hidden';
+    if (e.className !== cls) e.className = cls;
+    if (!wasHidden) { positionFn(e); return; }
+    e.style.transition = 'none';
+    positionFn(e);
+    void e.offsetWidth;                 // commit the jump before transitions return
+    e.style.transition = '';
   }
   function setTitle(e, slug) {
     var tEl = e.querySelector('.prevtitle');
@@ -1475,27 +1670,35 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
     tEl.style.display = title ? '' : 'none';
     if (!title) { tEl.textContent = ''; return; }
     // Same hand-rolled ".." as the channel list, so the two never disagree. The
-    // card has to be visible for clientWidth to read, hence the fallback.
-    var cs = getComputedStyle(tEl);
-    var w = tEl.clientWidth -
-            (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-    tEl.textContent = w > 0
-      ? clipWithDots(title, cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily, w)
-      : title;
+    // card has a fixed size, so its font and text width are read once. It has to be
+    // visible for clientWidth to read, hence the fallback.
+    if (!titleFont || titleFont.w <= 0) {
+      var cs = getComputedStyle(tEl);
+      titleFont = { font: cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily,
+        w: tEl.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) };
+    }
+    var clipped = titleFont.w > 0 ? clipWithDots(title, titleFont.font, titleFont.w) : title;
+    if (tEl.textContent !== clipped) tEl.textContent = clipped;
   }
-  function present(slug, url) {
+  function present(slug) {
     if (slugShowing !== slug || currentSlugFn() !== slug) return;   // focus moved meanwhile
+    var entry = previewCache[slug];
+    if (!entry || !entry.ready) return;
     var e = el();
-    e.style.backgroundImage = 'url(' + url + ')';
+    if (urlShowing !== entry.url || e._frameSlug !== slug) {
+      drawPreviewFrame(e, entry);
+      urlShowing = entry.url; e._frameSlug = slug;
+    }
+    reveal(e, '');
     setTitle(e, slug);
-    e.className = '';
-    positionFn(e);
   }
-  function preload(slug, url) {
-    var img = new Image();   // swap in only after a real load — never a black card
-    img.onload = function () { present(slug, url); };
-    img.onerror = function () { if (slugShowing === slug) hide(); };
-    img.src = url;
+  // A warmed frame is ready to draw: show it on the spot, and swap in a newer one
+  // if the warmer brings it while the card is still up.
+  function showWarm(slug) {
+    present(slug);
+    if (Date.now() - previewCache[slug].t >= PREVIEW_REFRESH_MS) {
+      fetchPreviewUrl(slug, function () { if (slugShowing === slug) present(slug); });
+    }
   }
   function update() {
     var slug = currentSlugFn();
@@ -1505,21 +1708,23 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
     clearTimeout(timer);
     if (!want) { hide(); return; }
     slugShowing = slug;
-    el().className = 'hidden';
+    if (previewReady(slug)) { showWarm(slug); return; }
+    // Not warmed yet. A card already up glides along with a spinner; a hidden one
+    // waits for the highlight to settle. Either way the network is only asked once
+    // the highlight rests.
+    var e = el();
+    urlShowing = null;
+    if (e.className !== 'hidden') { reveal(e, 'loading'); setTitle(e, slug); }
     timer = setTimeout(function () {
       if (currentSlugFn() !== slug) { hide(); return; }
-      var e = el();
-      e.className = 'loading';
-      positionFn(e);
+      reveal(e, 'loading');
       setTitle(e, slug);
-      var cached = previewCache[slug];
-      if (cached && Date.now() - cached.t < 60000) { touchPreview(slug); preload(slug, cached.url); return; }
       fetchPreviewUrl(slug, function () {
-        var c2 = previewCache[slug];
-        if (c2) preload(slug, c2.url);
-        else if (slugShowing === slug) hide();   // no thumbnail: no stuck spinner
+        if (slugShowing !== slug) return;
+        if (previewReady(slug)) present(slug);
+        else hide();                    // no thumbnail: no stuck spinner
       });
-    }, 200);
+    }, 150);
   }
   return { update: update, cancel: function () { clearTimeout(timer); hide(); } };
 }
@@ -1553,6 +1758,18 @@ function prepareSidebarSoon() {
     sidePrepareTimer = null;
     if (!document.hidden && !state.sidebarOpen) renderSidebar();
   }, 500);
+}
+// The second line: an optional category span and the rest in title colour.
+function setSideSub(el, cat, rest) {
+  var full = cat + '\n' + rest;
+  if (el.getAttribute('data-full') === full) return false;
+  el.setAttribute('data-full', full);
+  if (el.children.length !== 2) el.innerHTML = '<span class="favcat"></span><span class="favtitle"></span>';
+  el.children[0].textContent = cat;
+  el.children[1].textContent = rest;
+  el._sideParts = { cat: cat, rest: rest };
+  el._sideClipKey = null;
+  return true;
 }
 function setSideText(el, full) {
   full = String(full == null ? '' : full);
@@ -1643,6 +1860,7 @@ function renderSidebar(focusKey) {
         row.innerHTML = '<div class="favav"></div><div class="favmid"><div class="favname"></div><div class="favgame"></div></div><div class="favinfo"></div><div class="favactions"></div>';
       }
       if (row.getAttribute('data-base') !== base) {
+        if (row.hasAttribute('data-base')) textChanged = true;   // live/pinned changes the text width
         row.setAttribute('data-base', base);
         row.className = base + (row === sideFocusEl && state.playerToolFocus < 0 ? ' focused' : '');
       }
@@ -1659,10 +1877,9 @@ function renderSidebar(focusKey) {
 
       var mid = row.children[1];
       if (setSideText(mid.children[0], c.name)) textChanged = true;
-      var subtitle = c.live
-        ? ((c.category || 'Live') + (c.title ? ' · ' + c.title : ''))
-        : offlineLabel(slug);
-      if (setSideText(mid.children[1], subtitle)) textChanged = true;
+      if (c.live) {
+        if (setSideSub(mid.children[1], c.category || 'Live', c.title ? ' · ' + c.title : '')) textChanged = true;
+      } else if (setSideSub(mid.children[1], '', offlineLabel(slug))) textChanged = true;
 
       var info = row.children[2];
       var infoHtml = '';
@@ -2022,11 +2239,6 @@ function catalogueAnchoredScroll(view, nextIndex, key, saved) {
   }
   return saved;
 }
-function catalogueDetails(kind, item, node) {
-  if (!window.UIPolish) return;
-  if (kind !== 'vod' && item && !item.catalogueTerminal && item.skeleton === undefined && !item.all && node) UIPolish.details(kind, item, node);
-  else UIPolish.cancelDetails();
-}
 function catalogueMountedFocus(view, index, active, baseOf) {
   var next = view.get(index), focused = view.content.querySelectorAll('.focused');
   for (var i = 0; i < focused.length; i++) if (focused[i] !== next || !active) focused[i].className = baseOf(focused[i]);
@@ -2216,9 +2428,7 @@ function closeBrowse() {
   browse.scrollTop = grid ? grid.scrollTop : 0;
   browse.closedAt = Date.now();
   document.getElementById('browse').className = 'hidden';
-  document.getElementById('browse-tip').className = 'hidden';
   clearTimeout(browsePeekTimer);
-  if (window.UIPolish) UIPolish.cancelDetails();
   if (typeof flushChatRender === 'function') flushChatRender();
   resumePlaybackAfterBrowse();
 }
@@ -2552,7 +2762,6 @@ function applyBrowseFocus(preserveScroll) {
   view.focused = browse.gridIdx;
   var card = browse.zone === 'grid' && !preserveScroll ? view.focus(browse.gridIdx) : view.get(browse.gridIdx);
   browseFocusEl = swapFocus(view.content, browseFocusEl, card, browseCardBaseOf, browse.zone === 'grid');
-  catalogueDetails('browse', browse.zone === 'grid' ? browse.streams[browse.gridIdx] : null, card);
   scheduleBrowsePeek(); scheduleBrowseFill();
 }
 // After dwelling on a browse card, refresh its thumbnail with the channel's
@@ -2574,7 +2783,7 @@ function scheduleBrowsePeek() {
       if (th) catalogueImage(th, url, slug);
     }
     var cached = previewCache[slug];
-    if (cached && Date.now() - cached.t < 60000) { apply(cached.url); return; }
+    if (cached && Date.now() - cached.t < PREVIEW_REFRESH_MS) { apply(cached.url); return; }
     fetchPreviewUrl(slug, function () {
       var c2 = previewCache[slug];
       if (c2) apply(c2.url);
@@ -2689,7 +2898,6 @@ function openCats() {
   clearTimeout(browsePeekTimer);
   cats.zone = 'grid';
   document.getElementById('cats').className = ''; showCursor();
-  if (window.UIPolish) UIPolish.cancelDetails();
   if (warm) {
     var view = getCatsGrid(); view.container.scrollTop = cats.scrollTop; view.dirty = true;
     renderCats(true);
@@ -2717,8 +2925,7 @@ function refreshCats() {
 function closeCats() {
   cats.open = false; cats.session++; cats.fetching = false; cats.searching = false; cats.refreshing = false;
   cats.closedAt = Date.now(); cats.scrollTop = document.getElementById('cats-grid').scrollTop;
-  clearTimeout(catsSearchTimer); hideTip();
-  if (window.UIPolish) UIPolish.cancelDetails();
+  clearTimeout(catsSearchTimer);
   try { document.getElementById('cats-search').blur(); } catch (e) {}
   document.getElementById('cats').className = 'hidden';
   if (typeof flushChatRender === 'function') flushChatRender();
@@ -2804,7 +3011,6 @@ function applyCatsFocus(preserveScroll) {
   catsFocusEl = swapFocus(view.content, catsFocusEl, el, catsCardBaseOf, cats.zone === 'grid');
   document.getElementById('cats-search').classList.toggle('focused', cats.zone === 'header' && cats.headerIdx === 0);
   document.getElementById('cats-close').classList.toggle('focused', cats.zone === 'header' && cats.headerIdx === 1);
-  catalogueDetails('category', cats.zone === 'grid' ? item : null, el);
 }
 function catsMove(dx, dy) {
   if (cats.zone === 'header') {
@@ -3592,7 +3798,6 @@ function loadVods(quiet) {
 function closeVods() {
   rememberVodCatalogue(); vods.open = false; vods.session++; vods.loading = false;
   document.getElementById('vods').className = 'hidden';
-  if (window.UIPolish) UIPolish.cancelDetails();
   if (typeof flushChatRender === 'function') flushChatRender();
   if (state.current || state.vod) resumePlaybackAfterBrowse();
 }
@@ -3681,7 +3886,6 @@ function applyVodFocus(preserveScroll) {
   vodsFocusEl = swapFocus(view.content, vodsFocusEl, el, vodCardBaseOf, vods.zone === 'grid');
   document.getElementById('vods-filter').classList.toggle('focused', vods.zone === 'header' && vods.headerIdx === 0);
   document.getElementById('vods-close').classList.toggle('focused', vods.zone === 'header' && vods.headerIdx === 1);
-  catalogueDetails('vod', vods.zone === 'grid' ? item : null, el);
 }
 function vodMove(dx, dy) {
   if (vods.zone === 'header') {
@@ -3695,7 +3899,6 @@ function vodActivate() {
   if (vods.zone === 'header') { if (vods.headerIdx) closeVods(); else toggleVodHideWatched(); return; }
   if (vods.gridIdx >= vods.list.length) { if (vods.error) loadVods(false); return; }
   rememberVodCatalogue();
-  if (window.UIPolish) UIPolish.cancelDetails();
   var v = vods.list[vods.gridIdx];
   if (v && v.source) {
     vods.open = false;
@@ -3797,6 +4000,7 @@ function attachVod(source) {
       startPosition: state.vod && state.vod.resumeAt > 0 ? state.vod.resumeAt : -1
     });
     state.hls = hls;
+    qualityAlertReset();
     hls.on(Hls.Events.ERROR, function (ev, data) {
       if (data && data.details) PB.lastError = data.details;
       if (state.hls !== hls || !data || !data.fatal) return;
@@ -3820,7 +4024,7 @@ function attachVod(source) {
     });
     if (Hls.Events.LEVEL_SWITCHED) {
       hls.on(Hls.Events.LEVEL_SWITCHED, function () {
-        if (state.hls === hls) updateQualityButton();
+        if (state.hls === hls) { updateQualityButton(); checkQualityDrop(); }
       });
     }
     if (Hls.Events.FRAG_LOADED) {
@@ -4232,6 +4436,7 @@ function pickQuality(row) {
     if (state.hls && row.idx >= 0) { try { state.hls.currentLevel = row.idx; } catch (e) {} }
   }
   saveQualityPref();
+  qualityAlertReset();          // the switch it just asked for takes a moment to land
   updateQualityButton();
 }
 
@@ -4869,6 +5074,7 @@ function loadSettings() {
   settings.dimStrength = (st >= 0.1 && st <= 0.98) ? st : 0.8;
   settings.dimScope = (s.dimScope === 'all') ? 'all' : 'video';
   settings.uiText = s.uiText === 'large' ? 'large' : 'normal';
+  settings.qualityAlert = s.qualityAlert !== false;   // on unless turned off in the Quality picker
   loadChatPreferences(s);
   // Alerts + burn-in guard
   settings.alerts = pickEnum(s.alerts, ['all', 'pinned', 'off'], 'all');
@@ -4887,7 +5093,7 @@ function saveSettings() {
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
       dimStrength: settings.dimStrength, dimScope: settings.dimScope,
       alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin,
-      uiText: settings.uiText
+      uiText: settings.uiText, qualityAlert: settings.qualityAlert
     });
     if (serialized !== settingsSerialized) {
       localStorage.setItem('kicktv.settings', serialized);
@@ -5090,11 +5296,7 @@ function focusPanelRow(list, index, preserveScroll) {
     if (next) next.classList.add('focused');
     list._focusRow = next;
   }
-  if (next && !preserveScroll) {
-    var top = next.offsetTop - list.offsetTop, height = next.offsetHeight;
-    if (top < list.scrollTop) list.scrollTop = Math.max(0, top - 6);
-    else if (top + height > list.scrollTop + list.clientHeight) list.scrollTop = top + height - list.clientHeight + 6;
-  }
+  if (next && !preserveScroll) scrollIntoViewport(list, next, 6);
   return next;
 }
 function applySettingsFocus(preserveScroll) {
@@ -5205,17 +5407,21 @@ function descForSettingItem(it) {
   return '';
 }
 var settingDescTimer = null;
-function showSettingDesc(id, text, target) {
+// `owner` is 'quality' when the Quality picker asks; otherwise the balloon belongs
+// to Settings or Chat options and stays down while the picker covers them.
+function showSettingDesc(id, text, target, owner) {
   clearTimeout(settingDescTimer);
   var previous = document.getElementById(id);
   if (previous) previous.className = 'hidden';
-  settingDescTimer = setTimeout(function () { paintSettingDesc(id, text, target); }, 240);
+  settingDescTimer = setTimeout(function () { paintSettingDesc(id, text, target, owner); }, 240);
 }
-function paintSettingDesc(id, text, target) {
+function paintSettingDesc(id, text, target, owner) {
   var el = document.getElementById(id);
   if (!el) return;
+  var ownerOpen = owner === 'quality' ? qualityopt.open
+    : ((settings.open || chatopt.open) && !(qualityopt && qualityopt.open));
   if (!text || !target || !document.documentElement.contains(target) || !target.offsetHeight ||
-      (!settings.open && !chatopt.open) || updateopen || (qualityopt && qualityopt.open)) {
+      !ownerOpen || updateopen) {
     el.className = 'hidden';
     return;
   }
@@ -5244,8 +5450,6 @@ function applyDimAwareUi() {
   desc.style.filter = settingsFilter;
   var qualityHint = document.getElementById('quality-hint');
   qualityHint.style.filter = popupFilter;
-  var detail = document.getElementById('ui-details');
-  if (detail) detail.style.filter = popupFilter;
   // Settings remains readable at no darker than Medium. Every other popup uses
   // the selected strength, including Strong and Max.
   var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox'];
@@ -5269,8 +5473,6 @@ function applyDimAwareUi() {
   // the download rate over a few milliseconds, spiking the 60s graphs.
   var diag = document.getElementById('diagnostics');
   if (diag) diag.style.filter = settings.dim && settings.dimScope !== 'all' ? popupFilter : '';
-  var tip = document.getElementById('browse-tip');
-  if (tip) tip.style.filter = popupFilter;   // sits above the Everything layer, so dim it itself
   if (state.notifyCurrent) {
     document.getElementById('notify').style.filter =
       settings.dim && settings.dimScope !== 'all' ? popupFilter : '';
@@ -5372,6 +5574,70 @@ function qualityPlaybackStatus() {
       : ('Playing ' + currentLabel + ' · Source max ' + maxLabel)
   };
 }
+/* Quality drop alert. When the stream plays below what was asked for (a fixed
+   quality), or below the source's best (Auto), the Quality button shows by itself
+   for a few seconds with the bars and the resolution actually playing. A stream's
+   first seconds are ignored, since Auto always starts low and climbs, and a drop
+   must last a moment before it counts. One alert per drop: it re-arms once
+   quality recovers or falls further. */
+var QUALITY_ALERT_MS = 5000, QUALITY_ALERT_GRACE_MS = 8000, QUALITY_ALERT_SETTLE_MS = 2000;
+var qualityAlert = { from: 0, settle: null, hide: null, grace: null, showing: false, alertedIdx: -1 };
+function qualityAlertReset() {
+  qualityAlert.from = Date.now() + QUALITY_ALERT_GRACE_MS;
+  qualityAlert.alertedIdx = -1;
+  clearTimeout(qualityAlert.settle); qualityAlert.settle = null;
+  // A stream that never climbs sends no switch event after the grace; look once then.
+  clearTimeout(qualityAlert.grace);
+  qualityAlert.grace = setTimeout(checkQualityDrop, QUALITY_ALERT_GRACE_MS);
+  endQualityAlert();
+}
+// The level being played if it is below the target, else -1.
+function qualityDropLevel() {
+  var levels = state.hls && state.hls.levels;
+  if (!levels || !levels.length) return -1;
+  var cur = playingQualityLevelIndex();
+  var target = quality.sel === 'auto' ? maxQualityLevelIndex() : levelIndexForPref();
+  if (cur < 0 || target < 0 || cur === target) return -1;
+  var a = levels[cur], b = levels[target], ah = a.height || 0, bh = b.height || 0;
+  return ah < bh || (ah === bh && (a.bitrate || 0) < (b.bitrate || 0)) ? cur : -1;
+}
+function checkQualityDrop() {
+  if (!settings.qualityAlert) return;
+  var idx = qualityDropLevel();
+  if (idx === -1) { qualityAlert.alertedIdx = -1; return; }       // recovered: re-arm
+  if (qualityAlert.settle) return;
+  qualityAlert.settle = setTimeout(function () {
+    qualityAlert.settle = null;
+    var now = qualityDropLevel();
+    if (now === -1 || Date.now() < qualityAlert.from) return;
+    var levels = state.hls.levels, prev = levels[qualityAlert.alertedIdx];
+    // Already told about this drop, and it has not got worse.
+    if (prev && (levels[now].height || 0) >= (prev.height || 0)) return;
+    qualityAlert.alertedIdx = now;
+    showQualityAlert();
+  }, QUALITY_ALERT_SETTLE_MS);
+}
+function showQualityAlert() {
+  var tools = document.getElementById('player-tools');
+  if (!tools || !settings.qualityAlert || state.sidebarOpen || state.mode !== 'player' || anyPanelOpen() || saver.on || document.hidden) return;
+  qualityAlert.showing = true;
+  tools.classList.add('qalert');
+  tools.classList.remove('hidden');
+  updateQualityButton();
+  clearTimeout(qualityAlert.hide);
+  qualityAlert.hide = setTimeout(endQualityAlert, QUALITY_ALERT_MS);
+}
+function endQualityAlert() {
+  clearTimeout(qualityAlert.hide); qualityAlert.hide = null;
+  if (!qualityAlert.showing) return;
+  qualityAlert.showing = false;
+  var tools = document.getElementById('player-tools');
+  if (tools) {
+    tools.classList.remove('qalert');
+    if (!state.sidebarOpen) tools.classList.add('hidden');
+  }
+  updateQualityButton();
+}
 function hideQualityHint() {
   var hint = document.getElementById('quality-hint');
   if (hint) hint.className = 'hidden';
@@ -5399,10 +5665,12 @@ function showQualityHint() {
 }
 function updateQualityButton() {
   var el = document.getElementById('quality-button-value');
-  if (el) el.textContent = qualityCurrentLabel();
   var button = document.getElementById('quality-button');
   var mark = button && button.querySelector('.quality-mark');
   var status = qualityPlaybackStatus();
+  // During a drop alert the button says what is actually playing, not the setting.
+  var alerting = qualityAlert.showing && status.known;
+  if (el) el.textContent = alerting ? status.currentLabel : qualityCurrentLabel();
   if (button) {
     button.classList.toggle('quality-limited', status.tone === 'limited');
     button.classList.toggle('quality-low', status.tone === 'low');
@@ -5436,6 +5704,8 @@ function openQualityOpt() {
 }
 function closeQualityOpt() {
   qualityopt.open = false;
+  clearTimeout(settingDescTimer);
+  document.getElementById('settings-desc').className = 'hidden';
   document.getElementById('qualityoptmodal').className = 'hidden';
   updateQualityButton();
   if (state.sidebarOpen && !settings.open) scheduleSidePreview();
@@ -5462,18 +5732,47 @@ function renderQualityOpt() {
     el.appendChild(label); el.appendChild(check);
     list.appendChild(el);
   });
+  list._focusRow = list.children[qualityopt.focus] || null;
+  renderQualityAlertSwitch();
+  describeQualityOpt();
+}
+// The header switch. qualityopt.focus of -1 means it holds the focus.
+function renderQualityAlertSwitch() {
+  var sw = document.getElementById('qualityopt-alert');
+  if (!sw) return;
+  var cls = (settings.qualityAlert ? 'on' : '') + (qualityopt.focus === -1 ? ' focused' : '');
+  if (sw.className !== cls) sw.className = cls;
+  sw.setAttribute('aria-checked', settings.qualityAlert ? 'true' : 'false');
 }
 function qualityoptMove(delta) {
   var cur = qualityopt.focus, next = cur + delta, n = qualityopt.items.length;
-  if (next < 0 || next >= n) return;
-  if (next !== cur) {
-    qualityopt.focus = next;
-    var list = document.getElementById('qualityopt-list');
-    if (list.children[cur]) list.children[cur].classList.remove('focused');
-    focusPanelRow(list, next);
-  }
+  if (next < -1 || next >= n || next === cur) return;   // -1: the Alert switch above the list
+  qualityopt.focus = next;
+  var list = document.getElementById('qualityopt-list');
+  if (list.children[cur]) list.children[cur].classList.remove('focused');
+  if (next === -1) {
+    if (list._focusRow) list._focusRow.classList.remove('focused');
+    list._focusRow = null;
+  } else focusPanelRow(list, next);
+  renderQualityAlertSwitch();
+  describeQualityOpt();
+}
+var QUALITY_ALERT_DESC = 'Briefly shows the quality button when the stream drops below the quality you picked.';
+// Only the Alert switch needs explaining; the resolutions speak for themselves.
+function describeQualityOpt() {
+  var onSwitch = qualityopt.focus === -1;
+  showSettingDesc('settings-desc', onSwitch ? QUALITY_ALERT_DESC : '',
+    onSwitch ? document.getElementById('qualityopt-alert') : null, 'quality');
+}
+function toggleQualityAlert() {         // flips in place; the picker stays open
+  settings.qualityAlert = !settings.qualityAlert;
+  saveSettings();
+  if (!settings.qualityAlert) endQualityAlert();
+  renderQualityAlertSwitch();
+  toast('Quality alert: ' + (settings.qualityAlert ? 'On' : 'Off'));
 }
 function qualityoptActivate() {
+  if (qualityopt.focus === -1) { toggleQualityAlert(); return; }
   var row = qualityopt.items[qualityopt.focus];
   if (!row) return;
   pickQuality(row);
@@ -5677,11 +5976,7 @@ function applyChatOptFocus(preserveScroll) {
   var list = document.getElementById('chatopt-list');
   for (var i = 0; i < list.children.length; i++) list.children[i].classList.toggle('focused', i === chatopt.focus);
   var f = list.children[chatopt.focus];
-  if (f && !preserveScroll) {
-    var top = f.offsetTop - list.offsetTop;
-    if (top < list.scrollTop) list.scrollTop = top - 6;
-    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
-  }
+  if (f && !preserveScroll) scrollIntoViewport(list, f, 6);
   showSettingDesc('settings-desc', (CHATOPT_ROWS[chatopt.focus] || {}).desc || '', f);
 }
 function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= CHATOPT_ROWS.length) return; chatopt.focus = n; applyChatOptFocus(); }
@@ -5772,12 +6067,7 @@ function renderBlockedCats() {
   list.appendChild(link);
 
   var f = list.children[blockedcats.focus] || list.lastChild;
-  if (f) {
-    var top = f.offsetTop - list.offsetTop;
-    if (top < list.scrollTop) list.scrollTop = top - 6;
-    else if (top + f.offsetHeight > list.scrollTop + list.clientHeight)
-      list.scrollTop = top + f.offsetHeight - list.clientHeight + 6;
-  }
+  if (f) scrollIntoViewport(list, f, 6);
   showSettingDesc('settings-desc', SETTINGS_DESC.blockedcats, f);
 }
 function blockedcatsMove(delta) {
@@ -6402,9 +6692,10 @@ function renderChpop() {
     row.appendChild(av);
     var mid = document.createElement('div');
     mid.className = 'chmid';
-    mid.innerHTML = '<div class="chname"></div><div class="chgame"></div>';
+    mid.innerHTML = '<div class="chname"></div><div class="chgame"><span class="chcat"></span><span class="chtitle"></span></div>';
     mid.children[0].textContent = c.name || slug;
-    mid.children[1].textContent = (c.category || 'Live') + (c.title ? ' · ' + c.title : '');
+    mid.children[1].children[0].textContent = c.category || 'Live';
+    mid.children[1].children[1].textContent = c.title ? ' · ' + c.title : '';
     row.appendChild(mid);
     var vw = document.createElement('span');
     vw.className = 'chview';
@@ -6413,7 +6704,36 @@ function renderChpop() {
     row.appendChild(vw);
     box.appendChild(row);
   });
+  clipChpopText(box);
   applyChpopFocus();
+}
+// Same hand-made ".." as the sidebar (the TV draws the browser's ellipsis badly).
+// All widths are read in one pass, then the text is written.
+function clipChpopText(box) {
+  var names = box.querySelectorAll('.chname'), games = box.querySelectorAll('.chgame');
+  if (!names.length) return;
+  var nameFont = fontOf(names[0]), catFont = fontOf(games[0].children[0]), restFont = fontOf(games[0].children[1]);
+  var nameW = [], gameW = [], i;
+  for (i = 0; i < names.length; i++) { nameW.push(names[i].clientWidth); gameW.push(games[i].clientWidth); }
+  for (i = 0; i < names.length; i++) {
+    if (nameW[i] > 0) names[i].textContent = clipWithDots(names[i].textContent, nameFont, nameW[i]);
+    if (gameW[i] > 0) clipTwoParts(games[i].children[0], games[i].children[1],
+      games[i].children[0].textContent, games[i].children[1].textContent, catFont, restFont, gameW[i]);
+  }
+}
+function fontOf(el) {
+  var cs = getComputedStyle(el);
+  return cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+}
+// A category and " · title" pair sharing one line: the category keeps its room
+// first and the title gets whatever is left.
+function clipTwoParts(catEl, restEl, cat, rest, catFont, restFont, w) {
+  var catText = cat ? clipWithDots(cat, catFont, w) : '';
+  var left = w - (catText ? measureTextWidth(catText, catFont) : 0);
+  var restText = rest && catText === cat && left > 0 ? clipWithDots(rest, restFont, left) : '';
+  if (restText === '..') restText = '';   // no room for any of the title
+  if (catEl.textContent !== catText) catEl.textContent = catText;
+  if (restEl.textContent !== restText) restEl.textContent = restText;
 }
 function chpopActivate() {
   var slug = chpop.list[chpop.idx];
@@ -6464,22 +6784,6 @@ function isChUp(k) { return k === 33 || k === 427; }
 function isChDown(k) { return k === 34 || k === 428; }
 
 /* One balloon, shared by anything that wants to explain itself on hover. */
-function showTip(text, anchor) {
-  var tip = document.getElementById('browse-tip');
-  if (!tip || !anchor) return;
-  tip.textContent = text;
-  tip.style.filter = popupDimFilter();
-  tip.className = '';
-  var r = anchor.getBoundingClientRect();
-  var left = Math.max(24, Math.min(1920 - tip.offsetWidth - 24,
-                                   r.left + r.width / 2 - tip.offsetWidth / 2));
-  tip.style.left = Math.round(left) + 'px';
-  tip.style.top = Math.round(r.bottom + 14) + 'px';
-}
-function hideTip() {
-  var tip = document.getElementById('browse-tip');
-  if (tip) tip.className = 'hidden';
-}
 
 /* Small helpers */
 function toast(msg) {
@@ -6971,16 +7275,7 @@ function browseCardFromEvent(e) {
   var catsBtn = document.getElementById('browse-cats-btn');
   if (catsBtn) catsBtn.addEventListener('click', function (e) { e.stopPropagation(); openCats(); });
   document.getElementById('browse-discover').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseDiscover(); });
-  // Balloon tip explaining what Hide Followed does.
-  document.getElementById('browse-discover').addEventListener('mouseenter', function () {
-    showTip('Hides channels you already follow, so Browse only shows new finds.', this);
-  });
-  document.getElementById('browse-discover').addEventListener('mouseleave', hideTip);
   document.getElementById('browse-hideblocked').addEventListener('click', function (e) { e.stopPropagation(); toggleBrowseHideBlocked(); });
-  document.getElementById('browse-hideblocked').addEventListener('mouseenter', function () {
-    showTip('Hides streams in categories you have blocked. Picking one of those categories still shows it.', this);
-  });
-  document.getElementById('browse-hideblocked').addEventListener('mouseleave', hideTip);
   document.getElementById('vods-filter').addEventListener('click', function (e) { e.stopPropagation(); toggleVodHideWatched(); });
   // The x on the diagnostics panel switches the overlay off.
   document.getElementById('diag-close').addEventListener('click', function (e) {
@@ -7041,15 +7336,6 @@ function browseCardFromEvent(e) {
   catsGrid.addEventListener('mouseover', function (e) {
     var i = catCardIdx(e);
     if (i >= 0 && (i !== cats.gridIdx || cats.zone !== 'grid')) { cats.zone = 'grid'; cats.gridIdx = i; applyCatsFocus(); }
-    // mouseenter does not bubble, so the badge tip rides on the grid's mouseover
-    var t = e.target;
-    while (t && t !== catsGrid && !(t.getAttribute && t.getAttribute('data-act') === 'catblock')) t = t.parentNode;
-    if (t && t !== catsGrid) {
-      showTip('Blocked categories drop to the bottom of your channel list, greyed out, and stop showing live alerts.', t);
-    } else hideTip();
-  });
-  catsGrid.addEventListener('mouseout', function (e) {
-    if (!e.relatedTarget || !catsGrid.contains(e.relatedTarget)) hideTip();
   });
   catsGrid.addEventListener('click', function (e) {
     var be = e.target;    // the block badge blocks instead of selecting
@@ -7422,6 +7708,14 @@ function browseCardFromEvent(e) {
     var i = qualityoptIdx(e);
     if (i >= 0) { qualityopt.focus = i; qualityoptActivate(); }
   });
+  var qualityAlertSwitch = document.getElementById('qualityopt-alert');
+  qualityAlertSwitch.addEventListener('mouseover', function () {
+    if (qualityopt.open && qualityopt.focus !== -1) qualityoptMove(-1 - qualityopt.focus);
+  });
+  qualityAlertSwitch.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (qualityopt.open) toggleQualityAlert();
+  });
   document.getElementById('qualityoptmodal').addEventListener('click', function (e) {
     if (e.target === this) closeQualityOpt();
   });
@@ -7733,6 +8027,7 @@ function markBootReady() {
   state.ready = true;
   startPlayerPoll();
   prepareSidebarSoon();
+  setTimeout(function () { warmPreviews(false); }, 3000);   // after playback has its start
   return true;
 }
 // True once the viewer (or the deadline's idle screen) owns what is on screen, so
