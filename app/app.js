@@ -751,6 +751,27 @@ function play(slug, preserveLastVod, prefetchedRaw) {
   updateGear();
   loadChannel(slug, false, prefetchedRaw);
 }
+// A playback link carries a signed token that Kick issues for about ten minutes.
+// Read its expiry, and treat it as usable only with a margin left.
+function playbackUrlFresh(url) {
+  var m = /[?&]token=([^&]+)/.exec(url || '');
+  if (!m) return false;
+  try {
+    var body = m[1].split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    var exp = JSON.parse(atob(body)).exp;
+    return typeof exp === 'number' && exp * 1000 - Date.now() > 90000;
+  } catch (e) { return false; }
+}
+// The last started live link, so a relaunch within its lifetime can start at once.
+function rememberPlayback(slug, url) {
+  try { localStorage.setItem('kicktv.lastplay', JSON.stringify({ slug: slug, url: url })); } catch (e) {}
+}
+function recallPlayback(slug) {
+  try {
+    var v = JSON.parse(localStorage.getItem('kicktv.lastplay'));
+    return v && v.slug === slug && playbackUrlFresh(v.url) ? v.url : null;
+  } catch (e) { return null; }
+}
 // Fetch the channel again, which also hands us a fresh playback link since the
 // old one expires after a while, then start the video. A caller that already
 // holds a fresh response (boot quick-start) passes it in and skips the fetch.
@@ -784,8 +805,12 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
     }
     var c = normalize(slug, raw);
     state.channels[slug] = c;
+    start(c);
+  }
+  function start(c) {
     if (!c.live || !c.playbackUrl) { advanceOrIdle(slug); return; }   // stream ended / offline
     PB.netWaits = 0;
+    if (!isRecovery) rememberPlayback(slug, c.playbackUrl);
     saveLast(slug);
     // An automatic live fallback after a transient VOD lookup failure must not
     // erase Continue Watching. A deliberate live choice calls play() without
@@ -797,6 +822,11 @@ function loadChannel(slug, isRecovery, prefetchedRaw) {
     syncChat();                                  // connect chat for this channel if it is enabled
   }
   if (prefetchedRaw) { handle(null, prefetchedRaw); return; }
+  // The list refresh already holds a playback link for every live channel. While
+  // its token has time left, start on it and skip the lookup (a round trip to Kick
+  // on every switch). If the stream ended meanwhile, recovery looks it up afresh.
+  var known = state.channels[slug];
+  if (!isRecovery && known && known.live && playbackUrlFresh(known.playbackUrl)) { start(known); return; }
   apiGet(slug, handle, { priority: 0 });
 }
 /* Show a still while the first frame is decoding, instead of black. Live uses the
@@ -873,6 +903,19 @@ function attachStream(slug, url) {
     if (Hls.Events.FRAG_LOADED) {
       hls.on(Hls.Events.FRAG_LOADED, function (ev, d) { diagCountFrag(d); });
     }
+    // hls.js starts a live stream at its sync point, which usually lands partway
+    // into a segment. The TV's decoder then has to run from that segment's
+    // keyframe to the point before it shows anything, and waits for several more
+    // segments while it does: measured, 3s to the first frame instead of ~1.2s.
+    // Starting at the segment's own start costs at most one segment of extra
+    // delay, which Auto chat delay absorbs.
+    var aligned = false;
+    hls.on(Hls.Events.FRAG_BUFFERED, function (ev, d) {
+      if (aligned || state.hls !== hls) return;
+      aligned = true;
+      var f = d && d.frag, t = video.currentTime;
+      if (f && t > f.start + 0.2 && t < f.start + f.duration) video.currentTime = f.start + 0.05;
+    });
     try { hls.loadSource(url); hls.attachMedia(video); }
     catch (e) { recoverPlayback(slug); return; }
   } else {
@@ -4518,6 +4561,14 @@ function liveBehindSec(latency) {
 function livePositions() {
   var startMs = liveStreamStartMs();
   if (!startMs || state.vod) return null;
+  // Before the first frame, currentTime is 0 while the playlist already spans the
+  // live window, which reads as minutes behind and flashed Go live at startup.
+  // Until the picture is really playing, it counts as at the edge.
+  var video = document.getElementById('video');
+  if (!video || !(video.currentTime > 0) || video.readyState < 2) {
+    var running = Math.max(1, (Date.now() - startMs) / 1000);
+    return { startMs: startMs, edge: running, cur: running, behind: 0 };
+  }
   var latency = liveLatencySec();
   var lag = Math.max(0, latency - liveBehindSec(latency));   // what live normally trails by
   var edge = Math.max(1, (Date.now() - startMs) / 1000 - lag);
@@ -4949,7 +5000,7 @@ var settings = { open: false, focus: 0, items: [],
                  dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
                  chatSize: 'medium', chatOpacity: 'high', chatSeparate: false,
                  chatBackground: 'black', chatTransparency: 84, chatBots: 'show',
-                 chatEmotes: 'images', chatTimestamps: false, chatDelay: 0,
+                 chatEmotes: 'images', chatTimestamps: false, chatDelay: -1,
                  alerts: 'all', notifySec: 10, saverMin: 1,
                  uiText: 'normal', chatResizePreview: true };
 // Chat choices belong to the watched streamer. The previous shared choices
@@ -4977,13 +5028,13 @@ function chatOptionsFrom(source, fallback) {
     chatBots: pickEnum(s.chatBots, ['show', 'hide'], 'show'),
     chatEmotes: pickEnum(s.chatEmotes, ['images', 'text'], 'images'),
     chatTimestamps: s.chatTimestamps === true,
-    chatDelay: delay >= 0 && delay <= 60 ? delay : 0
+    chatDelay: delay >= -1 && delay <= 60 ? delay : -1   // -1: Auto, matched to the video
   };
 }
 var chatPreferencesSerialized = null, settingsSerialized = null;
 function writeChatPreferences() {
   try {
-    var serialized = JSON.stringify({ version: 1, defaults: chatPreferences.defaults,
+    var serialized = JSON.stringify({ version: 1, delayAuto: true, defaults: chatPreferences.defaults,
       profiles: chatPreferences.profiles, order: chatPreferences.order });
     if (serialized === chatPreferencesSerialized) return;
     localStorage.setItem(CHAT_PREF_KEY, serialized);
@@ -4997,20 +5048,27 @@ function loadChatPreferences(legacy) {
   var stored = null;
   try { stored = JSON.parse(localStorage.getItem(CHAT_PREF_KEY)); } catch (e) {}
   var valid = stored && stored.version === 1 && stored.defaults && stored.profiles;
-  chatPreferences.defaults = chatOptionsFrom(valid ? stored.defaults : legacy);
+  // Message delay used to default to Off, so a saved Off is almost always that old
+  // default rather than a choice. Move it to Auto once; delayAuto marks it done.
+  var migrateDelay = !(valid && stored.delayAuto);
+  function upgradeDelay(options) {
+    if (migrateDelay && options.chatDelay === 0) options.chatDelay = -1;
+    return options;
+  }
+  chatPreferences.defaults = upgradeDelay(chatOptionsFrom(valid ? stored.defaults : legacy));
   chatPreferences.defaults.chat = false; // New streamers always start with chat closed.
   chatPreferences.profiles = Object.create(null); chatPreferences.order = [];
   if (valid) {
     (Array.isArray(stored.order) ? stored.order : Object.keys(stored.profiles)).slice(-100).forEach(function (slug) {
       if (typeof slug !== 'string' || !slug || !Object.prototype.hasOwnProperty.call(stored.profiles, slug) ||
           !stored.profiles[slug] || typeof stored.profiles[slug] !== 'object' || chatPreferences.order.indexOf(slug) !== -1) return;
-      chatPreferences.profiles[slug] = chatOptionsFrom(stored.profiles[slug], chatPreferences.defaults);
+      chatPreferences.profiles[slug] = upgradeDelay(chatOptionsFrom(stored.profiles[slug], chatPreferences.defaults));
       chatPreferences.order.push(slug);
     });
   }
   chatPreferences.active = chatStreamerSlug();
   useChatOptions(chatPreferences.profiles[chatPreferences.active] || chatPreferences.defaults);
-  if (!valid || stored.defaults.chat !== false) writeChatPreferences();
+  if (!valid || migrateDelay || stored.defaults.chat !== false) writeChatPreferences();
 }
 function rememberChatPreferences() {
   var slug = chatPreferences.active;
@@ -5900,7 +5958,7 @@ var CHATOPT_ROWS = [
   { key: 'chatTransparency', label: 'Background transparency', range: { id: 'chat-transparency', max: 100, remoteStep: 5 }, desc: 'Drag the slider for any value from 0% (solid) to 100% (clear). Left and Right adjust by 5%. The message text keeps its own opacity.' },
   { key: 'chatSize',       label: 'Text size',    vals: [['small', 'Small'], ['medium', 'Medium'], ['large', 'Large']], desc: 'Font size of chat messages.' },
   { key: 'chatOpacity',    label: 'Text opacity', vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'Adjust message transparency. Controls stay fully visible when you point at chat.' },
-  { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', max: 60, remoteStep: 1 }, desc: 'Delay new messages from Off to 60 seconds to match the video and avoid spoilers. Left and Right adjust by 1 second. Changing this adjusts messages still waiting to appear.' },
+  { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', min: -1, max: 60, remoteStep: 1 }, desc: 'Auto holds each message until the video reaches the moment it was sent, so chat stays in step with the picture. Or pick Off, or a fixed 1 to 60 seconds.' },
   { key: 'chatBots',       label: 'Hide bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
   { key: 'chatEmotes',     label: 'Emote images', vals: [['text', 'Text'], ['images', 'Images']], desc: 'Show emotes as their real images, or just their names as text.' },
   { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' },
@@ -5908,7 +5966,7 @@ var CHATOPT_ROWS = [
 ];
 function chatoptValLabel(row) {
   if (row.action) return 'Reset';
-  if (row.key === 'chatDelay') return settings.chatDelay ? settings.chatDelay + 's' : 'Off';
+  if (row.key === 'chatDelay') return settings.chatDelay < 0 ? 'Auto' : (settings.chatDelay ? settings.chatDelay + 's' : 'Off');
   if (row.range) return settings[row.key] + '%';
   if (row.bool) return settings[row.key] ? 'On' : 'Off';
   for (var i = 0; i < row.vals.length; i++) if (row.vals[i][0] === settings[row.key]) return row.vals[i][1];
@@ -5960,7 +6018,7 @@ function renderChatOpt() {
     if (row.range) {
       var slider = document.createElement('input');
       slider.id = row.range.id; slider.type = 'range'; slider.className = 'chat-setting-slider';
-      slider.min = '0'; slider.max = String(row.range.max); slider.step = '1';
+      slider.min = String(row.range.min || 0); slider.max = String(row.range.max); slider.step = '1';
       slider.value = settings[row.key]; slider.tabIndex = -1;
       slider.setAttribute('aria-label', row.label);
       slider.addEventListener('input', function () { chatopt.focus = i; applyChatOptFocus(true); setChatRange(row, this.value, false); });
@@ -5983,15 +6041,16 @@ function chatoptMove(delta) { var n = chatopt.focus + delta; if (n < 0 || n >= C
 function paintChatRange(row) {
   var slider = document.getElementById(row.range.id);
   if (!slider) return;
-  var value = settings[row.key], percent = value / row.range.max * 100;
+  var min = row.range.min || 0, value = settings[row.key];
+  var percent = (value - min) / (row.range.max - min) * 100;
   slider.value = value;
   slider.style.backgroundImage = 'linear-gradient(to right, #53fc18 ' + percent + '%, #4a5156 ' + percent + '%)';
   slider.setAttribute('aria-valuetext', row.key === 'chatDelay' ?
-    (value ? value + (value === 1 ? ' second' : ' seconds') : 'Off') : value + '% transparent');
+    (value < 0 ? 'Auto' : (value ? value + (value === 1 ? ' second' : ' seconds') : 'Off')) : value + '% transparent');
   slider.parentNode.querySelector('.spill').textContent = chatoptValLabel(row);
 }
 function setChatRange(row, value, persist) {
-  settings[row.key] = Math.max(0, Math.min(row.range.max, Math.round(Number(value) || 0)));
+  settings[row.key] = Math.max(row.range.min || 0, Math.min(row.range.max, Math.round(Number(value) || 0)));
   paintChatRange(row);
   if (row.key === 'chatDelay') rescheduleChatDelay();
   else applyChatStyle();
@@ -6250,18 +6309,35 @@ var CHAT_DELAY_MAX = 1000;
 var chatPending = [], chatDelayTimer = null;
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null,
              activityMs: 120000, activityTimer: null, pongTimer: null };
+/* How long to hold a message. Auto (-1) holds it as long as the picture trails
+   real time: every segment carries the wall-clock time it was broadcast, so
+   now minus the playing frame's time is exactly how far behind the video is.
+   Until the first frame plays that is unknown, and messages wait. */
+var CHAT_DELAY_UNKNOWN_MS = 60000;
+function chatDelayMs() {
+  if (settings.chatDelay >= 0) return settings.chatDelay * 1000;
+  if (state.vod) return 0;
+  var video = document.getElementById('video'), date = null;
+  try { date = state.hls && state.hls.playingDate; } catch (e) {}
+  if (!video || !(video.currentTime > 0)) return CHAT_DELAY_UNKNOWN_MS;
+  var lag = date && date.getTime ? Date.now() - date.getTime() : liveLatencySec() * 1000;
+  return isFinite(lag) ? Math.max(0, Math.min(CHAT_DELAY_UNKNOWN_MS, lag)) : 0;
+}
 // One timer for the ordered delay queue. Channel changes and closing chat discard
 // pending messages, so nothing from the previous room can appear after switching.
+// On Auto the lag moves (buffering, a pause, Go live), so the wait is re-judged
+// at least every second.
 function scheduleChatDelay() {
   if (chatDelayTimer !== null || !chatPending.length) return;
-  var wait = Math.max(0, chatPending[0].at + settings.chatDelay * 1000 - Date.now());
+  var wait = Math.max(0, chatPending[0].at + chatDelayMs() - Date.now());
+  if (settings.chatDelay < 0) wait = Math.min(wait, 1000);
   chatDelayTimer = setTimeout(drainChatDelay, wait);
 }
 function drainChatDelay() {
   if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
   chatDelayTimer = null;
-  var now = Date.now(), count = 0;
-  while (chatPending.length && chatPending[0].at + settings.chatDelay * 1000 <= now && count < 40) {
+  var now = Date.now(), count = 0, delay = chatDelayMs();
+  while (chatPending.length && chatPending[0].at + delay <= now && count < 40) {
     var item = chatPending.shift(); count++;
     if (chat.want && settings.chat && chat.room === item.room && currentRoomId() === item.room)
       addChatMessage(item.data, item.at);
@@ -6277,7 +6353,7 @@ function queueChatMessage(data) {
   if (!data || !data.sender || !chat.want || !settings.chat) return;
   chatPending.push({ data: data, at: Date.now(), room: chat.room });
   if (chatPending.length > CHAT_DELAY_MAX) chatPending.shift();
-  if (!settings.chatDelay && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
+  if (settings.chatDelay === 0 && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
   else scheduleChatDelay();
 }
 function clearChatDelay() {
@@ -8002,6 +8078,14 @@ function quickStart(done) {
   }
   var last = loadLast();
   if (!last) { done(false); return; }
+  // Relaunched within the last link's lifetime: start on it without a lookup.
+  var cached = state.channels[last], url = recallPlayback(last);
+  if (url && cached && cached.live) {
+    cached.playbackUrl = url;
+    play(last);
+    done(true);
+    return;
+  }
   apiGet(last, function (err, raw) {
     // A slow lookup can land long after the boot deadline handed over control.
     if (state.current || state.vod || (state.ready && bootChoiceSuperseded())) { done(true); return; }
