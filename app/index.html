@@ -173,6 +173,13 @@
       <span class="cbitem" data-act="dim"><span class="cbkey">0</span>Dim</span>
     </div>
     <div id="player-tools" class="hidden">
+      <div id="wtw-button" class="player-tool" title="What to watch?">
+        <span class="player-tool-icon">
+          <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="12" rx="2.5" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M10.2 8.6v4.8l4.1-2.4z" fill="currentColor"/><path d="M8 20h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        <span class="player-tool-name">What to watch?</span>
+      </div>
       <div id="quality-button" class="player-tool" title="Stream quality">
         <span class="player-tool-icon quality-mark">
           <svg viewBox="0 0 24 24" fill="none">
@@ -259,6 +266,32 @@
     </div>
   </div>
 
+  <div id="wtwmodal" class="hidden">
+    <div id="wtwbox">
+      <div id="wtw-head">What to watch<span id="wtw-sub">Past videos from who you watch most</span></div>
+      <div id="wtw-list"></div>
+    </div>
+  </div>
+
+  <div id="backupmodal" class="hidden">
+    <div id="backupbox">
+      <div id="backup-head">Backup &amp; restore</div>
+      <div id="backup-main">
+        <canvas id="backup-qr" width="320" height="320"></canvas>
+        <div id="backup-side">
+          <div id="backup-steps">Scan with your phone's camera. It needs to be on the same network as the TV.</div>
+          <div id="backup-does">Download a backup, restore one, or add channels by typing their names on the phone.</div>
+          <div id="backup-url"></div>
+          <div id="backup-status"></div>
+        </div>
+      </div>
+      <div id="backup-ask" class="hidden">
+        <div id="backup-question"></div>
+        <div id="backup-choices"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="settings-desc" class="hidden"></div>
 
   <div id="updatemodal" class="hidden">
@@ -275,10 +308,29 @@
 
   <script src="hls.min.js"></script>
   <script src="favorites.js"></script>
+  <script src="qrcode.js"></script>
   <script src="ui-runtime.js"></script>
   <script src="virtual-grid.js"></script>
   <script src="ui-polish.js"></script>
   <script src="chat-window.js"></script>
+  <script src="js/core.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/playback.js"></script>
+  <script src="js/infobar.js"></script>
+  <script src="js/sidebar.js"></script>
+  <script src="js/add.js"></script>
+  <script src="js/browse.js"></script>
+  <script src="js/categories.js"></script>
+  <script src="js/vods.js"></script>
+  <script src="js/player-options.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/chat-overlay.js"></script>
+  <script src="js/saver.js"></script>
+  <script src="js/surf.js"></script>
+  <script src="js/helpers.js"></script>
+  <script src="js/whattowatch.js"></script>
+  <script src="js/backup.js"></script>
+  <script src="js/input.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

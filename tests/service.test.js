@@ -18,9 +18,9 @@ function harness() {
     }
   };
   const timers = [];
-  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : assert.fail(name), Buffer, process,
+  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : name === 'http' ? require('node:http') : name === 'os' ? require('node:os') : assert.fail(name), Buffer, process,
     setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
-    clearTimeout: t => { if (t) t.cleared = true; } };
+    clearTimeout: t => { if (t) t.cleared = true; }, setInterval, clearInterval };
   vm.createContext(context); vm.runInContext(source, context);
   function begin(payload) {
     const replies = []; handlers.fetch({ payload, respond: value => replies.push(value) });
@@ -147,4 +147,27 @@ test('slow, oversized and unsendable requests still answer exactly once', () => 
   for (const p of ['/api/v2/channels/a b', '/api/v2/channels/ç']) {
     const r = h.begin({ path: p }); assert.equal(r.replies[0].error, 'bad path');
   }
+});
+
+test('share server: page, backup download, restore inbox, token guard, stop', async () => {
+  const h = harness();
+  const call = (name, payload) => new Promise(resolve => h.handlers[name]({ payload, respond: resolve }));
+  const token = 'abcdefghijkl1234';
+  const started = await call('shareStart', { token, backup: '{"v":1}', names: ['<b>xqc</b>'] });
+  assert.equal(started.ok, true);
+  const base = 'http://127.0.0.1:' + started.port + '/' + token + '/';
+  const page = await (await fetch(base)).text();
+  assert.match(page, /&lt;b&gt;xqc&lt;\/b&gt;/, 'channel names are escaped');
+  assert.equal(await (await fetch(base + 'backup.json')).text(), '{"v":1}');
+  assert.equal((await fetch('http://127.0.0.1:' + started.port + '/wrongtoken12345/')).status, 404);
+  const sent = await (await fetch(base + 'restore', { method: 'POST', body: JSON.stringify({ kind: 'names', data: ['a', 'b'] }) })).json();
+  assert.equal(sent.ok, true);
+  const bad = await fetch(base + 'restore', { method: 'POST', body: '{"kind":"evil"}' });
+  assert.equal(bad.status, 400);
+  const polled = await call('sharePoll', { token });
+  assert.equal(JSON.stringify([polled.running, polled.visits, polled.inbox.kind, polled.inbox.data]), JSON.stringify([true, 1, 'names', ['a', 'b']]));
+  assert.equal((await call('sharePoll', { token })).inbox, null, 'the inbox is handed over once');
+  assert.equal((await call('sharePoll', { token: 'other' })).running, false);
+  await call('shareStop', {});
+  await assert.rejects(fetch(base));
 });

@@ -16,6 +16,14 @@ This project bundles the following third-party software.
 The full Apache 2.0 license text is available at
 https://www.apache.org/licenses/LICENSE-2.0 and in the hls.js repository.
 
+## QR Code Generator for JavaScript
+
+- File: `app/qrcode.js`
+- Version: 2.0.4 (npm `qrcode-generator`)
+- Project: https://github.com/kazuhikoarase/qrcode-generator
+- License: **MIT** — Copyright (c) 2009 Kazuhiko Arase. The notice is retained
+  at the top of the file.
+
 ---
 
 All other source code in this repository is original work by the project

@@ -26,7 +26,7 @@ jobs:
 
       - name: App scripts parse as ES5
         run: |
-          for f in app/*.js; do
+          for f in app/*.js app/js/*.js; do
             [ "$f" = "app/hls.min.js" ] && continue
             npx --yes acorn@8 --ecma5 --silent "$f" || { echo "::error file=$f::not valid ES5"; exit 1; }
           done
