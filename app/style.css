@@ -12,6 +12,16 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 /* Player and video */
 #player { background: #000; position: relative; }
 #video { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; background: #000; object-fit: contain; }
+/* With the sidebar open the picture shrinks into the free space right of it,
+   below the info bar and above the seek bar, so the whole frame stays visible.
+   No transition: animating the hardware plane drops frames on this TV.
+   !important: the webOS runtime writes inline left/width on the <video>. */
+#player.sidecollapse #video, #player.sidecollapse #poster {
+  left: 490px !important; top: 170px !important; width: 1410px !important; height: 660px !important;
+}
+#player.sidecollapse[data-vod] #video, #player.sidecollapse[data-vod] #poster {
+  top: 40px !important; height: 690px !important;
+}
 /* Still frame held over the video plane until real frames arrive, so switching
    channels does not flash black. The plane is composited by the TV, not the
    browser, so a <video poster> never shows — this has to be its own layer.

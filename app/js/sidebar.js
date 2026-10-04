@@ -53,6 +53,7 @@ function openSidebar() {
     state.sidebarOpen = true;
     if (state.notifyCurrent) pauseNotify();
     document.getElementById('sidebar').className = 'open';
+    document.getElementById('player').classList.add('sidecollapse');
     sidePreviewArmed = !state.vod;      // in a VOD, wait for a move or a hover
     var prefer = (state.current && state.order.indexOf(state.current) !== -1)
       ? state.current : null;
@@ -91,6 +92,7 @@ function closeSidebar() {
   state.sidebarOpen = false;
   state.backOpenedSidebar = false;   // however this list closed, the exit is no longer armed
   document.getElementById('sidebar').className = '';
+  document.getElementById('player').classList.remove('sidecollapse');
   document.getElementById('overlay').className = 'hidden';
   hideLiveBar();
   clearTimeout(overlayTimer);
@@ -801,7 +803,7 @@ function activateSide() {
     renderSidebar('offline-group');
     resetIdle();
   } else if (item.type === 'add') openAdd();
-  else switchTo(item.slug);
+  else switchTo(item.slug, true);           // stay open: the video is shrunk beside it
 }
 var pendingAction = null;
 function askRemove(slug) {

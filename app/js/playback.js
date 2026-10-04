@@ -512,11 +512,11 @@ function startWatchdog(slug) {
 function stopWatchdog() {
   if (PB.watchdog) { clearInterval(PB.watchdog); PB.watchdog = null; }
 }
-function switchTo(slug) {
+function switchTo(slug, keepSidebar) {
   if (!slug) return;
   var c = state.channels[slug];
   if (c && !c.live) { openVods(slug); return; }   // offline: show the channel's past videos
-  closeSidebar();
+  if (keepSidebar) resetIdle(); else closeSidebar();
   if (slug !== state.current) play(slug);
 }
 function openVodsForContext() {
