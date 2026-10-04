@@ -237,6 +237,14 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    every step. The colour is the panel's own, so nothing visibly changes. */
 #fav-list { height: 984px; overflow-x: hidden; overflow-y: scroll; padding: 8px 0; background: #1b1e20; }
 #fav-list::-webkit-scrollbar { display: none; }
+/* "More channels above": a green edge glow under the header while the list is
+   scrolled down. Small and static (shown/hidden, no transition), so it costs no
+   frames; it sits over the list and lets clicks through. */
+#fav-more-up {
+  position: absolute; left: 0; right: 0; top: 87px; height: 34px; pointer-events: none;
+  border-top: 2px solid #53fc18;
+  background: linear-gradient(to bottom, rgba(83,252,24,0.32), rgba(83,252,24,0));
+}
 .favrow {
   height: 76px; padding: 0 20px; margin: 2px 8px;
   border-radius: 8px; border-left: 5px solid transparent;

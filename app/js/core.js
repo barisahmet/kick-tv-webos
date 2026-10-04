@@ -51,7 +51,7 @@ var state = {
   offlineExpanded: false,
   suppressNudgeUntil: 0  // after a deliberate hide, pointer moves will not reopen the UI until this time
 };
-var IDLE_MS = 5000;
+var IDLE_MS = 10000;
 var NUDGE_SUPPRESS_MS = 10000;   // grace after click/Back hides the sidebar
 
 // Playback state and the numbers that control how we recover from drops.

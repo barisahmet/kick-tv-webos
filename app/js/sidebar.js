@@ -871,3 +871,12 @@ function refreshSide() {
   });
 }
 
+// Glow under the header while channels are hidden above the scrolled list.
+(function () {
+  var list = document.getElementById('fav-list'), glow = document.getElementById('fav-more-up');
+  var shown = false;
+  list.addEventListener('scroll', function () {
+    var want = list.scrollTop > 4;
+    if (want !== shown) { shown = want; glow.className = want ? '' : 'hidden'; }
+  }, { passive: true });
+})();
