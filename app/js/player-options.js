@@ -558,7 +558,7 @@ function drawDiagnostics() {
     firstLine,
     resolution + ' · ' + qualityText,
     'Frames ' + (frames.total || '—') + ' · Dropped ' + frames.dropped +
-      (frames.total ? ' (' + droppedPct.toFixed(2) + '%)' : ''),
+      (frames.total ? ' (' + droppedPct.toFixed(2) + '%)' : '') + ' · Freezes ' + (PB.freezes || 0),
     'Recovery ' + PB.reconnects + ' · Net ' + PB.netRetries + ' · Media ' + PB.mediaRetries +
       ' · Chat ' + diagnosticChatStatus(),
     'Service ' + (state.netDown ? 'offline' : 'online') +

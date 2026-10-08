@@ -767,7 +767,7 @@ function playVod(v, queue, queueIndex, slug, opts) {
                 recStartMs: liveRewind ? opts.recStartMs : 0, recEndMs: 0 };
   applyStreamerChatPreferences();
   if (!liveRewind) saveLastVod(vodSlug, v, state.vod.name);
-  PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = '';
+  PB.slug = null; PB.reloading = false; PB.reconnects = 0; PB.lastError = ''; PB.freezes = 0;
   setBanner('');
   showState('hidden');
   updateGear();
@@ -860,6 +860,7 @@ function attachVod(source) {
   }
   PB.active = true;
   playVideo(video);
+  if (state.hls) startFreezeGuard(state.hls, reloadVod);
 }
 // Every segment of a live recording carries its wall-clock time. The first one
 // pins where the recording starts, which turns the requested moment into an

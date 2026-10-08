@@ -183,7 +183,7 @@ function play(slug, preserveLastVod, prefetchedRaw) {
   state.tempChannel = !isFavorite(slug) ? slug : null;
   if (state.tempChannel) rememberRecent(slug);   // offered back by the Add dialog
   PB.slug = slug; PB.session = (PB.session || 0) + 1; PB.reloading = false; PB.netRetries = 0; PB.mediaRetries = 0;
-  PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = ''; PB.netWaits = 0;
+  PB.recoverCount = 0; PB.endedCount = 0; PB.reconnects = 0; PB.lastError = ''; PB.netWaits = 0; PB.freezes = 0;
   PB.userSeekUntil = 0; PB.rewound = false;
   setBanner('');
   showState('hidden');
@@ -363,6 +363,7 @@ function attachStream(slug, url) {
   PB.active = true;
   playVideo(video);
   startWatchdog(slug);
+  if (state.hls) startFreezeGuard(state.hls, function () { recoverPlayback(slug); });
 }
 function playVideo(video) {
   try {
@@ -511,6 +512,61 @@ function startWatchdog(slug) {
 }
 function stopWatchdog() {
   if (PB.watchdog) { clearInterval(PB.watchdog); PB.watchdog = null; }
+}
+/* After a seek or buffer flush the TV's hardware decoder can lose sync: the
+   picture holds for up to ~1.5s every few seconds and then jumps to the next
+   keyframe, while the sound and the media clock carry on. There is no error, no
+   'waiting', the buffer is full and the dropped-frame count stays flat, so the
+   watchdog above never sees it. Only rebuilding the decoder clears it (measured:
+   9 freezes in 40s before an in-place reconnect, none after). */
+var freezeGuard = { timer: null, video: null, onSeek: null, lastFixAt: 0 };
+// One sample of the play position. Returns true when the freezes add up.
+function freezeGuardStep(g, now, t, ahead) {
+  if (t === g.lastT) {
+    if (!g.heldSince) g.heldSince = g.lastAt;
+  } else {
+    var held = g.heldSince ? now - g.heldSince : 0;
+    // the position moved on at least as fast as the clock: a frozen picture,
+    // not real buffering (that would also drop readyState)
+    if (held >= FREEZE_MIN_MS && g.lastT >= 0 && t - g.lastT >= held * 0.0006 && ahead >= 2) {
+      PB.freezes = (PB.freezes || 0) + 1;
+      g.hits.push(now);
+    }
+    g.heldSince = 0;
+    g.lastT = t;
+  }
+  g.lastAt = now;
+  while (g.hits.length && now - g.hits[0] > FREEZE_WINDOW_MS) g.hits.shift();
+  return g.hits.length >= FREEZE_HITS;
+}
+function startFreezeGuard(hls, onFreeze) {
+  stopFreezeGuard();
+  var video = document.getElementById('video');
+  var g = { lastT: -1, lastAt: 0, heldSince: 0, hits: [], quietUntil: Date.now() + FREEZE_QUIET_MS };
+  freezeGuard.video = video;
+  freezeGuard.onSeek = function () { g.quietUntil = Date.now() + FREEZE_QUIET_MS; g.hits = []; };
+  video.addEventListener('seeking', freezeGuard.onSeek);
+  freezeGuard.timer = setInterval(function () {
+    if (state.hls !== hls) { stopFreezeGuard(); return; }
+    var now = Date.now();
+    if (video.paused || video.seeking || video.readyState < 3 ||
+        now < g.quietUntil || now < PB.userSeekUntil) {
+      g.lastT = -1; g.heldSince = 0;
+      return;
+    }
+    if (!freezeGuardStep(g, now, video.currentTime, diagnosticBufferAhead(video))) return;
+    g.hits = [];
+    if (now - freezeGuard.lastFixAt < FREEZE_COOLDOWN_MS) return;
+    freezeGuard.lastFixAt = now;
+    PB.lastError = 'decoderFreeze';
+    stopFreezeGuard();
+    onFreeze();
+  }, FREEZE_SAMPLE_MS);
+}
+function stopFreezeGuard() {
+  if (freezeGuard.timer) { clearInterval(freezeGuard.timer); freezeGuard.timer = null; }
+  if (freezeGuard.video) freezeGuard.video.removeEventListener('seeking', freezeGuard.onSeek);
+  freezeGuard.video = null; freezeGuard.onSeek = null;
 }
 function switchTo(slug, keepSidebar) {
   if (!slug) return;

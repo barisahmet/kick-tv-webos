@@ -64,6 +64,13 @@ var MAX_NET_RETRY = 6;     // quiet reload tries before we go fetch a brand new 
 var MAX_MEDIA_RETRY = 3;   // decode recovery tries before we reload the whole stream
 var WATCHDOG_MS = 5000;    // how often the freeze checker runs
 var STALL_TICKS = 3;       // three checks with no progress, about fifteen seconds, counts as frozen
+// Decoder-freeze guard (see startFreezeGuard): short picture holds that end in a jump.
+var FREEZE_SAMPLE_MS = 100;       // how often the play position is sampled
+var FREEZE_MIN_MS = 300;          // a held picture this long, with buffer ahead, is one freeze
+var FREEZE_HITS = 3;              // this many freezes...
+var FREEZE_WINDOW_MS = 30000;     // ...inside this window means the decoder is out of sync
+var FREEZE_QUIET_MS = 8000;       // ignore holds right after a start or a seek
+var FREEZE_COOLDOWN_MS = 120000;  // at most one in-place reconnect per two minutes
 
 /* Favorites, pins, and last watched */
 // The follow list exists only here, so a value that will not read back as a list
