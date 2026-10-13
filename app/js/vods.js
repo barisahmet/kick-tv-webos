@@ -567,7 +567,7 @@ function openVods(slug) {
   vods.open = true; vods.session++; vods.slug = slug; vods.zone = 'grid'; vods.error = false;
   vods.loading = false; vods.hideWatched = loadVodHideWatchedPref();
   state.vodReturn = state.current || state.vodReturn;
-  showCursor(); closeSidebar(); pausePlaybackForBrowse();
+  showCursor(); closeSidebar();
   document.getElementById('vods').className = '';
   var name = (state.channels[slug] && state.channels[slug].name) || slug;
   document.getElementById('vods-title').textContent = 'Past videos - ' + name;
@@ -619,7 +619,6 @@ function closeVods() {
   rememberVodCatalogue(); vods.open = false; vods.session++; vods.loading = false;
   document.getElementById('vods').className = 'hidden';
   if (typeof flushChatRender === 'function') flushChatRender();
-  if (state.current || state.vod) resumePlaybackAfterBrowse();
 }
 function renderVods(preserveScroll) {
   var view = getVodGrid(), saved = view.container.scrollTop, items = vods.list.slice();

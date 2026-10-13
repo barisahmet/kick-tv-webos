@@ -17,7 +17,7 @@ var BROWSE_MEMORY_MS = 60000;     // reopen inside this window and the loaded po
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                cats: [], session: 0, closedAt: 0, scrollTop: 0, langMenuOpen: false,
-               sort: 'viewers', discover: false, hideBlocked: true, renderLimit: 60,
+               discover: false, hideBlocked: true, renderLimit: 60,
                fillTimer: null, retryTimer: null, retryCount: 0, error: false, capped: false, headerIdx: 3, pinIdx: 0 };
 var CATALOGUE_LIMIT = 2000;
 var browseGridView = null, catsGridView = null, vodGridView = null;
@@ -88,29 +88,6 @@ function getBrowseGrid() {
     browseFocusEl = catalogueMountedFocus(browseGridView, browse.gridIdx, browse.zone === 'grid', browseCardBaseOf);
   } });
   return browseGridView;
-}
-var BROWSE_SORTS = [
-  { key: 'viewers', label: 'Top' },
-  { key: 'newest',  label: 'New' },
-  { key: 'small',   label: 'Small' }
-];
-// The sort chip is gone from the header; Browse always orders by viewers. The
-// sort machinery is left in place so the control can come back cheaply.
-function renderBrowseSort() {
-  var el = document.getElementById('browse-sort');
-  if (!el) return;
-  for (var i = 0; i < BROWSE_SORTS.length; i++) {
-    if (BROWSE_SORTS[i].key === browse.sort) { el.textContent = 'Sort: ' + BROWSE_SORTS[i].label; return; }
-  }
-}
-function cycleBrowseSort() {
-  var idx = 0;
-  for (var i = 0; i < BROWSE_SORTS.length; i++) if (BROWSE_SORTS[i].key === browse.sort) { idx = i; break; }
-  var next = BROWSE_SORTS[(idx + 1) % BROWSE_SORTS.length];
-  browse.sort = next.key;
-  renderBrowseSort();
-  renderBrowse();
-  toast('Sort: ' + (next.key === 'viewers' ? 'Most viewers' : (next.key === 'newest' ? 'Recently started' : 'Small streams first')));
 }
 /* "Hide Followed": hide channels you already follow — browsing is for finding
    new ones. The preference persists across opens. */
@@ -204,7 +181,6 @@ function openBrowse(categorySlug, categoryName) {
   browse.open = true;
   showCursor();
   closeSidebar();
-  pausePlaybackForBrowse();
   document.getElementById('browse').className = '';
   loadBrowseLangPref();
   browse.langMenuOpen = false;      // never reopen straight into the dropdown
@@ -219,7 +195,6 @@ function openBrowse(categorySlug, categoryName) {
     browse.session++;            // orphan anything still in flight from the last opening
     browse.fetching = false;     // ...and clear the flag it guards, or Browse never loads again
     browse.zone = 'grid';
-    renderBrowseSort();
     renderBrowseDiscover();
     renderBrowseHideBlocked();
     updateBrowseTitle();
@@ -237,10 +212,8 @@ function openBrowse(categorySlug, categoryName) {
   browse.streams = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
   browse.renderLimit = 60; browse.error = false; browse.capped = false;
   getBrowseGrid().clear();
-  browse.sort = 'viewers';
   browse.discover = loadBrowseDiscoverPref();
   browse.hideBlocked = loadBrowseHideBlockedPref();
-  renderBrowseSort();
   renderBrowseDiscover();
   renderBrowseHideBlocked();
   renderPinnedCatChips();
@@ -268,7 +241,6 @@ function closeBrowse() {
   document.getElementById('browse').className = 'hidden';
   clearTimeout(browsePeekTimer);
   if (typeof flushChatRender === 'function') flushChatRender();
-  resumePlaybackAfterBrowse();
 }
 function cancelBrowseFill() {
   clearTimeout(browse.fillTimer);
@@ -500,7 +472,7 @@ function refilterBrowse() { renderBrowse(false, true); }
 function browseFilterKey() {
   return [(browse.raw || []).length, settings.hideBots ? 1 : 0, browse.langs.join(','),
           browse.discover ? getFavorites().join(',') : '', JSON.stringify(browse.cats),
-          browse.hideBlocked ? JSON.stringify(getBlockedCats()) : '', browse.sort].join('|');
+          browse.hideBlocked ? JSON.stringify(getBlockedCats()) : ''].join('|');
 }
 var browseFilterMemo = { key: null, raw: null, list: null };
 function renderBrowse(preserveScroll, filterChanged) {
@@ -533,16 +505,7 @@ function renderBrowse(preserveScroll, filterChanged) {
       return !(c0 && isCatBlocked(c0.slug));
     });
   }
-  if (browse.sort === 'small') {
-    list.sort(function (a, b) { return (a.viewer_count || 0) - (b.viewer_count || 0); });
-  } else if (browse.sort === 'newest') {
-    for (var pi = 0; pi < list.length; pi++) {
-      if (list[pi].__startTs === undefined) list[pi].__startTs = parseKickTime(list[pi].created_at);
-    }
-    list.sort(function (a, b) { return (b.__startTs || 0) - (a.__startTs || 0); });
-  } else {
-    list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
-  }
+  list.sort(function (a, b) { return (b.viewer_count || 0) - (a.viewer_count || 0); });
   browseFilterMemo = { key: fkey, raw: browse.raw, list: list.slice() };
   finishRenderBrowse(list, preserveScroll, filterChanged, onStatus, identity);
 }

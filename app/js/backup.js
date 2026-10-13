@@ -67,7 +67,7 @@ function closeBackup() {
   clearInterval(backup.timer); backup.timer = null;
   document.getElementById('backupmodal').className = 'hidden';
   lunaCall('shareStop', {}, function () {});
-  if (settings.open) renderSettings();     // brings the row's description back
+  if (settings.open) { renderSettings(); touchSettings(); }     // brings the row's description back
 }
 function startBackupShare() {
   if (backup.starting) return;

@@ -23,6 +23,12 @@ window.runFixesTests = async function (assert) {
   assert(!alertAllowed({ slug: 'alpha' }), 'no "is online" alert for the channel already playing');
 
   // Removing the channel you are watching keeps it in the list as a temporary row.
+  askRemove('alpha');
+  assert(document.getElementById('confirm-yes').classList.contains('focused') && !document.getElementById('confirm-no').classList.contains('focused'), 'confirm dialog starts focused on Remove');
+  key(39); // Right -> Cancel
+  assert(document.getElementById('confirm-no').classList.contains('focused') && !document.getElementById('confirm-yes').classList.contains('focused'), 'Right moves confirm focus to Cancel');
+  key(13); // OK on Cancel
+  assert(isFavorite('alpha') && state.mode === 'player', 'OK on Cancel keeps the channel and closes the dialog');
   askRemove('alpha'); confirmYes();
   assert(!isFavorite('alpha') && state.tempChannel === 'alpha', 'removed-but-playing channel becomes the temporary row');
   renderSidebar();
@@ -34,6 +40,12 @@ window.runFixesTests = async function (assert) {
   settings.open = true;
   assert(anyPanelOpen() && bootChoiceSuperseded(), 'an open Settings panel counts as the viewer taking over');
   settings.open = false;
+  wtw.open = true;
+  assert(anyPanelOpen(), 'What to watch counts as an open panel');
+  wtw.open = false;
+  backup.open = true;
+  assert(anyPanelOpen(), 'Backup counts as an open panel');
+  backup.open = false;
 
   // Stop always stops; Play/Pause work with the list open.
   var video = document.getElementById('video'), paused = 0;

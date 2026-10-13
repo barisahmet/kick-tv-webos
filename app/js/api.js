@@ -244,7 +244,8 @@ function alertAllowed(item) {
 // has to be added here and they cannot drift apart again.
 function anyPanelOpen() {
   return !!(browse.open || vods.open || cats.open || chpop.open || settings.open || dimopt.open ||
-    chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen);
+    chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen ||
+    (wtw && wtw.open) || (backup && backup.open));
 }
 function notifyUiBusy() {
   return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||

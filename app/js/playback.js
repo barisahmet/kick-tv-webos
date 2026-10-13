@@ -371,15 +371,6 @@ function playVideo(video) {
     if (p && p.catch) p.catch(function () {});   // play() may be blocked or interrupted, watchdog covers it
   } catch (e) {}
 }
-// While the browse popup is up, stop decoding/loading the stream so the popup
-// stays smooth, then pick playback back up when it closes.
-var resumeWasPaused = false;   // unused while the pause-under-popups experiment is in
-/* EXPERIMENT — playback keeps running under the popups.
-   These used to pause the video and stop the loader so a popup stayed smooth on
-   the TV's limited decode budget. Both are now no-ops so the stream continues
-   behind Browse and Past videos. Revert this commit to restore the old behaviour. */
-function pausePlaybackForBrowse() {}
-function resumePlaybackAfterBrowse() {}
 function onNetworkError(slug, hls, details) {
   if (state.current !== slug) return;
   // After a fatal manifest error hls.js has no levels, so startLoad() is a no-op

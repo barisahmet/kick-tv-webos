@@ -108,9 +108,12 @@ var settingsIdleTimer = null;
 function touchSettings() {
   if (!settings.open && !(qualityopt && qualityopt.open) && !(chatopt && chatopt.open)) return;
   clearTimeout(settingsIdleTimer);
+  if (backup && backup.open) return;
   settingsIdleTimer = setTimeout(closeSettingsStack, SETTINGS_IDLE_MS);
 }
 function closeSettingsStack() {
+  if (backup && backup.open) closeBackup();
+  if (wtw && wtw.open) closeWhatToWatch();
   updateopen = false;
   dimopt.open = false;
   chatopt.open = false;

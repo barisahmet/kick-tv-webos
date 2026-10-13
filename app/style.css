@@ -547,7 +547,7 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 }
 #confirm-yes { background: #e91916; color: #fff; }
 #confirm-no { background: #3a3d40; color: #efeff1; }
-#confirmbuttons button:hover, #confirmbuttons button:focus { border-color: #fff; }
+#confirmbuttons button:hover, #confirmbuttons button:focus, #confirmbuttons button.focused { border-color: #fff; }
 
 /* Temporary (browsed, not-followed) channel row: distinct amber tint + add button */
 .favrow.temp { background: rgba(255,176,32,0.13); }
@@ -638,12 +638,12 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .pcatx:hover { color: #ff5f52; }
 /* The transparent border matters: #browse-cats-btn and #browse-langbtn both carry
    one, so without it these chips render 4px shorter and narrower than neighbours. */
-#browse-sort, #browse-discover, #browse-hideblocked, #vods-filter {
+#browse-discover, #browse-hideblocked, #vods-filter {
   font-size: 22px; padding: 7px 18px; margin-right: 14px; border-radius: 18px;
   background: #1a201b; color: #b9bcbb; cursor: pointer; white-space: nowrap;
   border: 2px solid transparent;
 }
-#browse-sort:hover, #browse-discover:hover, #browse-hideblocked:hover, #vods-filter:hover { border-color: #53fc18; color: #fff; }
+#browse-discover:hover, #browse-hideblocked:hover, #vods-filter:hover { border-color: #53fc18; color: #fff; }
 #browse-discover.on, #browse-hideblocked.on, #vods-filter.on { background: #143206; color: #53fc18; }
 /* Hairline divider in the Browse header: Categories | filters | languages.
    The chip before each one already carries its own margin-right, so this only
@@ -670,23 +670,6 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .skline.w1 { width: 70%; }
 .skline.w2 { width: 45%; }
 
-/* Loading card at the end of the grid: an indeterminate bar on one small
-   element (transform-only animation, cheap to composite). */
-/* Matches a real card's rendered height (408x334, measured on the TV) so the row it
-   sits in does not change height when it appears. */
-.bloadcard {
-  height: 334px; display: flex; align-items: center; justify-content: center;
-  background: #14181a;
-}
-.loadtrack {
-  width: 60%; height: 8px; border-radius: 4px;
-  background: rgba(255,255,255,0.12); overflow: hidden;
-}
-.loadfill {
-  width: 40%; height: 100%; border-radius: 4px; background: #53fc18;
-  animation: loadslide 1.1s ease-in-out infinite alternate;
-}
-@keyframes loadslide { from { transform: translateX(-40%); } to { transform: translateX(190%); } }
 /* Pin badge on category banners */
 .catpin {
   position: absolute; top: 8px; left: 8px;   /* top-right belongs to the viewer count */
@@ -1408,8 +1391,6 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   font-size: 26px; font-weight: 800; color: #fff;
   padding: 4px 26px 14px; border-bottom: 1px solid #2f3438; margin-bottom: 6px;
 }
-.srow .sgear { color: #9a9a9d; margin-left: auto; margin-right: 14px; cursor: pointer; display: inline-flex; align-items: center; }
-.srow .sgear:hover { color: #53fc18; }
 
 /* Live chat options popup, opened from the gear on the Settings "Live chat" row */
 #chatoptmodal {

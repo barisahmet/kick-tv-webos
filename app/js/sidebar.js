@@ -23,11 +23,6 @@ function setPlayerToolFocus(idx) {
   applyPlayerToolFocus();
   if (state.sidebarOpen) applySideFocus();
 }
-function activatePlayerTool() {
-  if (state.playerToolFocus === 0) openQualityOpt();
-  else if (state.playerToolFocus === 1) openSettings();
-  else if (state.playerToolFocus === 2) openWhatToWatch();
-}
 // The bottom player tools and colour-button legend belong to the open sidebar,
 // so show them exactly when it is open.
 function updateGear() {
@@ -589,7 +584,7 @@ function makePreviewCard(elId, currentSlugFn, positionFn) {
 }
 var sidePreviewCard = makePreviewCard('sidepreview',
   function () {
-    if (!state.sidebarOpen || settings.open || qualityopt.open || chatopt.open) return null;
+    if (!state.sidebarOpen || anyPanelOpen()) return null;
     var item = state.sideItems[state.sideFocus];
     return (item && (item.type === 'chan' || item.type === 'temp')) ? item.slug : null;
   },
@@ -806,12 +801,19 @@ function activateSide() {
   else switchTo(item.slug, true);           // stay open: the video is shrunk beside it
 }
 var pendingAction = null;
+var confirmFocus = 0;
+function applyConfirmFocus() {
+  document.getElementById('confirm-yes').classList.toggle('focused', confirmFocus === 0);
+  document.getElementById('confirm-no').classList.toggle('focused', confirmFocus === 1);
+}
 function askRemove(slug) {
   if (!slug || !state.channels[slug]) return;
   pendingAction = { type: 'remove', slug: slug };
+  confirmFocus = 0;
   document.getElementById('confirm-text').textContent =
     'Remove ' + state.channels[slug].name + ' from favorites?';
   document.getElementById('confirm-yes').textContent = 'Remove';
+  applyConfirmFocus();
   setMode('confirm');
 }
 function confirmYes() {

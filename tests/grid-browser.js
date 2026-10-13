@@ -1,6 +1,6 @@
 /* Synthetic catalogue and virtualization fixtures. No device or real account data. */
 window.runGridTests = async function (assert) {
-  var saved = { serviceGet: serviceGet, pause: pausePlaybackForBrowse, resume: resumePlaybackAfterBrowse,
+  var saved = { serviceGet: serviceGet,
     play: play, playVod: playVod, toast: toast, preview: fetchPreviewUrl, sidebar: closeSidebar, image: catalogueImage };
   var pending = [], selected = null, host = null;
   function wait() { return new Promise(function (done) { setTimeout(done, 35); }); }
@@ -15,7 +15,6 @@ window.runGridTests = async function (assert) {
   function mounted(view) { return view.content.children.length; }
   try {
     serviceGet = function (path, cb, opts) { pending.push({ path: path, cb: cb, opts: opts }); return { cancel: function () {} }; };
-    pausePlaybackForBrowse = function () {}; resumePlaybackAfterBrowse = function () {};
     closeSidebar = function () {}; toast = function () {}; fetchPreviewUrl = function () {};
     play = function (slug) { selected = slug; };
     playVod = function (v, queue, index, slug) { selected = { v: v, queue: queue, index: index, slug: slug }; };
@@ -71,8 +70,6 @@ window.runGridTests = async function (assert) {
     var focusedSlug = catalogueKey(browse.streams[browse.gridIdx]);
     browse.raw.push(stream(-1)); renderBrowse(true);
     assert(catalogueKey(browse.streams[browse.gridIdx]) === focusedSlug, 'late live pages preserve focused streamer identity through sorting');
-    cycleBrowseSort();
-    assert(catalogueKey(browse.streams[browse.gridIdx]) === focusedSlug, 'Browse sort changes preserve focused identity');
     var peekDone = null, peekSlug = null;
     fetchPreviewUrl = function (slug, done) { peekSlug = slug; peekDone = done; };
     browse.gridIdx = 5; applyBrowseFocus();
@@ -178,7 +175,7 @@ window.runGridTests = async function (assert) {
     if (host && host.parentNode) host.parentNode.removeChild(host);
     if (browse.open) closeBrowse(); if (cats.open) closeCats(); if (vods.open) closeVods();
     cancelBrowseFill(); clearTimeout(browsePeekTimer); clearTimeout(catsSearchTimer);
-    serviceGet = saved.serviceGet; pausePlaybackForBrowse = saved.pause; resumePlaybackAfterBrowse = saved.resume;
+    serviceGet = saved.serviceGet;
     play = saved.play; playVod = saved.playVod; toast = saved.toast; fetchPreviewUrl = saved.preview; closeSidebar = saved.sidebar; catalogueImage = saved.image;
   }
 };

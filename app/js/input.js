@@ -154,7 +154,9 @@ document.addEventListener('keydown', function (e) {
   }
   if (state.mode === 'confirm') {
     e.preventDefault();
-    if (k === KEY.OK) confirmYes();
+    if (k === KEY.LEFT) { confirmFocus = 0; applyConfirmFocus(); }
+    else if (k === KEY.RIGHT) { confirmFocus = 1; applyConfirmFocus(); }
+    else if (k === KEY.OK) { if (confirmFocus === 0) confirmYes(); else confirmNo(); }
     else if (k === KEY.BACK) confirmNo();
     return;
   }
@@ -407,8 +409,14 @@ function browseCardFromEvent(e) {
     var i = aResultIdx(e);
     if (i >= 0) { add.focus = i; selectAddResult(); }
   });
+  document.getElementById('confirm-yes').addEventListener('mouseenter', function () {
+    if (state.mode === 'confirm' && confirmFocus !== 0) { confirmFocus = 0; applyConfirmFocus(); }
+  });
   document.getElementById('confirm-yes').addEventListener('click', function () {
     if (state.mode === 'confirm') confirmYes();
+  });
+  document.getElementById('confirm-no').addEventListener('mouseenter', function () {
+    if (state.mode === 'confirm' && confirmFocus !== 1) { confirmFocus = 1; applyConfirmFocus(); }
   });
   document.getElementById('confirm-no').addEventListener('click', function () {
     if (state.mode === 'confirm') confirmNo();
@@ -748,7 +756,6 @@ function browseCardFromEvent(e) {
     if (!el || el === this) return;
     var act = el.getAttribute('data-act');
     if (act === 'settings') openSettings();
-    else if (act === 'refresh') refreshSide();
     else if (act === 'chat') toggleChat();
     else if (act === 'vods') openVodsForContext();
     else if (act === 'browse') openBrowse();

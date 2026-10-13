@@ -112,7 +112,7 @@ body.ui-text-large .setting-choice { font-size: 23px; min-height: 44px; }
 #browse-cats-btn.on { background: #2a3a2e; color: #cce6c2; }
 .blangrow.on { color: #cce6c2; }
 .blangrow.on .blangbox { background: #8cbf7e; border-color: #8cbf7e; }
-.pcat.focused, #browse-sort.focused, #browse-discover.focused, #browse-hideblocked.focused,
+.pcat.focused, #browse-discover.focused, #browse-hideblocked.focused,
 #vods-filter.focused, #browse-cats-btn.focused, #browse-langbtn.focused { border-color: var(--ui-focus); color: #fff; }
 #browse-close.focused, #cats-close.focused, #vods-close.focused, #cats-search.focused {
   outline: 3px solid var(--ui-focus); outline-offset: 2px;
@@ -204,7 +204,7 @@ body.ui-text-large .btitle { font-size: 24px; line-height: 28px; }
 body.ui-text-large .bsub { font-size: 21px; line-height: 25px; }
 body.ui-text-large #vods-grid .bname { height: 68px; max-height: 68px; }
 body.ui-text-large #browse-title, body.ui-text-large #vods-title, body.ui-text-large #cats-title { font-size: 36px; }
-body.ui-text-large .pcat, body.ui-text-large #browse-sort, body.ui-text-large #browse-discover,
+body.ui-text-large .pcat, body.ui-text-large #browse-discover,
 body.ui-text-large #browse-hideblocked, body.ui-text-large #vods-filter,
 body.ui-text-large #browse-cats-btn, body.ui-text-large #browse-langbtn { font-size: 24px; }
 body.ui-text-large .favname { font-size: 28px; }
