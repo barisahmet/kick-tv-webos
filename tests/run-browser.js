@@ -7,9 +7,10 @@ const http = require('http');
 const cp = require('child_process');
 const root = path.resolve(__dirname, '..');
 const selected = process.argv.slice(2).filter(a => !a.startsWith('--'));
-const suites = selected.length ? selected : ['settingscontrols', 'chatfollow', 'headerfocus', 'details', 'settings', 'app', 'hotpaths', 'grid', 'visual', 'livebar', 'fixes'];
+const suites = selected.length ? selected : ['backup', 'import', 'library', 'autoplay', 'flows', 'settingscontrols', 'chatfollow', 'chatlayout', 'headerfocus', 'details', 'settings', 'app', 'hotpaths', 'grid', 'visual', 'livebar', 'fixes'];
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-ui-browser-'));
-const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-ui-results-'));
+const artifacts = process.env.TEST_ARTIFACTS_DIR || fs.mkdtempSync(path.join(os.tmpdir(), 'kick-ui-results-'));
+fs.mkdirSync(artifacts, { recursive: true });
 let chrome, ws, nextId = 0;
 const pending = new Map();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -41,7 +42,7 @@ const server = http.createServer((req, res) => {
 (async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + server.address().port;
-  chrome = cp.spawn(process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
+  chrome = cp.spawn(process.env.CHROME_PATH || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome'), [
     '--headless=new', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
     '--disable-component-update', '--disable-sync', '--disable-features=MediaRouter',
     '--remote-debugging-port=0', '--user-data-dir=' + profile, '--window-size=1920,1080', 'about:blank'
@@ -88,19 +89,25 @@ const server = http.createServer((req, res) => {
     }
     if (!ready) throw new Error('Fixture not ready');
     const testName = 'run' + suite[0].toUpperCase() + suite.slice(1) + 'Tests';
-    const checks = await evaluate(`(async function () {
+    let checks = [], error = null;
+    try { checks = await evaluate(`(async function () {
       fixtureInit();
-      var checks = [];
+      var checks = window.fixtureChecks = [];
       function assert(condition, message) { if (!condition) throw new Error(message); checks.push(message); }
       await window[${JSON.stringify(testName)}](assert);
       assert(fixtureErrors.length === 0, 'no uncaught fixture errors: ' + fixtureErrors.join('; '));
       return checks;
-    })()`);
-    results.push({ suite, checks });
-    console.log(suite + ': ' + checks.length + ' checks passed');
+    })()`); } catch (e) {
+      error = e.message; process.exitCode = 1;
+      checks = await evaluate('window.fixtureChecks || []');
+    }
+    results.push({ suite, checks, error });
+    if (error) console.error(suite + ': FAILED: ' + error);
+    else console.log(suite + ': ' + checks.length + ' checks passed');
+    if (!error && (suite === 'library' || suite === 'autoplay')) await evaluate('setup' + suite[0].toUpperCase() + suite.slice(1) + 'Screenshot()');
     const shot = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
     fs.writeFileSync(path.join(artifacts, suite + '.png'), Buffer.from(shot.data, 'base64'));
-    if (suite === 'visual') {
+    if (suite === 'visual' && !error) {
       for (const mode of ['settings-normal', 'settings-large', 'settings-controls-normal', 'settings-controls-large', 'dim-large', 'chat-large', 'vods-long', 'vods-empty']) {
         await evaluate('setupVisualScreenshot(' + JSON.stringify(mode) + ')');
         const screen = await send('Page.captureScreenshot', { format: 'png' }, sessionId);

@@ -50,7 +50,7 @@ var REQUEST_DEADLINE_MS = 11000;
 // not something the app can use, and buffering it would starve the TV of memory.
 var MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-function kickGet(path, cb) {
+function kickGet(path, cb, postBody) {
   // One answer per request, whatever happens. The request and the response are
   // separate event sources and an abort can fire both, so without this guard a
   // single fetch could respond twice on the same Luna message.
@@ -66,14 +66,24 @@ function kickGet(path, cb) {
     if (req) { try { req.abort(); } catch (e) {} }
   }
   try {
-    req = https.get({
-      host: 'kick.com',
+    var headers = BROWSER_HEADERS;
+    if (postBody) {
+      headers = {};
+      Object.keys(BROWSER_HEADERS).forEach(function (key) { headers[key] = BROWSER_HEADERS[key]; });
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(postBody, 'utf8');
+      headers['x-app-platform'] = 'web';
+    }
+    var options = {
+      host: postBody ? 'web.kick.com' : 'kick.com',
       path: path,
-      headers: BROWSER_HEADERS,
+      headers: headers,
       ciphers: CHROME_CIPHERS,
       ecdhCurve: CHROME_CURVES,
       agent: KEEPALIVE_AGENT
-    }, onResponse);
+    };
+    if (postBody) { options.method = 'POST'; req = https.request(options, onResponse); }
+    else req = https.get(options, onResponse);
   } catch (e) {
     // https.get throws synchronously on some bad paths; that must still answer.
     finish(String(e && e.message || e));
@@ -108,6 +118,7 @@ function kickGet(path, cb) {
   }
   req.on('error', function (e) { finish(String(e && e.message || e)); });
   req.setTimeout(10000, function () { req.abort(); });
+  if (postBody) req.end(postBody);
 }
 
 // Projection is opt-in and limited to endpoints whose payloads the app consumes.
@@ -195,6 +206,25 @@ service.register('fetch', function (message) {
     else message.respond({ ok: true, status: status,
       body: message.payload.compact === true && status === 200 ? compactResponse(path, body) : body });
   });
+});
+
+// Kick rotates chat credentials independently of app releases. Ask for the
+// current channel's public descriptor on each connection, including retries.
+var CHAT_CLIENT_ID = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+  var n = Math.floor(Math.random() * 16);
+  return (c === 'x' ? n : (n & 3) | 8).toString(16);
+});
+service.register('chatConnection', function (message) {
+  var id = message.payload && message.payload.channelId;
+  if (typeof id !== 'number' || !isFinite(id) || id <= 0 || Math.floor(id) !== id || id > 9007199254740991) {
+    message.respond({ ok: false, error: 'bad channel id' }); return;
+  }
+  var body = JSON.stringify({ client: { id: CHAT_CLIENT_ID, type: 'web' },
+    capabilities: { accepted_providers: [{ provider: 'pusher' }] } });
+  kickGet('/api/v1/realtime/channels/' + id + '/chat/connection', function (err, status, response) {
+    if (err) message.respond({ ok: false, error: err });
+    else message.respond({ ok: true, status: status, body: response });
+  }, body);
 });
 
 // A small health check, handy when poking at the service by hand.

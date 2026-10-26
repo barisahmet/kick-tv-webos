@@ -45,7 +45,7 @@ function listResumableVods(max) {
   for (var k in items) {
     if (!Object.prototype.hasOwnProperty.call(items, k)) continue;
     var e = items[k];
-    if (!e || e.watched || !(e.position >= 10)) continue;
+    if (!e || e.watched || e.dismissed || !(e.position >= 10)) continue;
     var ci = k.indexOf(':');
     if (ci <= 0) continue;
     out.push({ key: k, slug: k.slice(0, ci), id: k.slice(ci + 1), entry: e });
@@ -142,6 +142,8 @@ function setBanner(msg) {
   hideSpinner();                 // the reconnecting banner replaces the plain buffering spinner
 }
 function teardownVideo() {
+  cancelVodNext();
+  if (wtw.open) closeWhatToWatch();
   saveVodProgress(true);          // capture the old VOD before its media/state is replaced
   saveLiveMark(true);             // ...and where we were in a live stream, for its recording
   resetSeekAccum();               // a queued seek belongs to the source being torn down

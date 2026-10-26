@@ -17,7 +17,8 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
    No transition: animating the hardware plane drops frames on this TV.
    !important: the webOS runtime writes inline left/width on the <video>. */
 #player.sidecollapse #video, #player.sidecollapse #poster {
-  left: 490px !important; top: 170px !important; width: 1410px !important; height: 660px !important;
+  left: var(--side-video-left, 490px) !important; top: 170px !important;
+  width: var(--side-video-width, 1410px) !important; height: 660px !important;
 }
 #player.sidecollapse[data-vod] #video, #player.sidecollapse[data-vod] #poster {
   top: 40px !important; height: 690px !important;
@@ -1622,3 +1623,27 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 .wtw-bar { height: 4px; background: #3a3d40; border-radius: 2px; margin-top: 8px; overflow: hidden; }
 .wtw-bar div { height: 100%; background: #53fc18; }
 .wtw-empty { padding: 16px 26px; font-size: 23px; color: #9a9a9d; }
+
+/* Library controls share the existing player popup. */
+#wtw-tabs { display: flex; padding: 0 20px 10px; }
+.wtw-tab, #wtw-close { font: inherit; font-size: 22px; padding: 10px 12px; border: 2px solid transparent; border-radius: 8px; background: #292d32; color: #ddd; cursor: pointer; margin-right: 8px; }
+.wtw-tab.selected { color: #53fc18; }
+.wtw-tab.focused, .wtw-tab:hover, #wtw-close:hover { border-color: #53fc18; }
+#wtw-close { margin-left: auto; margin-right: 0; }
+#wtw-list { max-height: 510px; }
+#wtw-status { padding: 8px 26px 0; color: #ddd; font-size: 20px; }
+#wtw-status:empty { display: none; }
+.wtw-retry { font-size: 23px; color: #eee; }
+.wtw-resume-row { position: relative; padding-right: 120px; }
+.wtw-remove { position: absolute; right: 14px; top: 18px; font: inherit; font-size: 18px; background: #30363d; color: #ddd; border: 1px solid #68717a; border-radius: 6px; padding: 8px; cursor: pointer; }
+.wtw-remove:hover { color: #fff; border-color: #53fc18; }
+#backup-status { max-height: 150px; overflow-y: auto; word-break: break-word; }
+#backup-cancel, #backup-retry { font-family: inherit; margin-top: 16px; cursor: pointer; }
+
+#vod-next { position: absolute; inset: 0; z-index: 79; background: rgba(0,0,0,0.25); }
+#vod-next-box { position: absolute; right: 40px; bottom: 100px; width: 660px; box-sizing: border-box; padding: 24px; border: 2px solid #53fc18; border-radius: 14px; background: #17191b; color: #eee; }
+#vod-next-count { font-size: 22px; color: #53fc18; margin-bottom: 12px; }
+#vod-next-title { font-size: 28px; font-weight: 700; line-height: 1.3; max-height: 110px; overflow: hidden; }
+#vod-next-actions { display: flex; margin-top: 22px; }
+#vod-next-actions button { font: inherit; font-size: 24px; color: #eee; background: #292d32; border: 2px solid transparent; border-radius: 8px; padding: 12px 24px; margin-right: 12px; cursor: pointer; }
+#vod-next-actions button.focused, #vod-next-actions button:hover { border-color: #53fc18; }

@@ -6,7 +6,7 @@
 var BACKUP_POLL_MS = 2000;
 // Machine-local or big, and rebuilt on their own: not worth carrying to another TV.
 var BACKUP_SKIP_KEYS = { 'kicktv.channelcache': true, 'kicktv.lastplay': true };
-var backup = { open: false, token: '', timer: null, url: '', inbox: null, choice: 0, choices: [], busy: false, starting: false };
+var backup = { open: false, token: '', timer: null, url: '', inbox: null, choice: 0, choices: [], busy: false, starting: false, importJob: null, retryNames: [] };
 
 function lunaCall(method, params, cb) {
   var Bridge = window.WebOSServiceBridge || window.PalmServiceBridge;
@@ -46,6 +46,9 @@ function backupSnapshot() {
 }
 
 function openBackup() {
+  cancelBackupImport();
+  backup.importJob = null; backup.retryNames = [];
+  updateBackupImportButtons();
   backup.open = true;
   backup.token = backupToken();
   backup.inbox = null; backup.url = ''; backup.busy = false;
@@ -63,6 +66,7 @@ function openBackup() {
   touchSettings();
 }
 function closeBackup() {
+  cancelBackupImport();
   backup.open = false;
   clearInterval(backup.timer); backup.timer = null;
   document.getElementById('backupmodal').className = 'hidden';
@@ -88,11 +92,12 @@ function startBackupShare() {
 }
 function pollBackup() {
   if (!backup.open || backup.busy) return;
-  lunaCall('sharePoll', { token: backup.token }, function (err, r) {
-    if (!backup.open || err) return;
+  var token = backup.token;
+  lunaCall('sharePoll', { token: token }, function (err, r) {
+    if (!backup.open || backup.busy || token !== backup.token || err) return;
     // the service can be restarted under us; bring the same address back up
     if (!r.running) { startBackupShare(); return; }
-    if (r.visits && !backup.inbox) setBackupStatus('Phone connected.');
+    if (r.visits && !backup.inbox && !backup.importJob) setBackupStatus('Phone connected.');
     if (r.inbox) receiveBackupInbox(r.inbox);
   });
 }
@@ -133,6 +138,8 @@ function backupFavsOf(storage) {
   return favs;
 }
 function receiveBackupInbox(inbox) {
+  if (backup.busy) return;
+  backup.importJob = null; backup.retryNames = []; updateBackupImportButtons();
   var q, choices;
   if (inbox.kind === 'backup') {
     var d = inbox.data;
@@ -195,50 +202,70 @@ function backupChoose() {
   if (c.act === 'names') addBackupNames(inbox.slugs);
 }
 // Check each name with Kick first, so a typo does not become a dead row.
+function updateBackupImportButtons() {
+  document.getElementById('backup-cancel').className = backup.busy ? 'backup-choice focused' : 'hidden';
+  document.getElementById('backup-retry').className = !backup.busy && backup.retryNames.length ? 'backup-choice focused' : 'hidden';
+}
+function finishBackupImport(job, cancelled) {
+  backup.busy = false; backup.inbox = null; job.cancel = null;
+  backup.retryNames = job.failed.concat(cancelled ? job.slugs.slice(job.index) : []);
+  setBackupStatus((cancelled ? 'Stopped. ' : '') + 'Added ' + job.added.length + '.' +
+    (job.missing.length ? ' Not found: ' + job.missing.join(', ') + '.' : '') +
+    (job.failed.length ? ' Could not check: ' + job.failed.join(', ') + '.' : '') +
+    (backup.retryNames.length ? ' Retry ' + backup.retryNames.length + ' remaining.' : ''));
+  updateBackupImportButtons();
+  if (job.added.length) fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
+}
+function cancelBackupImport() {
+  var job = backup.importJob;
+  if (!job || !backup.busy) return;
+  job.stopped = true;
+  if (job.cancel) {
+    if (typeof job.cancel === 'function') job.cancel();
+    else if (job.cancel.cancel) job.cancel.cancel();
+  }
+  finishBackupImport(job, true);
+}
+function retryBackupImport() { if (!backup.busy && backup.retryNames.length) addBackupNames(backup.retryNames.slice()); }
 function addBackupNames(slugs) {
-  backup.busy = true;
+  cancelBackupImport();
+  var job = { slugs: slugs.filter(function (s) { return !isFavorite(s); }), index: 0,
+    added: [], missing: [], failed: [], stopped: false, cancel: null };
+  backup.importJob = job; backup.retryNames = []; backup.busy = true;
+  updateBackupImportButtons();
   document.getElementById('backup-ask').className = 'hidden';
   document.getElementById('backup-main').className = '';
-  var added = [], missing = [], i = 0;
   function next() {
-    if (i >= slugs.length) {
-      backup.busy = false; backup.inbox = null;
-      setBackupStatus('Added ' + added.length + (missing.length ? '. Not found: ' + missing.join(', ') : '') + '.');
-      fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(); });
-      return;
-    }
-    var slug = slugs[i++];
-    setBackupStatus('Checking ' + slug + '... (' + i + ' of ' + slugs.length + ')');
-    apiGet(slug, function (err, data) {
-      if (err) missing.push(slug);
-      else { state.channels[slug] = normalize(slug, data); addFavorite(slug); added.push(slug); }
-      next();
-    });
+    if (job.stopped || backup.importJob !== job || !backup.open) return;
+    if (job.index >= job.slugs.length) { finishBackupImport(job, false); return; }
+    var slug = job.slugs[job.index], index = job.index;
+    setBackupStatus('Checking ' + slug + '... (' + (index + 1) + ' of ' + job.slugs.length + ')');
+    var request = serviceGet('/api/v2/channels/' + encodeURIComponent(slug), function (err, data) {
+      if (job.stopped || backup.importJob !== job || !backup.open) return;
+      job.cancel = null;
+      if (err === 404) job.missing.push(slug);
+      else if (err || !data || typeof data !== 'object' || !data.user) job.failed.push(slug);
+      else { state.channels[slug] = normalize(slug, data); addFavorite(slug); job.added.push(slug); }
+      job.index++; next();
+    }, { priority: 1 });
+    if (job.index === index && !job.stopped) job.cancel = request;
   }
   next();
 }
 function applyBackupReplace(storage) {
   try {
-    // keep what is being replaced, once, outside the kicktv.* space the backup covers
-    localStorage.setItem('kicktvbak.beforerestore', JSON.stringify(backupSnapshot()));
-    var drop = [];
-    for (var i = 0; i < localStorage.length; i++) {
-      var k = localStorage.key(i);
-      if (k && k.indexOf('kicktv.') === 0 && !BACKUP_SKIP_KEYS[k]) drop.push(k);
-    }
-    drop.forEach(function (k) { localStorage.removeItem(k); });
-    Object.keys(storage).forEach(function (k) {
-      if (k.indexOf('kicktv.') === 0 && !BACKUP_SKIP_KEYS[k] && typeof storage[k] === 'string') localStorage.setItem(k, storage[k]);
-    });
+    BackupRestore.queue(storage);
   } catch (e) {
     backupAskDone('Could not restore: ' + (e && e.message || e)); return;
   }
   closeBackup();
-  toast('Restored. Restarting...');
-  // every module reads its settings at startup, so start fresh on the restored data
+  toast('Restarting to restore your backup...');
+  // The next boot applies the backup after this page's final progress save.
   setTimeout(function () { location.reload(); }, 800);
 }
 function backupKey(k) {
+  if (backup.busy) { if (k === KEY.BACK || k === KEY.OK) cancelBackupImport(); return; }
+  if (!backup.inbox && backup.retryNames.length && k === KEY.OK) { retryBackupImport(); return; }
   if (backup.inbox && !backup.busy) {
     if (k === KEY.LEFT || k === KEY.UP) backupChoiceMove(-1);
     else if (k === KEY.RIGHT || k === KEY.DOWN) backupChoiceMove(1);

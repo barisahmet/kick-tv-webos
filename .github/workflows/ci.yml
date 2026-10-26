@@ -22,7 +22,21 @@ jobs:
           node-version: '22'
 
       - name: Unit tests
-        run: node --test tests/runtime.test.js tests/service.test.js
+        run: node --test tests/*.test.js
+
+      - name: Browser regression tests
+        env:
+          CHROME_PATH: google-chrome
+          TEST_ARTIFACTS_DIR: ${{ runner.temp }}/kick-ui-results
+        run: node tests/run-browser.js
+
+      - name: Keep browser results and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-results
+          path: ${{ runner.temp }}/kick-ui-results
+          if-no-files-found: ignore
 
       - name: App scripts parse as ES5
         run: |

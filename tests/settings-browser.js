@@ -58,14 +58,8 @@ window.runSettingsTests = async function (assert) {
   assert(blockedcats.open, 'blocked categories label opens its subpage');
   closeBlockedCats(); closeSettings();
   settings.uiText = 'normal'; UIPolish.apply();
-  var anchor = document.createElement('div'); anchor.style.cssText = 'position:fixed;left:600px;top:200px;width:300px;height:200px'; document.body.appendChild(anchor);
-  catalogueDetails('vod', { id: 1, session_title: 'A VOD title' }, anchor);
-  await fixtureWait(750);
-  assert(!el('ui-details') || el('ui-details').classList.contains('hidden'), 'VOD focus never opens a tooltip');
-  anchor.remove();
   // A cached frame isolates placement from the network and image decode timing.
-  var image = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-  previewCache.beta = { t: Date.now(), url: image };
+  previewCache.beta = { t: Date.now(), url: 'fixture:beta', ready: true, bitmap: fixtureFrame() };
   openSidebar(); state.sideFocus = state.sideItems.map(function (it) { return it.slug; }).indexOf('beta'); applySideFocus();
   await fixtureWait(400);
   var preview = el('sidepreview').getBoundingClientRect(), row = el('fav-list').children[state.sideFocus].getBoundingClientRect();
@@ -73,11 +67,13 @@ window.runSettingsTests = async function (assert) {
   assert(Math.abs(preview.top + preview.height / 2 - row.top - row.height / 2) < 120, 'top sidebar preview stays beside its row');
   assert(preview.left >= el('sidebar').getBoundingClientRect().right && preview.bottom <= 1056, 'preview clears the sidebar and screen edge');
   var previewRow = el('fav-list').children[state.sideFocus];
-  previewRow.style.transform = 'translateY(700px)';
+  previewRow.style.position = 'relative'; previewRow.style.top = '700px';
   positionStreamPreview(el('sidepreview'), previewRow, el('sidebar'));
+  await fixtureWait(250);
   assert(el('sidepreview').getBoundingClientRect().bottom <= 1056, 'preview near the bottom is clamped inside the screen');
-  previewRow.style.transform = '';
+  previewRow.style.top = '';
   positionStreamPreview(el('sidepreview'), previewRow, el('sidebar'));
+  await fixtureWait(250);
   assert(el('sidepreview').getBoundingClientRect().top === preview.top, 'moving back to a top row resets preview placement');
   var current = el('fav-list').querySelector('.current');
   assert(getComputedStyle(current).borderLeftColor === 'rgb(83, 252, 24)', 'playing stream retains a green left indicator');

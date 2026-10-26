@@ -66,13 +66,12 @@ function toggleVodPlay() {
    without any login. We connect straight to Pusher (no Cloudflare in the way,
    unlike the API), subscribe to the channel's chatroom, and print messages.
    Sending would need an account, which this app deliberately does not do. */
-var CHAT_KEY = '32cbd69e4b950bf97679';   // Kick's public Pusher app key (us2)
-var CHAT_URL = 'wss://ws-us2.pusher.com/app/' + CHAT_KEY + '?protocol=7&client=js&version=8.4.0&flash=false';
 var CHAT_MAX = 160;                       // bounded scrollback, including off-screen messages
 var CHAT_DELAY_MAX = 1000;
 var chatPending = [], chatDelayTimer = null;
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null,
-             activityMs: 120000, activityTimer: null, pongTimer: null };
+             activityMs: 120000, activityTimer: null, pongTimer: null,
+             connectAttempt: 0, connecting: false, cancelConnect: null };
 /* How long to hold a message. Auto (-1) holds it as long as the picture trails
    real time: every segment carries the wall-clock time it was broadcast, so
    now minus the playing frame's time is exactly how far behind the video is.
@@ -189,7 +188,7 @@ function syncChat() {
   if (!settings.chat || !state.current) { disconnectChat(); return; }
   var room = currentRoomId();
   if (!room) { disconnectChat(); return; }
-  if (chat.room === room && chat.ws && chat.ws.readyState <= 1) { showChatOverlay(); return; }
+  if (chat.room === room && (chat.connecting || (chat.ws && chat.ws.readyState <= 1))) { showChatOverlay(); return; }
   connectChat(room);
 }
 function connectChat(room) {
@@ -240,8 +239,34 @@ function scheduleChatRetry(room) {
   }, delay);
 }
 function openChatSocket(room) {
+  var channel = state.current && state.channels[state.current];
+  var attempt = ++chat.connectAttempt;
+  chat.connecting = true;
+  var cancel = serviceChatConnection(channel && channel.channelId, function (err, response) {
+    if (attempt !== chat.connectAttempt || !chat.want || !settings.chat || chat.room !== room || currentRoomId() !== room) return;
+    chat.connecting = false; chat.cancelConnect = null;
+    var data = response && response.data, url = null;
+    if (!err && data && data.mode === 'websocket' && Array.isArray(data.connections)) {
+      for (var i = 0; i < data.connections.length; i++) {
+        var connection = data.connections[i], credentials = connection && connection.credentials;
+        if (connection && connection.provider === 'pusher' && credentials &&
+            typeof credentials.app_key === 'string' && /^[a-zA-Z0-9_-]+$/.test(credentials.app_key) &&
+            typeof credentials.cluster === 'string' && /^[a-z0-9-]+$/.test(credentials.cluster)) {
+          url = 'wss://ws-' + credentials.cluster + '.pusher.com/app/' + credentials.app_key +
+            '?protocol=7&client=js&version=8.4.0&flash=false';
+          break;
+        }
+      }
+    }
+    if (!url) { scheduleChatRetry(room); return; }
+    createChatSocket(room, url);
+  });
+  // A missing bridge can fail synchronously, before the cancel handle returns.
+  if (chat.connecting && attempt === chat.connectAttempt) chat.cancelConnect = cancel;
+}
+function createChatSocket(room, url) {
   var ws;
-  try { ws = new WebSocket(CHAT_URL); }
+  try { ws = new WebSocket(url); }
   catch (e) { ChatWindow.status('unavailable', 'Chat connection unavailable'); scheduleChatRetry(room); return; }
   chat.ws = ws;
   armChatHeartbeat(ws, room);
@@ -271,6 +296,8 @@ function openChatSocket(room) {
 }
 function disconnectChat() {
   chat.want = false; chat.room = null;
+  chat.connectAttempt++; chat.connecting = false;
+  if (chat.cancelConnect) { chat.cancelConnect(); chat.cancelConnect = null; }
   clearChatDelay();
   if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
   stopChatHeartbeat();

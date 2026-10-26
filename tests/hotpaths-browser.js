@@ -1,21 +1,29 @@
 window.runHotpathsTests = async function (assert) {
-  var realService = serviceGet, requests = [], callbacks = 0;
+  var realService = serviceGet, realFrame = loadPreviewFrame, requests = [], frames = [], callbacks = 0;
   serviceGet = function (path, done, options) { requests.push({ path: path, done: done, options: options }); };
-  previewCache = {}; previewOrder = []; previewPending = Object.create(null);
-  fetchPreviewUrl('one', function () { callbacks++; });
-  fetchPreviewUrl('one', function () { callbacks++; });
-  assert(requests.length === 1, 'two preview consumers share one request');
-  requests[0].done(null, { livestream: { thumbnail: { url: 'https://fixture.invalid/one.jpg' } } });
-  assert(callbacks === 2 && previewCache.one.url.indexOf('one.jpg') !== -1, 'shared preview result reaches both consumers');
-  for (var i = 0; i < 23; i++) {
-    fetchPreviewUrl('item-' + i);
-    requests[requests.length - 1].done(null, { livestream: { thumbnail: { url: 'https://fixture.invalid/' + i + '.jpg' } } });
-  }
-  touchPreview('one'); fetchPreviewUrl('newest');
-  requests[requests.length - 1].done(null, { livestream: { thumbnail: { url: 'https://fixture.invalid/new.jpg' } } });
-  assert(Object.keys(previewCache).length === 24 && !!previewCache.one && !previewCache['item-0'], 'preview LRU evicts only the least recently used entry');
-  assert(requests.every(function (request) { return request.options.priority === 2; }), 'preview lookups remain lower priority than active screens');
-  serviceGet = realService;
+  loadPreviewFrame = function (url, done) { frames.push({ url: url, done: done }); };
+  previewCache = {}; previewPending = Object.create(null);
+  try {
+    fetchPreviewUrl('one', function () { callbacks++; });
+    fetchPreviewUrl('one', function () { callbacks++; });
+    assert(requests.length === 1, 'two preview consumers share one request');
+    requests[0].done(null, { livestream: { thumbnail: { url: 'fixture:one' } } });
+    assert(callbacks === 0 && frames.length === 1, 'preview consumers wait for image preparation');
+    frames[0].done(fixtureFrame(), null);
+    assert(callbacks === 2 && previewCache.one.ready, 'prepared preview reaches both consumers');
+    fetchPreviewUrl('one'); requests[1].done(null, { livestream: { thumbnail: { url: 'fixture:one' } } });
+    assert(frames.length === 1, 'unchanged thumbnail reuses the decoded frame');
+    fetchPreviewUrl('one'); requests[2].done(null, { livestream: { thumbnail: { url: 'fixture:new' } } });
+    frames[1].done(null, null);
+    assert(previewCache.one.url === 'fixture:one' && previewCache.one.ready, 'failed refresh preserves the last good frame');
+    assert(requests.every(function (r) { return r.options.priority === 3; }), 'idle previews stay below channel-list work');
+    fetchPreviewUrl('urgent', null, true);
+    assert(requests[3].options.priority === 1, 'visible previews receive foreground priority');
+    requests[3].done(null, { livestream: { thumbnail: { url: 'fixture:urgent' } } });
+    frames[2].done(fixtureFrame(), null);
+    prunePreviews(['urgent']);
+    assert(!previewCache.one && previewCache.urgent, 'pruning keeps only current preview targets');
+  } finally { serviceGet = realService; loadPreviewFrame = realFrame; }
 
   var originalFetch = fetchFavorites, refreshes = 0, lastPartial = null;
   fetchFavorites = function (done, partial) { refreshes++; lastPartial = partial; if (done) done(); };

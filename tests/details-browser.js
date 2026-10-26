@@ -1,42 +1,36 @@
+/* The removed catalogue tooltip has been replaced by prepared stream previews. */
 window.runDetailsTests = async function (assert) {
-  function hidden() { var panel = document.getElementById('ui-details'); return !panel || panel.classList.contains('hidden'); }
-  function waitShown() { return fixtureUntil(function () { return !hidden(); }); }
-  var host = document.createElement('div');
-  host.style.cssText = 'position:fixed;left:500px;top:150px;width:900px;height:600px;overflow:auto';
-  document.body.appendChild(host);
-  var grid = new VirtualGrid(host, { columns: 2 });
-  host.style.position = 'fixed';
-  var items = []; for (var i = 0; i < 100; i++) items.push({ id: i, title: 'Stream ' + i });
-  grid.setItems(items, function (item) { return item.id; }, function (item) {
-    var card = document.createElement('div'); card.style.cssText = 'width:400px;height:260px;margin:8px';
-    card.textContent = item.title; return card;
-  });
-  await fixtureWait();
-  var anchor = grid.get(0); anchor.setAttribute('aria-describedby', 'existing-description');
-  UIPolish.details('browse', items[0], anchor); await waitShown();
-  assert(!hidden(), 'Browse details appear after a stable dwell');
-  host.scrollTop = 20; await fixtureWait();
-  assert(hidden() && document.documentElement.contains(anchor), 'small catalogue scroll dismisses details even while the card stays mounted');
-  assert(anchor.getAttribute('aria-describedby') === 'existing-description', 'scroll dismissal restores the previous accessible description');
-  UIPolish.details('category', items[0], anchor);
-  host.scrollTop = 40; await fixtureWait(750);
-  assert(hidden(), 'scrolling cancels pending category details before their dwell expires');
-  UIPolish.details('category', items[0], anchor); await waitShown();
-  assert(!hidden(), 'a new stable focus can show details after scrolling');
-  // Removing just an unrelated card must not dismiss the active description.
-  var other = grid.get(1); other.parentNode.removeChild(other); await fixtureWait();
-  assert(!hidden(), 'unrelated card removal preserves active details');
-  anchor.parentNode.removeChild(anchor); await fixtureWait();
-  assert(hidden(), 'removing an already described card dismisses its tooltip');
-  assert(anchor.getAttribute('aria-describedby') === 'existing-description', 'anchor removal clears the tooltip description reference');
-  grid.clear();
-  grid.setItems(items, function (item) { return item.id; }, function (item) {
-    var node = document.createElement('div'); node.style.cssText = 'width:400px;height:260px;margin:8px'; node.textContent = item.title; return node;
-  });
-  await fixtureWait(); anchor = grid.focus(50);
-  UIPolish.details('browse', items[50], anchor); await waitShown();
-  assert(!hidden(), 'remote focus after scrolling can show the newly focused card details');
-  document.body.removeChild(host); await fixtureWait();
-  assert(hidden(), 'removing the entire catalogue also dismisses its details');
-  UIPolish.cancelDetails();
+  var pending = [], current = 'beta', positions = 0;
+  var realFetch = fetchPreviewUrl;
+  fetchPreviewUrl = function (slug, done, urgent) { pending.push({ slug: slug, done: done, urgent: urgent }); };
+  state.channels.gamma = { slug: 'gamma', name: 'Gamma', live: true, title: 'Another preview' };
+  var panel = document.getElementById('sidepreview');
+  var controller = makePreviewCard('sidepreview', function () { return current; }, function () { positions++; });
+  function ready(slug) { previewCache[slug] = { t: Date.now(), url: 'fixture:' + slug, ready: true, bitmap: fixtureFrame() }; }
+  try {
+    controller.update(); controller.cancel(); await fixtureWait(200);
+    assert(pending.length === 0 && panel.classList.contains('hidden'), 'leaving before preview dwell avoids a request and a popup');
+    controller.update(); await fixtureUntil(function () { return pending.length === 1; });
+    assert(pending[0].urgent === true && panel.classList.contains('loading'), 'stable focus requests a foreground preview');
+    current = 'gamma'; controller.update();
+    ready('beta'); pending[0].done();
+    assert(panel._frameSlug !== 'beta', 'late preview cannot paint the previous channel after focus moves');
+    await fixtureUntil(function () { return pending.length === 2; });
+    ready('gamma'); pending[1].done();
+    assert(panel._frameSlug === 'gamma' && panel.className === '', 'decoded frame replaces the spinner for the selected channel');
+    var canvas = panel.querySelector('canvas'), count = pending.length;
+    controller.update();
+    assert(panel.querySelector('canvas') === canvas && pending.length === count, 'same focused channel retains its prepared frame without refetching');
+    current = null; controller.update();
+    assert(panel.classList.contains('hidden'), 'invalid focus hides the preview');
+    current = 'beta'; controller.update();
+    assert(panel._frameSlug === 'beta' && panel.className === '', 'warmed channel displays immediately without a dwell');
+    current = 'alpha'; controller.update();
+    assert(panel.classList.contains('hidden'), 'the playing channel does not cover itself with a preview');
+    current = 'gamma'; delete previewCache.gamma; controller.update();
+    await fixtureUntil(function () { return pending.length === 3; });
+    controller.cancel(); ready('gamma'); pending[2].done();
+    assert(panel.classList.contains('hidden'), 'closing a panel invalidates its outstanding preview callback');
+    assert(positions > 0, 'visible preview states use the placement callback');
+  } finally { controller.cancel(); fetchPreviewUrl = realFetch; }
 };

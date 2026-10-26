@@ -1,7 +1,7 @@
 'use strict';
 /* Settings menu (opened by the gear or the Red button) */
 var settings = { open: false, focus: 0, items: [],
-                 chat: false, lowlatency: false, autoadvance: false,
+                 chat: false, lowlatency: false, autoadvance: false, autoSkipWatched: true,
                  hideOffline: false, diagnostics: false, hideBots: true,
                  dim: false, rememberDim: false, dimStrength: 0.8, dimScope: 'video',
                  chatSize: 'medium', chatOpacity: 'high', chatSeparate: false,
@@ -132,6 +132,7 @@ function loadSettings() {
   try { s = JSON.parse(localStorage.getItem('kicktv.settings')) || {}; } catch (e) {}
   settings.lowlatency = !!s.lowlatency;
   settings.autoadvance = !!s.autoadvance;
+  settings.autoSkipWatched = s.autoSkipWatched !== false;
   settings.hideOffline = !!s.hideOffline;
   settings.diagnostics = !!s.diagnostics;
   settings.hideBots = s.hideBots !== false;      // on unless deliberately turned off
@@ -154,7 +155,7 @@ function saveSettings() {
   if (chatPreferences.active === chatStreamerSlug()) rememberChatPreferences();
   try {
     var serialized = JSON.stringify({
-      lowlatency: settings.lowlatency, autoadvance: settings.autoadvance,
+      lowlatency: settings.lowlatency, autoadvance: settings.autoadvance, autoSkipWatched: settings.autoSkipWatched,
       hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
       hideBots: settings.hideBots,
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
@@ -195,6 +196,7 @@ function settingsBuild() {
     { kind: 'chatopt', label: 'Live chat' },
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
+    { kind: 'toggle', key: 'autoSkipWatched', label: 'Skip watched videos' },
     { kind: 'toggle', key: 'hideOffline', label: 'Hide offline' },
     { kind: 'toggle', key: 'hideBots', label: 'Hide bot streams' },
     { kind: 'blockedcats', label: 'Blocked categories' },
@@ -451,9 +453,10 @@ function selectChoice(it, index) {
    card used by the original Settings layout. */
 var SETTINGS_DESC = {
   uiText: 'Larger labels and controls for easier reading from the sofa. Video size stays the same.',
-  chat: 'Green toggles live chat. Drag anywhere to move, use any corner to resize, or release at an edge to dock. Each streamer remembers all chat settings and its layout.',
+  chat: 'Green toggles live chat. Drag anywhere to move, use any corner to resize, or move the pointer to the left or right edge and release to dock. Each streamer remembers all chat settings and its layout.',
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
-  autoadvance: 'Continue with the next VOD from that streamer, or another live channel. Live pinned channels come first.',
+  autoadvance: 'Offer the next video after a 10-second countdown you can cancel. Live streams continue to another channel, with pinned channels first.',
+  autoSkipWatched: 'Skip already watched recordings when automatically choosing the next video. You can still play them yourself.',
   hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
   hideBots: 'Hide fake streams from Browse — the ones with random channel names and random titles that pad their viewer counts.',
   blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
@@ -526,7 +529,7 @@ function applyDimAwareUi() {
   // Settings remains readable at no darker than Medium. Every other popup uses
   // the selected strength, including Strong and Max.
   var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox', 'backupbox'];
-  var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'wtwbox', 'toast'];
+  var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'wtwbox', 'vod-next-box', 'toast'];
   var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
                      'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner',
                      'livebar'];

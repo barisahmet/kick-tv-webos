@@ -9,7 +9,9 @@
 
 /* Startup */
 document.addEventListener('visibilitychange', function () {
+  if (backupRestoreBlocked) return;
   if (document.hidden) {
+    cancelVodNext();
     saveVodProgress(true); saveLiveMark(true); pauseNotify();
     // Nobody is reading chat while another app is in front; parsing a busy room
     // for hours is wasted CPU. The setting is untouched, so it reconnects on return.
@@ -36,6 +38,7 @@ document.addEventListener('visibilitychange', function () {
 window.addEventListener('pagehide', function () { saveVodProgress(true); saveLiveMark(true); });
 // Handle the network coming back or dropping out.
 window.addEventListener('online', function () {
+  if (backupRestoreBlocked) return;
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
     if (state.ready && !state.current && !state.vod) {
@@ -214,12 +217,15 @@ function quickStart(done) {
 // and show the idle screen from cached data, and the fetch keeps filling in behind.
 var BOOT_DEADLINE_MS = 8000;
 var bootDeadlineTimer = null;
+var backupRestoreNotice = '';
+var backupRestoreBlocked = false;
 // Becomes interactive exactly once, whichever path gets here first.
 function markBootReady() {
   if (state.ready) return false;
   clearTimeout(bootDeadlineTimer);
   bootDeadlineTimer = null;
   state.ready = true;
+  if (backupRestoreNotice) { toast(backupRestoreNotice); backupRestoreNotice = ''; }
   startPlayerPoll();
   prepareSidebarSoon();
   setTimeout(function () { warmPreviews(false); }, 3000);   // after playback has its start
@@ -231,6 +237,15 @@ function bootChoiceSuperseded() {
   return !!(state.current || state.vod || state.sidebarOpen || state.mode !== 'player' || anyPanelOpen());
 }
 (function boot() {
+  var restored = BackupRestore.recover();
+  if (!restored.ok) {
+    backupRestoreBlocked = true;
+    showState('lost');
+    document.getElementById('idle-msg').textContent = 'Could not restore your backup. Restart the app to retry.';
+    return;
+  }
+  if (restored.status === 'restored') backupRestoreNotice = 'Backup restored.';
+  else if (restored.status === 'rolledback') backupRestoreNotice = 'Restore failed. Your previous data was kept.';
   setMode('player');
   loadQualityPref();
   loadSettings();

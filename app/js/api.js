@@ -1,6 +1,6 @@
 'use strict';
 /* Talking to Kick */
-function serviceTransport(path, cb, options) {
+function serviceRequest(method, payload, cb) {
   var Bridge = window.WebOSServiceBridge || window.PalmServiceBridge;
   if (!Bridge) { cb('nobridge'); return; }
   var bridge, done = false;
@@ -16,7 +16,7 @@ function serviceTransport(path, cb, options) {
     } catch (e) { cb('parse'); }
   };
   try {
-    bridge.call('luna://com.barisahmet.kicktv.service/fetch', JSON.stringify({ path: path, compact: !(options && options.compact === false) }));
+    bridge.call('luna://com.barisahmet.kicktv.service/' + method, JSON.stringify(payload));
   } catch (e) {
     if (!done) { done = true; clearTimeout(timer); cb('callfail'); }
   }
@@ -24,6 +24,12 @@ function serviceTransport(path, cb, options) {
     done = true; clearTimeout(timer);
     if (bridge.cancel) { try { bridge.cancel(); } catch (e) {} }
   };
+}
+function serviceTransport(path, cb, options) {
+  return serviceRequest('fetch', { path: path, compact: !(options && options.compact === false) }, cb);
+}
+function serviceChatConnection(channelId, cb) {
+  return serviceRequest('chatConnection', { channelId: channelId }, cb);
 }
 if (window.UIWork) UIWork.setTransport(serviceTransport);
 function serviceGet(path, cb, options) {
@@ -63,6 +69,7 @@ function normalize(slug, raw) {
   var cats = live && raw.livestream.categories;
   return {
     slug: slug,
+    channelId: raw.id || null,
     name: (raw.user && raw.user.username) || slug,
     avatar: (raw.user && raw.user.profile_pic) || null,
     live: !!live,
@@ -245,7 +252,7 @@ function alertAllowed(item) {
 function anyPanelOpen() {
   return !!(browse.open || vods.open || cats.open || chpop.open || settings.open || dimopt.open ||
     chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen ||
-    (wtw && wtw.open) || (backup && backup.open));
+    (wtw && wtw.open) || (backup && backup.open) || (vodNext && vodNext.open));
 }
 function notifyUiBusy() {
   return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||

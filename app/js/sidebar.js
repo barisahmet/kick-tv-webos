@@ -26,6 +26,7 @@ function setPlayerToolFocus(idx) {
 // The bottom player tools and colour-button legend belong to the open sidebar,
 // so show them exactly when it is open.
 function updateGear() {
+  ChatWindow.viewportChanged();
   var open = state.sidebarOpen;
   var tools = document.getElementById('player-tools');
   if (open) endQualityAlert();
@@ -328,36 +329,55 @@ function scalePreviewBitmap(full) {
   if (full.close) full.close();
   return canvas.transferToImageBitmap ? canvas.transferToImageBitmap() : canvas;
 }
+var PREVIEW_FRAME_TIMEOUT_MS = 3000;
 function loadPreviewFrame(url, done) {
-  var settled = false;
-  function once(bitmap, img) { if (!settled) { settled = true; done(bitmap, img); } }
+  var settled = false, xhr = null, img = null, releasePrep = null;
+  var timer = setTimeout(function () { once(null, null); }, PREVIEW_FRAME_TIMEOUT_MS);
+  function once(bitmap, image) {
+    if (settled) { if (bitmap && bitmap.close) bitmap.close(); return; }
+    settled = true; clearTimeout(timer);
+    if (xhr) { xhr.onload = xhr.onerror = xhr.ontimeout = null; try { xhr.abort(); } catch (e) {} }
+    if (img) { img.onload = img.onerror = null; if (img !== image) img.src = ''; }
+    if (releasePrep) { releasePrep(); releasePrep = null; }
+    done(bitmap, image);
+  }
   function viaImage() {
-    var img = new Image();
+    if (settled || img) return;
+    img = new Image();
     img.onload = function () { once(null, img); };
     img.onerror = function () { once(null, null); };
     img.src = url;
   }
-  if (!window.createImageBitmap) { viaImage(); return; }
-  var xhr = new XMLHttpRequest();
+  function cancel() { once(null, null); }
+  if (!window.createImageBitmap) { viaImage(); return cancel; }
+  xhr = new XMLHttpRequest();
   try {
     xhr.open('GET', url, true);
     xhr.responseType = 'blob';
-    xhr.timeout = 15000;
-  } catch (e) { viaImage(); return; }
-  xhr.onload = function () {
-    if (xhr.status !== 200 || !xhr.response) { viaImage(); return; }
-    var blob = xhr.response;
-    queuePreviewPrep(function (next) {
-      createImageBitmap(blob).then(function (full) {
-        var bitmap = null;
-        try { bitmap = scalePreviewBitmap(full); } catch (e) { logError(e); }
-        next();
-        if (bitmap) once(bitmap, null); else viaImage();
-      }, function () { next(); viaImage(); });
-    });
-  };
-  xhr.onerror = xhr.ontimeout = viaImage;
-  xhr.send();
+    xhr.timeout = 1500;
+    xhr.onload = function () {
+      if (settled) return;
+      if (xhr.status !== 200 || !xhr.response) { viaImage(); return; }
+      var blob = xhr.response;
+      queuePreviewPrep(function (next) {
+        if (settled) { next(); return; }
+        var released = false;
+        releasePrep = function () { if (!released) { released = true; next(); } };
+        function failed() { if (settled) return; releasePrep(); releasePrep = null; viaImage(); }
+        try {
+          createImageBitmap(blob).then(function (full) {
+            if (settled) { if (full.close) full.close(); return; }
+            var bitmap = null;
+            try { bitmap = scalePreviewBitmap(full); } catch (e) { if (full.close) full.close(); logError(e); }
+            if (bitmap) once(bitmap, null); else failed();
+          }, failed);
+        } catch (e) { failed(); }
+      });
+    };
+    xhr.onerror = xhr.ontimeout = viaImage;
+    xhr.send();
+  } catch (e) { viaImage(); }
+  return cancel;
 }
 /* Resolve a channel's current frame AND prepare it, then swap it into the cache.
    Each new frame has its own versionId in the URL. Until the new one is ready the
@@ -368,17 +388,30 @@ function loadPreviewFrame(url, done) {
 function fetchPreviewUrl(slug, done, urgent) {
   if (previewPending[slug]) { if (done) previewPending[slug].push(done); return; }
   previewPending[slug] = done ? [done] : [];
+  var settled = false, request = null, cancelFrame = null;
+  // One budget covers the channel lookup, network queue, image and decode.
+  var timer = setTimeout(finish, PREVIEW_FRAME_TIMEOUT_MS);
+  function cancelRequest() {
+    if (typeof request === 'function') request();
+    else if (request && request.cancel) request.cancel();
+  }
   function finish() {
+    if (settled) return;
+    settled = true; clearTimeout(timer);
+    cancelRequest();
+    if (cancelFrame) cancelFrame();
     var callbacks = previewPending[slug] || [];
     delete previewPending[slug];
     callbacks.forEach(function (callback) { try { callback(); } catch (e) { logError(e); } });
   }
-  serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
+  request = serviceGet('/api/v1/channels/' + encodeURIComponent(slug), function (err, raw) {
+    if (settled) return;
     var url = err ? null : pickPreviewUrl(raw);
     var old = previewCache[slug];
     if (!url) { finish(); return; }
     if (old && old.url === url && old.ready) { old.t = Date.now(); finish(); return; }
-    loadPreviewFrame(url, function (bitmap, img) {
+    cancelFrame = loadPreviewFrame(url, function (bitmap, img) {
+      if (settled) { releasePreview({ bitmap: bitmap }); return; }
       if (bitmap || img) {
         releasePreview(old);
         previewCache[slug] = { t: Date.now(), url: url, bitmap: bitmap, img: img, ready: true };
@@ -387,6 +420,7 @@ function fetchPreviewUrl(slug, done, urgent) {
       finish();
     });
   }, { priority: urgent ? 1 : 3 });  // idle: never ahead of the channel list refresh
+  if (settled) cancelRequest();
 }
 // Every channel whose frame a list could show: live favourites plus a temporary one.
 function previewTargets() {

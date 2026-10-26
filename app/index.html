@@ -267,10 +267,18 @@
     </div>
   </div>
 
+  <div id="vod-next" class="hidden" role="dialog" aria-label="Next video">
+    <div id="vod-next-box"><div id="vod-next-count" role="status"></div><div id="vod-next-title"></div>
+      <div id="vod-next-actions"><button id="vod-next-play">Play now</button><button id="vod-next-cancel">Cancel</button></div>
+    </div>
+  </div>
+
   <div id="wtwmodal" class="hidden">
     <div id="wtwbox">
       <div id="wtw-head">What to watch<span id="wtw-sub">Past videos from who you watch most</span></div>
+      <div id="wtw-tabs" role="tablist"><button id="wtw-suggested" class="wtw-tab" role="tab">For you</button><button id="wtw-resume" class="wtw-tab" role="tab">Continue watching</button><button id="wtw-close" aria-label="Close">×</button></div>
       <div id="wtw-list"></div>
+      <div id="wtw-status" role="status"></div>
     </div>
   </div>
 
@@ -284,6 +292,8 @@
           <div id="backup-does">Download a backup, restore one, or add channels by typing their names on the phone.</div>
           <div id="backup-url"></div>
           <div id="backup-status"></div>
+          <button id="backup-cancel" class="hidden">Stop import</button>
+          <button id="backup-retry" class="hidden">Retry remaining</button>
         </div>
       </div>
       <div id="backup-ask" class="hidden">
@@ -309,6 +319,7 @@
 
   <script src="hls.min.js"></script>
   <script src="favorites.js"></script>
+  <script src="storage-restore.js"></script>
   <script src="qrcode.js"></script>
   <script src="ui-runtime.js"></script>
   <script src="virtual-grid.js"></script>

@@ -10,6 +10,23 @@ var ChatWindow = (function () {
   function copy(r) { return { x: r.x, y: r.y, w: r.w, h: r.h }; }
   function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
   function canvasHeight() { return 1080; }
+  // Map the saved full-screen layout onto the picture beside the sidebar.
+  // Keep geometry in its original coordinates so opening a menu never saves
+  // a smaller window, and dragging still works at the reduced scale.
+  function viewport() {
+    if (!state.sidebarOpen) return { x: 0, y: 0, scale: 1 };
+    var height = state.vod ? 690 : 660, scale = height / 1080;
+    return { x: 490 + (1410 - 1920 * scale) / 2, y: state.vod ? 40 : 170, scale: scale };
+  }
+  function point(e) {
+    var view = viewport();
+    return { x: (e.clientX - view.x) / view.scale, y: (e.clientY - view.y) / view.scale };
+  }
+  function transform(x, y) {
+    var view = viewport();
+    return 'translate(' + (view.x + x * view.scale) + 'px,' + (view.y + y * view.scale) +
+      'px) scale(' + view.scale + ')';
+  }
   function valid(r) {
     return r && ['x', 'y', 'w', 'h'].every(function (k) { return typeof r[k] === 'number' && isFinite(r[k]); });
   }
@@ -82,6 +99,14 @@ var ChatWindow = (function () {
     var separate = !!(settings.chatSeparate && dock && el('chat').classList.contains('on'));
     var left = separate && dock === 'left' ? rect.w : 0;
     var width = separate ? 1920 - rect.w : 1920;
+    var view = viewport(), player = el('player');
+    if (state.sidebarOpen && separate) {
+      player.style.setProperty('--side-video-left', (view.x + left * view.scale) + 'px');
+      player.style.setProperty('--side-video-width', (width * view.scale) + 'px');
+    } else {
+      player.style.removeProperty('--side-video-left');
+      player.style.removeProperty('--side-video-width');
+    }
     // Resize the native video element itself so the TV's hardware plane follows.
     // Letterbox inside the remaining space without cropping or restarting playback.
     ['video', 'poster'].forEach(function (id) {
@@ -101,7 +126,7 @@ var ChatWindow = (function () {
       return;
     }
     var box = el('chat');
-    box.style.transform = 'translate(' + rect.x + 'px,' + rect.y + 'px)';
+    box.style.transform = transform(rect.x, rect.y);
     if (box.style.width !== rect.w + 'px') box.style.width = rect.w + 'px';
     if (box.style.height !== rect.h + 'px') box.style.height = rect.h + 'px';
     box.classList.toggle('compact', rect.w < 460);
@@ -160,7 +185,7 @@ var ChatWindow = (function () {
     hint.className = side ? '' : 'hidden';
     if (!side) return;
     hint.setAttribute('data-label', side === 'left' ? 'Dock left' : 'Dock right');
-    hint.style.transform = 'translate(' + (side === 'left' ? 0 : 1920 - r.w) + 'px,0px)';
+    hint.style.transform = transform(side === 'left' ? 0 : 1920 - r.w, 0);
     hint.style.width = r.w + 'px'; hint.style.height = canvasHeight() + 'px';
   }
   function applyGesture() {
@@ -176,7 +201,9 @@ var ChatWindow = (function () {
         r.y = g.py - g.grabY * r.h;
       } else { r.x += dx; r.y += dy; }
       dock = null;
-      g.snap = g.px <= 48 || r.x <= 24 ? 'left' : (g.px >= 1872 || r.x + r.w >= 1896 ? 'right' : null);
+      // Dock only when the pointer reaches the edge. The window itself may
+      // touch either corner while staying floating at the viewer's chosen size.
+      g.snap = g.px <= 8 ? 'left' : (g.px >= 1912 ? 'right' : null);
       rect = bounded(r); snapHint(g.snap, rect);
     } else if (g.layout.dock) {
       // Docked chat stays full height. The inside divider and corners adjust width.
@@ -221,7 +248,8 @@ var ChatWindow = (function () {
     hovered = !cancel && g.px >= rect.x && g.px <= rect.x + rect.w && g.py >= rect.y && g.py <= rect.y + rect.h;
     paint();
     var tools = el('chat-tools').getBoundingClientRect();
-    if (!cancel && g.px >= tools.left && g.px <= tools.right && g.py >= tools.top && g.py <= tools.bottom) focusControls(true);
+    var view = viewport(), screenX = view.x + g.px * view.scale, screenY = view.y + g.py * view.scale;
+    if (!cancel && screenX >= tools.left && screenX <= tools.right && screenY >= tools.top && screenY <= tools.bottom) focusControls(true);
     if (!cancel && g.moved) save();
     if (g.moved) suppressUntil = Date.now() + 350;
     if (g.target.releasePointerCapture && g.pointerId != null) {
@@ -231,9 +259,10 @@ var ChatWindow = (function () {
   function start(e, kind) {
     if (gesture || (e.button != null && e.button !== 0)) return;
     e.preventDefault(); e.stopPropagation(); markInput(); showCursor();
-    gesture = { kind: kind, start: copy(rect), layout: snapshot(), sx: e.clientX, sy: e.clientY,
-      grabX: clamp((e.clientX - rect.x) / rect.w, 0, 1), grabY: clamp((e.clientY - rect.y) / rect.h, 0, 1),
-      px: e.clientX, py: e.clientY, moved: false, snap: null, target: e.currentTarget, pointerId: e.pointerId };
+    var p = point(e);
+    gesture = { kind: kind, start: copy(rect), layout: snapshot(), sx: p.x, sy: p.y,
+      grabX: clamp((p.x - rect.x) / rect.w, 0, 1), grabY: clamp((p.y - rect.y) / rect.h, 0, 1),
+      px: p.x, py: p.y, moved: false, snap: null, target: e.currentTarget, pointerId: e.pointerId };
     focusControls(true);
     el('chat').classList.add('adjusting');
     if (e.currentTarget.setPointerCapture && e.pointerId != null) {
@@ -244,7 +273,7 @@ var ChatWindow = (function () {
     if (!gesture || (gesture.pointerId != null && e.pointerId !== gesture.pointerId)) return;
     if (e.buttons === 0) { finish(false); return; }
     e.preventDefault(); e.stopPropagation(); markInput();
-    gesture.px = e.clientX; gesture.py = e.clientY;
+    var p = point(e); gesture.px = p.x; gesture.py = p.y;
     if (frame === null) frame = requestAnimationFrame(applyGesture);
   }
   function init() {
@@ -273,14 +302,14 @@ var ChatWindow = (function () {
         if (target.getAttribute && target.getAttribute('data-resize')) { kind = target.getAttribute('data-resize'); break; }
         target = target.parentNode;
       }
-      if (kind === 'move' && e.target === el('chat-scroll') && e.clientX > rect.x + rect.w - 8) return;
+      if (kind === 'move' && e.target === el('chat-scroll') && point(e).x > rect.x + rect.w - 8) return;
       start(e, kind);
     });
     box.addEventListener('lostpointercapture', function () { finish(false); });
     document.addEventListener(pointer ? 'pointermove' : 'mousemove', move, true);
     document.addEventListener(pointer ? 'pointerup' : 'mouseup', function (e) {
       if (!gesture || (gesture.pointerId != null && e.pointerId !== gesture.pointerId)) return;
-      gesture.px = e.clientX; gesture.py = e.clientY;
+      var p = point(e); gesture.px = p.x; gesture.py = p.y;
       e.preventDefault(); e.stopPropagation(); finish(false);
     }, true);
     document.addEventListener('pointercancel', function () { finish(true); }, true);
@@ -317,6 +346,7 @@ var ChatWindow = (function () {
   }
   return {
     init: init, show: show, paint: paint, status: status,
+    viewportChanged: function () { finish(true); paint(); },
     hide: function () { finish(true); focusControls(false); cancelAutoLive(); fitVideo(); if (tailFrame !== null) cancelAnimationFrame(tailFrame); tailFrame = null; },
     clear: resetMessages,
     reading: function () { return !following || !!gesture; },

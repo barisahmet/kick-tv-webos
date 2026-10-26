@@ -2,6 +2,8 @@
 var fixtureStore = {}, fixtureWrites = {}, fixtureErrors = [], fixtureRequests = [];
 var SEED_FAVORITES = [];
 Object.defineProperty(window, 'localStorage', { value: {
+  get length() { return Object.keys(fixtureStore).length; },
+  key: function (index) { return Object.keys(fixtureStore)[index] || null; },
   getItem: function (key) { return fixtureStore[key] || null; },
   setItem: function (key, value) { fixtureStore[key] = String(value); fixtureWrites[key] = (fixtureWrites[key] || 0) + 1; },
   removeItem: function (key) { delete fixtureStore[key]; }
@@ -22,12 +24,23 @@ window.fixtureWait = function (ms) { return new Promise(function (resolve) { set
 window.fixtureUntil = async function (ready) {
   var deadline = Date.now() + 1500;
   while (!ready() && Date.now() < deadline) await fixtureWait(16);
+  if (!ready()) throw new Error('Fixture condition did not become ready');
+};
+window.fixtureFrame = function () {
+  var frame = document.createElement('canvas'); frame.width = 32; frame.height = 18;
+  frame.getContext('2d').fillRect(0, 0, 32, 18); return frame;
 };
 window.fixtureInit = function () {
+  serviceChatConnection = function (channelId, done) {
+    var timer = setTimeout(function () { done(null, { data: { mode: 'websocket', connections: [
+      { provider: 'pusher', credentials: { app_key: 'fixture-key', cluster: 'us2' } }
+    ] } }); }, 0);
+    return function () { clearTimeout(timer); };
+  };
   UIWork.setTransport(function (path, done) { fixtureRequests.push(path); var timer = setTimeout(function () { done('fixture'); }, 0); return function () { clearTimeout(timer); }; });
   state.ready = true; state.mode = 'player';
-  state.channels.alpha = { slug: 'alpha', name: 'Alpha', live: true, viewers: 1234, title: 'A long fixture title for local UI checks', chatroomId: 1 };
-  state.channels.beta = { slug: 'beta', name: 'Beta', live: true, viewers: 4321, title: 'Another stream', chatroomId: 2 };
+  state.channels.alpha = { slug: 'alpha', name: 'Alpha', live: true, viewers: 1234, title: 'A long fixture title for local UI checks', channelId: 41, chatroomId: 1 };
+  state.channels.beta = { slug: 'beta', name: 'Beta', live: true, viewers: 4321, title: 'Another stream', channelId: 42, chatroomId: 2 };
   state.order = ['alpha', 'beta']; state.current = 'alpha'; state.lastFetch = Date.now();
   lsSet('kicktv.added', ['alpha', 'beta']);
   loadSettings(); ChatWindow.init(); UIPolish.init();

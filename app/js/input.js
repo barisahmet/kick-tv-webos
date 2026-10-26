@@ -12,6 +12,7 @@ document.addEventListener('keydown', function (e) {
     if (k === KEY.BACK || k === KEY.STOP) armOrExit();
     return;
   }
+  if (vodNext.open) { e.preventDefault(); vodNextKey(k); return; }
   if (state.vod && vodPointerHover) {
     vodPointerHover = '';     // remote input resumes timed hiding, even under a parked cursor
     if (vodBarVisible()) armVodOverlayHide();
@@ -297,6 +298,8 @@ function browseCardFromEvent(e) {
   return { el: el, idx: i };
 }
 (function wirePointer() {
+  document.getElementById('vod-next-play').addEventListener('click', playVodNext);
+  document.getElementById('vod-next-cancel').addEventListener('click', dismissVodNext);
   var playerEl = document.getElementById('player');
   document.getElementById('notify').addEventListener('click', function (e) {
     e.stopPropagation();
@@ -684,6 +687,9 @@ function browseCardFromEvent(e) {
   wtwButton.addEventListener('click', function (e) {
     e.stopPropagation(); setPlayerToolFocus(2); openWhatToWatch();
   });
+  document.getElementById('wtw-resume').addEventListener('click', function () { wtwSelect('resume'); });
+  document.getElementById('wtw-suggested').addEventListener('click', function () { wtwSelect('suggested'); });
+  document.getElementById('wtw-close').addEventListener('click', closeWhatToWatch);
   var wtwList = document.getElementById('wtw-list');
   function wtwIdx(e) {
     var el = e.target;
@@ -694,11 +700,17 @@ function browseCardFromEvent(e) {
   }
   wtwList.addEventListener('mouseover', function (e) {
     var i = wtwIdx(e);
-    if (i >= 0 && i !== wtw.focus) wtwMove(i - wtw.focus);
+    if (i >= 0) {
+      if (wtw.zone !== 'list') { wtw.zone = 'list'; renderWhatToWatch(); }
+      wtwMove(i - wtw.focus);
+    }
   });
   wtwList.addEventListener('click', function (e) {
     var i = wtwIdx(e);
-    if (i >= 0) { wtw.focus = i; wtwActivate(); }
+    if (i >= 0) {
+      wtw.focus = i; wtw.zone = 'list';
+      if (e.target.getAttribute('data-remove')) removeWtwResume(); else wtwActivate();
+    }
   });
   wtwList.addEventListener('wheel', function (e) { e.preventDefault(); wtwList.scrollTop += (e.deltaY > 0 ? 1 : -1) * 100; });
   document.getElementById('wtwmodal').addEventListener('click', function (e) {
@@ -930,6 +942,8 @@ function browseCardFromEvent(e) {
   document.getElementById('chatopt-close').addEventListener('click', closeChatOpt);
   document.getElementById('chatoptmodal').addEventListener('click', function (e) { if (e.target === this) closeChatOpt(); });
   // Blocked categories popup pointer
+  document.getElementById('backup-cancel').addEventListener('click', cancelBackupImport);
+  document.getElementById('backup-retry').addEventListener('click', retryBackupImport);
   document.getElementById('backup-choices').addEventListener('click', function (e) {
     var i = parseInt(e.target.getAttribute && e.target.getAttribute('data-idx'), 10);
     if (!isNaN(i) && backup.inbox && !backup.busy) { backup.choice = i; backupChoose(); }
@@ -1047,7 +1061,14 @@ function browseCardFromEvent(e) {
   video.addEventListener('loadeddata', function () { setPosterStill(null); });
   // Buffering spinner for both live and VOD.
   video.addEventListener('waiting', function () { resetVodRecovery(); if (!video.paused) showSpinnerSoon(); });
-  video.addEventListener('seeking', function () { resetVodRecovery(); showSpinnerSoon(); });
+  video.addEventListener('seeking', function () {
+    if (state.vod && state.vod.completed && !video.ended) {
+      cancelVodNext();
+      state.vod.completed = false; state.vod.ending = false;
+      saveLastVod(state.vod.slug, { id: state.vod.markerId }, state.vod.name);
+    }
+    resetVodRecovery(); showSpinnerSoon();
+  });
   video.addEventListener('loadedmetadata', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('durationchange', function () { if (state.vod) applyVodResume(); });
   video.addEventListener('canplay', function () { if (state.vod) applyVodResume(); hideSpinner(); });

@@ -4,7 +4,6 @@
   // Invoked only by the local screenshot harness, after behavioral checks.
   root.setupVisualScreenshot = function (mode) {
     function el(id) { return document.getElementById(id); }
-    UIPolish.cancelDetails();
     if (typeof settingDescTimer !== 'undefined') clearTimeout(settingDescTimer);
     if (typeof settingsIdleTimer !== 'undefined') clearTimeout(settingsIdleTimer);
     ['settingsmodal', 'qualityoptmodal', 'dimoptmodal', 'chatoptmodal', 'blockedcatsmodal', 'browse', 'cats', 'vods',
@@ -53,11 +52,9 @@
       if (!node) return;
       saved.push({ node: node, style: node.getAttribute('style'), cls: node.className, html: contents ? node.innerHTML : null });
     }
-    function wait(ms) { return new Promise(function (resolve) { root.setTimeout(resolve, ms); }); }
     function rect(node) { return node.getBoundingClientRect(); }
     function intersects(a, b) { return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top; }
     function restore() {
-      UIPolish.cancelDetails();
       preference.uiText = oldText;
       preference.dim = oldDim; preference.dimScope = oldScope; preference.dimStrength = oldStrength;
       UIPolish.apply(true);
@@ -91,7 +88,7 @@
     var listIds = ['settings-list', 'qualityopt-list', 'dimopt-list', 'chatopt-list', 'blockedcats-list'];
     var obstacleIds = ['chat', 'sidebar', 'player-tools', 'cbguide', 'overlay', 'vodbar', 'notify', 'settings-desc', 'quality-hint'];
     var longTitle = 'A long evening stream: conversations, unexpected discoveries, and a complete title that remains readable without moving text';
-    var shortCard, longCard, panel, anchor, descriptionBefore;
+    var shortCard, longCard, panel, anchor;
     return Promise.resolve().then(function () {
       assert(!!root.UIPolish, 'UI polish API is present');
       modalIds.concat(obstacleIds).forEach(function (id) { var node = el(id); if (node) { remember(node); node.classList.add('hidden'); } });
@@ -161,36 +158,12 @@
       assert(!intersects(rect(panel), rect(chat)), 'placement avoids visible chat when a clear alternative exists');
       assert(!intersects(rect(panel), rect(anchor)), 'placement keeps the anchor control visible');
       chat.classList.add('hidden'); panel.style.display = 'none';
-      UIPolish.details('browse', { id: 1, session_title: longTitle, categories: [{ name: 'Just Chatting' }] }, anchor);
-      assert(!el('ui-details') || el('ui-details').classList.contains('hidden'), 'full details do not appear immediately');
-      return wait(250);
-    }).then(function () {
-      UIPolish.cancelDetails();
-      return wait(500);
-    }).then(function () {
-      assert(!el('ui-details') || el('ui-details').classList.contains('hidden'), 'leaving before dwell cancels late details');
       preference.dim = true; preference.dimScope = 'all'; preference.dimStrength = 0.95;
-      UIPolish.details('browse', { id: 1, session_title: longTitle }, anchor);
-      return wait(720);
-    }).then(function () {
-      var details = el('ui-details');
-      assert(details && !details.classList.contains('hidden'), 'full details appear after a stable dwell');
-      assert(parseFloat(root.getComputedStyle(details).filter.replace(/[^0-9.]/g, '')) < 0.1, 'details inherit strong night dimming when first shown');
+      applyDimAwareUi();
+      assert(parseFloat(el('quality-hint').style.filter.replace(/[^0-9.]/g, '')) < 0.1, 'popup hints inherit strong night dimming');
+      assert(parseFloat(el('settings-desc').style.filter.replace(/[^0-9.]/g, '')) >= 0.4, 'settings descriptions remain readable under strong dimming');
       preference.dim = false; applyDimAwareUi();
-      assert(!details.style.filter, 'existing details respond when dimming changes');
-      assert(details.querySelector('.ui-details-title').textContent === longTitle, 'details preserve the complete title');
-      assert(anchor.getAttribute('aria-describedby') === 'existing-description ui-details', 'details preserve existing accessible descriptions');
-      descriptionBefore = details.children[0];
-      var before = rect(details);
-      UIPolish.details('browse', { id: 1, session_title: longTitle }, anchor);
-      assert(details.children[0] === descriptionBefore && rect(details).left === before.left, 'same focused item retains stable details without rebuilding or moving');
-      UIPolish.cancelDetails();
-      assert(anchor.getAttribute('aria-describedby') === 'existing-description', 'cancelling details restores the original accessible description');
-      UIPolish.details('browse', { id: 2, session_title: 'Removed card' }, anchor);
-      anchor.parentNode.removeChild(anchor);
-      return wait(720);
-    }).then(function () {
-      assert(el('ui-details').classList.contains('hidden'), 'detached virtual cards never display stale details');
+      assert(!el('quality-hint').style.filter && !el('settings-desc').style.filter, 'existing hints respond when dimming is disabled');
       restore();
       return { suite: 'visual', passed: true };
     }).catch(function (error) { restore(); throw error; });

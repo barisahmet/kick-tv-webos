@@ -159,7 +159,7 @@ function saveChannelCache() {
       out.channels[s] = { slug: s, name: c.name, avatar: c.avatar, live: c.live,
                           viewers: c.viewers, title: c.title, category: c.category,
                           categorySlug: c.categorySlug || '', startedAt: c.startedAt || null,
-                          playbackUrl: null, chatroomId: c.chatroomId || null };
+                          playbackUrl: null, channelId: c.channelId || null, chatroomId: c.chatroomId || null };
     }
     localStorage.setItem('kicktv.channelcache', JSON.stringify(out));
   } catch (e) {}

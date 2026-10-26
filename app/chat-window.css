@@ -9,7 +9,9 @@
   background: rgba(12,16,18,0.16); opacity: 1;
   color: #f0f3f4; text-shadow: 0 1px 3px #000;
   cursor: move; touch-action: none; -webkit-user-select: none; user-select: none;
+  transform-origin: top left;
 }
+#chat-snap { transform-origin: top left; }
 #chat.on { display: flex; }
 #chat.docked { border-radius: 0; }
 #chat.focused { border-color: rgba(224,233,237,0.3); }

@@ -422,6 +422,7 @@ function saveVodProgress(force) {
     };
     if (watched) data.items[state.vod.key].watched = true;
   }
+  if (prev && prev.dismissed && data.items[state.vod.key]) data.items[state.vod.key].dismissed = true;
   writeVodProgress(data);
 }
 function applyVodResume() {
@@ -745,6 +746,7 @@ function playVod(v, queue, queueIndex, slug, opts) {
   var progressKey = vodProgressKey(vodSlug, v);
   var resumeAt = liveRewind ? opts.resumeAt : savedVodPosition(progressKey);
   var savedEntry = liveRewind ? null : loadVodProgress().items[progressKey];
+  if (savedEntry && savedEntry.dismissed) { delete savedEntry.dismissed; writeVodProgress(loadVodProgress()); }
   var knownDuration = (savedEntry && savedEntry.duration) || (v.duration || 0) / 1000 || 0;
   // A running stream's recording lists no duration; it is as long as the stream so far.
   if (liveRewind && !knownDuration && opts.recStartMs) knownDuration = Math.max(0, (Date.now() - opts.recStartMs) / 1000);
@@ -783,7 +785,10 @@ function playVod(v, queue, queueIndex, slug, opts) {
 function nextQueuedVod(vodState) {
   if (!vodState || !Array.isArray(vodState.queue)) return null;
   for (var i = (vodState.queueIndex || 0) + 1; i < vodState.queue.length; i++) {
-    if (playableVod(vodState.queue[i])) return { item: vodState.queue[i], index: i };
+    if (playableVod(vodState.queue[i]) && (!settings.autoSkipWatched ||
+        !vodWatchedInfo(vodState.slug, vodState.queue[i], loadVodProgress().items).watched)) {
+      return { item: vodState.queue[i], index: i };
+    }
   }
   return null;
 }
@@ -794,15 +799,59 @@ function advanceVodOrExit() {
   if (settings.autoadvance) {
     var next = nextQueuedVod(finished);
     if (next) {
-      toast('Up next: ' + (next.item.session_title || 'Past video'));
-      playVod(next.item, finished.queue, next.index, finished.slug);
+      showVodNext(finished, next);
       return;
     }
   }
   toast('Video ended');
   exitVod();
 }
+var vodNext = { open: false, owner: null, next: null, timer: null, deadline: 0, focus: 1 };
+function cancelVodNext() {
+  clearInterval(vodNext.timer); vodNext.timer = null; vodNext.open = false;
+  vodNext.owner = null; vodNext.next = null;
+  document.getElementById('vod-next').className = 'hidden';
+}
+function dismissVodNext() { cancelVodNext(); showVodOverlay(); }
+function showVodNext(owner, next) {
+  cancelVodNext();
+  if (document.hidden) return;
+  // An existing library/settings panel belongs to the viewer; do not replace it.
+  if (anyPanelOpen()) return;
+  vodNext.open = true; vodNext.owner = owner; vodNext.next = next; vodNext.focus = 1;
+  vodNext.deadline = Date.now() + 10000;
+  document.getElementById('vod-next-title').textContent = next.item.session_title || 'Past video';
+  document.getElementById('vod-next').className = '';
+  applyVodNextFocus(); tickVodNext();
+  vodNext.timer = setInterval(tickVodNext, 250);
+}
+function applyVodNextFocus() {
+  document.getElementById('vod-next-play').classList.toggle('focused', vodNext.focus === 0);
+  document.getElementById('vod-next-cancel').classList.toggle('focused', vodNext.focus === 1);
+}
+function tickVodNext() {
+  if (!vodNext.open) return;
+  if (state.vod !== vodNext.owner || !settings.autoadvance || document.hidden) { cancelVodNext(); return; }
+  var remaining = Math.max(0, Math.ceil((vodNext.deadline - Date.now()) / 1000));
+  document.getElementById('vod-next-count').textContent = 'Next video in ' + remaining + ' seconds';
+  if (!remaining) playVodNext();
+}
+function playVodNext() {
+  if (!vodNext.open) return;
+  var owner = vodNext.owner;
+  if (state.vod !== owner || document.hidden || !settings.autoadvance) { cancelVodNext(); return; }
+  var next = nextQueuedVod(owner);
+  cancelVodNext();
+  if (next) playVod(next.item, owner.queue, next.index, owner.slug);
+  else exitVod();
+}
+function vodNextKey(k) {
+  if (k === KEY.BACK || k === KEY.STOP) dismissVodNext();
+  else if (k === KEY.LEFT || k === KEY.RIGHT) { vodNext.focus = k === KEY.LEFT ? 0 : 1; applyVodNextFocus(); }
+  else if (k === KEY.OK) { if (vodNext.focus === 0) playVodNext(); else dismissVodNext(); }
+}
 function attachVod(source) {
+  cancelVodNext();
   var video = document.getElementById('video');
   if (state.hls) { try { state.hls.destroy(); } catch (e) {} state.hls = null; }
   if (state.vod) { state.vod.resumeApplied = false; state.vod.progressReady = false; }

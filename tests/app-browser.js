@@ -41,7 +41,7 @@ window.runAppTests = async function (assert) {
   assert(settings.chat === false, 'chat starts disabled for a new streamer');
   settings.chat = true; settings.chatDelay = 3; settings.chatResizePreview = false; saveSettings();
   state.current = 'beta'; applyStreamerChatPreferences();
-  assert(!settings.chat && settings.chatDelay === 0 && settings.chatResizePreview, 'another streamer retains default-off chat and independent defaults');
+  assert(!settings.chat && settings.chatDelay === -1 && settings.chatResizePreview, 'another streamer starts with chat closed and automatic delay');
   state.current = 'alpha'; applyStreamerChatPreferences();
   assert(settings.chat && settings.chatDelay === 3 && !settings.chatResizePreview, 'all chat options restore per streamer');
   settings.chatDelay = 0; settings.chatEmotes = 'text'; settings.chatResizePreview = true;
@@ -87,8 +87,8 @@ window.runAppTests = async function (assert) {
   assert(chatEl().getBoundingClientRect().top === r.top, 'obsolete subtitle preference does not move floating chat');
   r = chatEl().getBoundingClientRect();
   pointer(chatEl(), 'pointerdown', r.left + 70, r.top + 30, 1);
-  pointer(document, 'pointermove', 20, r.top + 30, 1); await fixtureWait();
-  pointer(document, 'pointerup', 20, r.top + 30, 0);
+  pointer(document, 'pointermove', 1, r.top + 30, 1); await fixtureWait();
+  pointer(document, 'pointerup', 1, r.top + 30, 0);
   assert(chatEl().getAttribute('data-dock') === 'left' && chatEl().getBoundingClientRect().height === 1080, 'dragging docks chat along the full left edge');
   settings.chatSeparate = true; applyChatStyle();
   r = chatEl().getBoundingClientRect();

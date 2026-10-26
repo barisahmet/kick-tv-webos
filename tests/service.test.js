@@ -15,6 +15,11 @@ function harness() {
       const req = new EventEmitter(); req.setTimeout = (ms, fn) => { req.timeout = fn; };
       req.abort = () => req.emit('error', Error('aborted'));
       requests.push({ options, cb, req }); return req;
+    },
+    request(options, cb) {
+      const req = this.get(options, cb);
+      req.end = body => { req.body = body; };
+      return req;
     }
   };
   const timers = [];
@@ -37,6 +42,42 @@ function harness() {
   }
   return { ...context, handlers, begin, response, fetch, requests, timers };
 }
+
+test('chat descriptor uses the current per-channel endpoint and preserves TLS settings', () => {
+  const h = harness(), replies = [];
+  h.handlers.chatConnection({ payload: { channelId: 42 }, respond: r => replies.push(r) });
+  const request = h.requests[0];
+  assert.equal(request.options.host, 'web.kick.com');
+  assert.equal(request.options.path, '/api/v1/realtime/channels/42/chat/connection');
+  assert.equal(request.options.method, 'POST');
+  assert.equal(request.options.ecdhCurve, 'X25519:prime256v1:secp384r1');
+  const body = JSON.parse(request.req.body);
+  assert.equal(body.client.type, 'web');
+  assert.deepEqual(body.capabilities.accepted_providers, [{ provider: 'pusher' }]);
+  const descriptor = JSON.stringify({ data: { mode: 'websocket', connections: [
+    { provider: 'pusher', credentials: { app_key: 'rotated-key', cluster: 'eu' } }
+  ] } });
+  h.response(request, descriptor).emit('end');
+  assert.equal(replies[0].body, descriptor);
+  assert.equal(replies[0].status, 200);
+});
+
+test('chat descriptor rejects invalid channel ids and settles failures once', () => {
+  const h = harness();
+  for (const channelId of [undefined, 0, -1, 1.5, '42/other', {}, Infinity]) {
+    const replies = [];
+    h.handlers.chatConnection({ payload: { channelId }, respond: r => replies.push(r) });
+    assert.equal(replies[0].ok, false);
+  }
+  assert.equal(h.requests.length, 0);
+  const replies = [];
+  h.handlers.chatConnection({ payload: { channelId: 42 }, respond: r => replies.push(r) });
+  const req = h.requests[0];
+  h.timers[h.timers.length - 1].fn();
+  h.response(req, '{}').emit('end');
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].error, 'timeout');
+});
 
 const image = { src: 'https://images.test/large.webp', srcset: 'https://images.test/small.webp 480w', responsive: 'https://images.test/cat.webp 400w', url: 'https://images.test/fallback.webp' };
 const category = { id: 3, slug: 'games', name: 'Games', banner: image, viewer_count: 21, viewers: 22, livestreams_count: 2, unused: 'omit' };
