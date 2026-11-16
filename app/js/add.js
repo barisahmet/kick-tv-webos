@@ -181,7 +181,7 @@ function showAddSuggestions(first) {
   add.suggesting = true;
   add.results = addSuggestionList();
   var stale = !liveSuggest.list || Date.now() - liveSuggest.at > LIVE_SUGGEST_TTL;
-  if (stale) fetchLiveSuggestions(add.session);
+  if (stale) fetchLiveSuggestions();
   if (!add.results.length && !stale) { add.suggesting = false; return false; }
   if (first) { add.zone = 'list'; add.focus = add.results.length ? 0 : -1; }
   renderAddResults();
@@ -196,7 +196,9 @@ function showAddSuggestions(first) {
   }
   return true;
 }
-function fetchLiveSuggestions(ses) {
+// One fetch at a time, whichever dialog started it: the answer goes to the dialog
+// that is open when it arrives (reopening Add must not leave it waiting for good).
+function fetchLiveSuggestions() {
   if (liveSuggest.pending) return;
   liveSuggest.pending = true;
   var list = [], page = 1;
@@ -216,16 +218,16 @@ function fetchLiveSuggestions(ses) {
         liveSuggest.list = list; liveSuggest.at = Date.now();
       }
       var enough = liveSuggestions(Object.create(null)).length >= LIVE_SUGGEST_MAX;
-      if (arr && arr.length && !enough && page < LIVE_SUGGEST_PAGES) { page++; refreshAddSuggestions(ses, false); next(); return; }
+      if (arr && arr.length && !enough && page < LIVE_SUGGEST_PAGES) { page++; refreshAddSuggestions(false); next(); return; }
       liveSuggest.pending = false;
-      refreshAddSuggestions(ses, true);
+      refreshAddSuggestions(true);
     }, { priority: 1 });
   }
   next();
 }
-// Only touch a dialog that is still this one and still showing suggestions.
-function refreshAddSuggestions(ses, final) {
-  if (state.mode !== 'add' || add.session !== ses || !add.suggesting) return;
+// Only touch a dialog that is open and still showing suggestions.
+function refreshAddSuggestions(final) {
+  if (state.mode !== 'add' || !add.suggesting) return;
   if (document.getElementById('addinput').value.trim()) return;
   var hadNone = !add.results.length;
   add.results = addSuggestionList();
@@ -262,10 +264,12 @@ function addChannelBySlug(raw) {
       add.results = []; add.zone = 'input';
       setMode('player');
     }
-    fetchFavorites(function () {
-      if (wasAdd && !state.sidebarOpen) openSidebar(); else if (state.sidebarOpen) renderSidebar(slug);
-      if (!state.current && !state.vod && state.mode === 'player') showNothing();
-    });
+    // Its data was fetched a moment ago, so sorting it into the list is local; the
+    // other channels do not need fetching again for this.
+    sortOrder(currentFavoritesWithData()); saveChannelCache();
+    if (wasAdd && !state.sidebarOpen) openSidebar(); else if (state.sidebarOpen) renderSidebar(slug);
+    if (!state.current && !state.vod && state.mode === 'player') showNothing();
+    resetIdle();             // the list's idle timer ran out while the dialog was up
   });
 }
 

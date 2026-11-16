@@ -764,6 +764,9 @@ function playVod(v, queue, queueIndex, slug, opts) {
                 // Rewound live: temporary, so no progress, no Continue Watching, no
                 // startup recovery; its end is the live edge, not "video ended".
                 liveRewind: liveRewind,
+                // Wall-clock time of position 0, for chat replay until the player reports
+                // exact segment times. created_at is the stream start.
+                startMs: liveRewind ? (opts.recStartMs || 0) : (parseKickTime(v.created_at) || 0),
                 wallTarget: liveRewind ? opts.wallTarget : 0,
                 recStartMs: liveRewind ? opts.recStartMs : 0, recEndMs: 0 };
   applyStreamerChatPreferences();
@@ -778,6 +781,7 @@ function playVod(v, queue, queueIndex, slug, opts) {
   drawVodBar(resumeAt, knownDuration);
   attachVod(v.source);
   showVodOverlay();
+  syncChat();                    // replay this stream's chat if chat is on for the streamer
 }
 // The API list is rendered newest to oldest, so the next card in that visible
 // order is the next queue item. Source-less entries are skipped defensively even
@@ -799,31 +803,51 @@ function advanceVodOrExit() {
   if (settings.autoadvance) {
     var next = nextQueuedVod(finished);
     if (next) {
-      showVodNext(finished, next);
+      if (!showVodNext(finished, next)) waitToOfferVodNext(finished);
       return;
     }
   }
   toast('Video ended');
   exitVod();
 }
-var vodNext = { open: false, owner: null, next: null, timer: null, deadline: 0, focus: 1 };
+var vodNext = { open: false, owner: null, next: null, timer: null, deadline: 0, focus: 1,
+                waitOwner: null, waitTimer: null };
 function cancelVodNext() {
   clearInterval(vodNext.timer); vodNext.timer = null; vodNext.open = false;
   vodNext.owner = null; vodNext.next = null;
+  clearInterval(vodNext.waitTimer); vodNext.waitTimer = null; vodNext.waitOwner = null;
   document.getElementById('vod-next').className = 'hidden';
 }
+/* The countdown is not laid over an open panel, nor started while another app is
+   in front. The finished video then waits here and is offered as soon as the
+   screen is free, instead of sitting on its last frame for good. */
+function waitToOfferVodNext(owner) {
+  vodNext.waitOwner = owner;
+  clearInterval(vodNext.waitTimer);
+  vodNext.waitTimer = setInterval(tickVodNextWait, 500);
+}
+function tickVodNextWait() {
+  var owner = vodNext.waitOwner;
+  if (!owner) return;
+  if (state.vod !== owner || !owner.ending) { cancelVodNext(); return; }   // it moved on by other means
+  if (document.hidden || anyPanelOpen()) return;
+  cancelVodNext();
+  advanceVodOrExit();        // decided afresh: the setting or the queue may have changed meanwhile
+}
 function dismissVodNext() { cancelVodNext(); showVodOverlay(); }
+// False when the countdown cannot be shown right now (see waitToOfferVodNext).
 function showVodNext(owner, next) {
   cancelVodNext();
-  if (document.hidden) return;
+  if (document.hidden) return false;
   // An existing library/settings panel belongs to the viewer; do not replace it.
-  if (anyPanelOpen()) return;
+  if (anyPanelOpen()) return false;
   vodNext.open = true; vodNext.owner = owner; vodNext.next = next; vodNext.focus = 1;
   vodNext.deadline = Date.now() + 10000;
   document.getElementById('vod-next-title').textContent = next.item.session_title || 'Past video';
   document.getElementById('vod-next').className = '';
   applyVodNextFocus(); tickVodNext();
   vodNext.timer = setInterval(tickVodNext, 250);
+  return true;
 }
 function applyVodNextFocus() {
   document.getElementById('vod-next-play').classList.toggle('focused', vodNext.focus === 0);
@@ -831,7 +855,12 @@ function applyVodNextFocus() {
 }
 function tickVodNext() {
   if (!vodNext.open) return;
-  if (state.vod !== vodNext.owner || !settings.autoadvance || document.hidden) { cancelVodNext(); return; }
+  if (document.hidden && state.vod === vodNext.owner && settings.autoadvance) {
+    var cut = vodNext.owner;            // another app came to the front: offer it again on return
+    cancelVodNext(); waitToOfferVodNext(cut);
+    return;
+  }
+  if (state.vod !== vodNext.owner || !settings.autoadvance) { cancelVodNext(); return; }
   var remaining = Math.max(0, Math.ceil((vodNext.deadline - Date.now()) / 1000));
   document.getElementById('vod-next-count').textContent = 'Next video in ' + remaining + ' seconds';
   if (!remaining) playVodNext();
@@ -919,7 +948,7 @@ function liveRewindLevelLoaded(hls, d) {
   var det = d && d.details, frags = det && det.fragments;
   var pdt = frags && frags.length && frags[0].programDateTime;
   if (!(pdt > 0)) return;
-  v.recStartMs = pdt;
+  v.recStartMs = pdt; v.startMs = pdt;
   if (det.totalduration > 0) v.recEndMs = pdt + det.totalduration * 1000;
   if (v.wallTarget && !v.resumeApplied) v.resumeAt = Math.max(0, (v.wallTarget - pdt) / 1000);
   v.wallTarget = 0;              // a later reload resumes from the playhead, not this target
@@ -967,7 +996,7 @@ function exitVod() {
   state.vodReturn = null;
   setBanner('');
   if (back && state.channels[back] && state.channels[back].live) play(back);
-  else { state.current = null; applyStreamerChatPreferences(); updateGear(); showNothing(); }
+  else { disconnectChat(); state.current = null; applyStreamerChatPreferences(); updateGear(); showNothing(); }
 }
 /* Rapid seek presses accumulate (+30, +60, +90...) and apply as one jump after
    a short pause, YouTube-style. Nothing actually seeks until the timeout, so
@@ -1175,8 +1204,6 @@ function drawVodBar(cur, dur, origin) {
   changedText(document.getElementById('vodbar-cur'), fmtClock(cur));
   changedText(document.getElementById('vodbar-dur'), fmtClock(dur));
 }
-// CSS positions the title and timeline together, leaving room for the sidebar.
-function placeVodBar() {}
 function drawVodBarNow() {
   var v = document.getElementById('video');
   if (!state.vod || vodDragging) return;
@@ -1190,7 +1217,6 @@ function drawVodBarNow() {
   // While the resume seek is still pending, keep showing the target position
   // rather than a transient 0:00.
   else if (state.vod.resumeAt > 0 && !state.vod.resumeApplied && cur < state.vod.resumeAt) cur = state.vod.resumeAt;
-  placeVodBar();
   drawVodBar(cur, dur, seekAccum.baseTime);
 }
 function showVodBar() {
@@ -1204,7 +1230,6 @@ function showVodBar() {
   else if (golive.className === 'hidden') golive.className = '';
   applyVodCtrlFocus();                       // then re-apply focus, never blindly cleared
   placeDiagnostics();
-  placeVodBar();
   drawVodBarNow();
   if (!vodbarTimer) vodbarTimer = setInterval(drawVodBarNow, 500);
 }

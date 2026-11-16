@@ -65,13 +65,20 @@ function toggleVodPlay() {
    Kick's chat is delivered over a public Pusher WebSocket, so we can read it
    without any login. We connect straight to Pusher (no Cloudflare in the way,
    unlike the API), subscribe to the channel's chatroom, and print messages.
-   Sending would need an account, which this app deliberately does not do. */
+   Sending would need an account, which this app deliberately does not do.
+
+   The same socket carries the channel's own events, which is how a raid is
+   announced (raid.js). So it is open whenever a live channel needs either: chat
+   that is switched on, or raid follow. What the events mean is in chat-events.js. */
 var CHAT_MAX = 160;                       // bounded scrollback, including off-screen messages
 var CHAT_DELAY_MAX = 1000;
 var chatPending = [], chatDelayTimer = null;
+// viewing: the chat window is open on this socket (the socket can be up without it).
+// ready: Pusher has accepted the connection. subs: the Pusher channels asked for.
 var chat = { ws: null, room: null, want: false, retry: 0, retryTimer: null,
              activityMs: 120000, activityTimer: null, pongTimer: null,
-             connectAttempt: 0, connecting: false, cancelConnect: null };
+             connectAttempt: 0, connecting: false, cancelConnect: null,
+             viewing: false, ready: false, subs: {} };
 /* How long to hold a message. Auto (-1) holds it as long as the picture trails
    real time: every segment carries the wall-clock time it was broadcast, so
    now minus the playing frame's time is exactly how far behind the video is.
@@ -91,7 +98,7 @@ function chatDelayMs() {
 // On Auto the lag moves (buffering, a pause, Go live), so the wait is re-judged
 // at least every second.
 function scheduleChatDelay() {
-  if (chatDelayTimer !== null || !chatPending.length) return;
+  if (chatHold !== null || chatDelayTimer !== null || !chatPending.length) return;
   var wait = Math.max(0, chatPending[0].at + chatDelayMs() - Date.now());
   if (settings.chatDelay < 0) wait = Math.min(wait, 1000);
   chatDelayTimer = setTimeout(drainChatDelay, wait);
@@ -99,6 +106,7 @@ function scheduleChatDelay() {
 function drainChatDelay() {
   if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
   chatDelayTimer = null;
+  if (chatHold !== null) return;
   var now = Date.now(), count = 0, delay = chatDelayMs();
   while (chatPending.length && chatPending[0].at + delay <= now && count < 40) {
     var item = chatPending.shift(); count++;
@@ -112,16 +120,71 @@ function rescheduleChatDelay() {
   chatDelayTimer = null;
   scheduleChatDelay();
 }
-function queueChatMessage(data) {
-  if (!data || !data.sender || !chat.want || !settings.chat) return;
-  chatPending.push({ data: data, at: Date.now(), room: chat.room });
+/* While the room's recent history is on its way nothing is released, so the
+   history lands before the live messages that follow it instead of after them.
+   The hold is short and ends by itself: a slow or failed lookup must not keep
+   chat blank. Auto delay holds messages for longer than this anyway. */
+var chatHold = null;
+function holdChat(ms) {
+  if (chatHold !== null) clearTimeout(chatHold);
+  chatHold = setTimeout(function () { chatHold = null; drainChatDelay(); }, ms);
+}
+function releaseChatHold(quiet) {
+  if (chatHold === null) return;
+  clearTimeout(chatHold); chatHold = null;
+  if (!quiet) drainChatDelay();
+}
+// Message ids seen lately: a message that arrives live and again in the room's
+// history (or in the history after a reconnect) is shown once.
+var CHAT_SEEN_MAX = 600;
+var chatSeen = Object.create(null), chatSeenOrder = [];
+function chatSeenBefore(id) {
+  if (typeof id !== 'string' || !id) return false;
+  if (chatSeen[id]) return true;
+  chatSeen[id] = true; chatSeenOrder.push(id);
+  if (chatSeenOrder.length > CHAT_SEEN_MAX) delete chatSeen[chatSeenOrder.shift()];
+  return false;
+}
+function forgetChatSeen() { chatSeen = Object.create(null); chatSeenOrder = []; }
+// data is a Kick chat message, or { notice: 'text' } for an event line. `at` is when
+// it was sent, for history; live messages count from now.
+function queueChatMessage(data, at) {
+  if (!data || !(data.sender || data.notice) || !chat.want || !settings.chat) return;
+  if (chatSeenBefore(data.id)) return;
+  var now = Date.now();
+  var item = { data: data, at: at > 0 && at < now ? at : now, room: chat.room };
+  // Live messages arrive in order; history lands among them and is slotted in.
+  var i = chatPending.length;
+  while (i > 0 && chatPending[i - 1].at > item.at) i--;
+  chatPending.splice(i, 0, item);
   if (chatPending.length > CHAT_DELAY_MAX) chatPending.shift();
   if (settings.chatDelay === 0 && chatPending.length === 1 && chatDelayTimer === null) drainChatDelay();
+  else if (i === 0) rescheduleChatDelay();   // a new head changes when the timer is due
   else scheduleChatDelay();
 }
 function clearChatDelay() {
   if (chatDelayTimer !== null) clearTimeout(chatDelayTimer);
   chatDelayTimer = null; chatPending = [];
+}
+// Moderation: take a deleted message (field 'id') or everything a banned chatter
+// wrote (field 'uid') out of the queues and off the screen.
+function dropChatMessages(field, value) {
+  value = String(value);
+  function hit(d) { return String(field === 'id' ? d.id : (d.sender && d.sender.id)) === value; }
+  chatPending = chatPending.filter(function (item) { return !hit(item.data); });
+  chatRenderQueue = chatRenderQueue.filter(function (entry) { return !hit(entry.data); });
+  dropChatRows('data-' + field, value);
+}
+function dropChatRows(attr, value) {
+  var box = chatMessagesEl(), row = box.firstChild, next;
+  while (row) {
+    next = row.nextSibling;
+    if (row.getAttribute && row.getAttribute(attr) === value) {
+      if (window.UIImages) UIImages.release(row);
+      box.removeChild(row);
+    }
+    row = next;
+  }
 }
 function chatEl() { return document.getElementById('chat'); }
 function chatMessagesEl() { return document.getElementById('chat-messages'); }
@@ -153,9 +216,11 @@ function clearChat() {
   if (window.UIImages) UIImages.release(chatMessagesEl());
   chatMessagesEl().innerHTML = ''; ChatWindow.clear();
 }
-// Chat only exists on a live stream with a chat room; say why when it cannot.
+// Chat needs something to belong to: a live stream with a chat room, or a past
+// video, which replays the chat from its stream. Say why when it cannot.
 function chatCanTurnOn() {
-  if (!state.current || state.vod) { toast('Chat is available on live streams'); return false; }
+  if (state.vod) return true;
+  if (!state.current) { toast('Chat needs a stream or a past video'); return false; }
   if (!currentRoomId()) { toast('Chat is unavailable for this channel'); return false; }
   return true;
 }
@@ -182,21 +247,74 @@ function currentRoomId() {
   var c = state.current && state.channels[state.current];
   return (c && c.chatroomId) ? c.chatroomId : null;
 }
+// What a live channel's socket is for: chat, or (raid follow) the channel's own events.
+function chatSocketUse() { return !!(settings.chat || settings.raidFollow); }
 // Bring chat into line with the current setting and channel.
 function syncChat() {
   applyStreamerChatPreferences();
-  if (!settings.chat || !state.current) { disconnectChat(); return; }
-  var room = currentRoomId();
-  if (!room) { disconnectChat(); return; }
-  if (chat.room === room && (chat.connecting || (chat.ws && chat.ws.readyState <= 1))) { showChatOverlay(); return; }
+  // A past video has no socket: its chat is replayed from Kick's history (chat-replay.js).
+  if (state.vod) {
+    if (chat.want) closeChatSocket();
+    syncChatReplay();
+    return;
+  }
+  var room = state.current ? currentRoomId() : null;
+  if (!room || !chatSocketUse()) { disconnectChat(); return; }
+  if (chat.room === room && (chat.connecting || (chat.ws && chat.ws.readyState <= 1))) {
+    // The socket is already up: only what rides on it may have changed.
+    syncChatSubscriptions();
+    if (settings.chat) openChatView(room); else closeChatView();
+    return;
+  }
   connectChat(room);
 }
 function connectChat(room) {
   disconnectChat();
   chat.want = true; chat.room = room; chat.retry = 0;
-  clearChat(); showChatOverlay();
-  ChatWindow.status('connecting', 'Connecting...');
+  chat.viewing = !!settings.chat;
+  if (chat.viewing) {
+    clearChat(); showChatOverlay(); useSevenTv();
+    ChatWindow.status('connecting', 'Connecting...');
+  }
   openChatSocket(room);
+}
+// Chat switched on while the socket was already open for raid follow.
+function openChatView(room) {
+  showChatOverlay();
+  if (chat.viewing) return;
+  chat.viewing = true;
+  clearChat(); useSevenTv();
+  ChatWindow.status(chat.ready ? 'connected' : 'connecting', chat.ready ? 'Live' : 'Connecting...');
+  if (chat.ready) loadChatRoomState(room);
+}
+// Chat switched off while raid follow still needs the socket.
+function closeChatView() {
+  if (!chat.viewing) return;
+  chat.viewing = false;
+  clearChatDelay(); resetChatRoomState(); forgetChatSeen();
+  hideChatOverlay(); clearChat();
+}
+// The Pusher channels this socket should be listening to right now. Kick spreads
+// one chat room over three of them; the fourth is the channel itself.
+function chatChannelsWanted() {
+  var list = [], c = state.current && state.channels[state.current];
+  if (settings.chat && chat.room) list.push('chatrooms.' + chat.room + '.v2', 'chatrooms.' + chat.room, 'chatroom_' + chat.room);
+  if (settings.raidFollow && c && c.channelId) list.push('channel.' + c.channelId);
+  return list;
+}
+function syncChatSubscriptions() {
+  var ws = chat.ws;
+  if (!ws || !chat.ready) return;
+  var want = chatChannelsWanted(), i, name;
+  function send(event, channel) {
+    try { ws.send(JSON.stringify({ event: event, data: { channel: channel } })); } catch (e) {}
+  }
+  for (i = 0; i < want.length; i++) {
+    if (!chat.subs[want[i]]) { chat.subs[want[i]] = true; send('pusher:subscribe', want[i]); }
+  }
+  for (name in chat.subs) {
+    if (want.indexOf(name) === -1) { delete chat.subs[name]; send('pusher:unsubscribe', name); }
+  }
 }
 // A socket can die without ever closing (router restart, WAN failover): nothing
 // arrives and onclose never fires. So we watch for silence ourselves. After the
@@ -223,19 +341,19 @@ function armChatHeartbeat(ws, room) {
 }
 function chatSocketClosed(ws, room) {
   if (chat.ws !== ws) return;
-  chat.ws = null;
+  chat.ws = null; chat.ready = false; chat.subs = {};
   stopChatHeartbeat();
   scheduleChatRetry(room);
 }
 function scheduleChatRetry(room) {
-  if (!(chat.want && settings.chat && currentRoomId() === room)) return;
-  ChatWindow.status('reconnecting', 'Reconnecting...');
+  if (!(chat.want && chatSocketUse() && currentRoomId() === room)) return;
+  if (chat.viewing) ChatWindow.status('reconnecting', 'Reconnecting...');
   chat.retry++;
   var delay = Math.min(15000, 1500 * chat.retry);
   clearTimeout(chat.retryTimer);
   chat.retryTimer = setTimeout(function () {
     chat.retryTimer = null;
-    if (chat.want && settings.chat && currentRoomId() === room) openChatSocket(room);
+    if (chat.want && chatSocketUse() && currentRoomId() === room) openChatSocket(room);
   }, delay);
 }
 function openChatSocket(room) {
@@ -243,7 +361,7 @@ function openChatSocket(room) {
   var attempt = ++chat.connectAttempt;
   chat.connecting = true;
   var cancel = serviceChatConnection(channel && channel.channelId, function (err, response) {
-    if (attempt !== chat.connectAttempt || !chat.want || !settings.chat || chat.room !== room || currentRoomId() !== room) return;
+    if (attempt !== chat.connectAttempt || !chat.want || !chatSocketUse() || chat.room !== room || currentRoomId() !== room) return;
     chat.connecting = false; chat.cancelConnect = null;
     var data = response && response.data, url = null;
     if (!err && data && data.mode === 'websocket' && Array.isArray(data.connections)) {
@@ -267,8 +385,11 @@ function openChatSocket(room) {
 function createChatSocket(room, url) {
   var ws;
   try { ws = new WebSocket(url); }
-  catch (e) { ChatWindow.status('unavailable', 'Chat connection unavailable'); scheduleChatRetry(room); return; }
-  chat.ws = ws;
+  catch (e) {
+    if (chat.viewing) ChatWindow.status('unavailable', 'Chat connection unavailable');
+    scheduleChatRetry(room); return;
+  }
+  chat.ws = ws; chat.ready = false; chat.subs = {};
   armChatHeartbeat(ws, room);
   ws.onmessage = function (ev) {
     if (chat.ws !== ws || !chat.want || chat.room !== room) return;
@@ -281,24 +402,37 @@ function createChatSocket(room, url) {
       var info = null; try { info = JSON.parse(m.data); } catch (e) {}
       var secs = info && +info.activity_timeout;
       if (secs > 0) { chat.activityMs = Math.min(300, Math.max(30, secs)) * 1000; armChatHeartbeat(ws, room); }
-      try { ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { channel: 'chatrooms.' + room + '.v2' } })); } catch (e) {}
+      chat.ready = true; chat.subs = {};
+      syncChatSubscriptions();
+      if (chat.viewing) loadChatRoomState(room);   // recent messages, the pin, a running poll
       return;
     }
-    if (m.event === 'pusher_internal:subscription_succeeded') { ChatWindow.status('connected', 'Live'); return; }
-    if (m.event && m.event.indexOf('ChatMessageEvent') !== -1) {
-      var d; try { d = JSON.parse(m.data); } catch (e) { return; }
-      ChatWindow.status('connected', 'Live');
-      queueChatMessage(d);
+    if (m.event === 'pusher_internal:subscription_succeeded') {
+      if (chat.viewing) ChatWindow.status('connected', 'Live');
+      return;
     }
+    if (typeof m.event !== 'string' || m.event.indexOf('pusher') === 0) return;
+    // Something for a channel we have since left (chat switched off) can still be
+    // in flight; it is no longer wanted.
+    if (!chat.subs[m.channel]) return;
+    // Kick frames an event's payload as a JSON string inside the JSON envelope.
+    var d; try { d = JSON.parse(m.data); } catch (e) { return; }
+    if (d && typeof d === 'object') handleChatEvent(m.event.replace(/^App\\Events\\/, ''), d);
   };
   ws.onclose = function () { chatSocketClosed(ws, room); };
   ws.onerror = function () { try { ws.close(); } catch (e) {} };
 }
+// Everything chat: the live socket and a past video's replay.
 function disconnectChat() {
+  stopChatReplay();
+  closeChatSocket();
+}
+function closeChatSocket() {
   chat.want = false; chat.room = null;
+  chat.viewing = false; chat.ready = false; chat.subs = {};
   chat.connectAttempt++; chat.connecting = false;
   if (chat.cancelConnect) { chat.cancelConnect(); chat.cancelConnect = null; }
-  clearChatDelay();
+  clearChatDelay(); resetChatRoomState(); forgetChatSeen();
   if (chat.retryTimer) { clearTimeout(chat.retryTimer); chat.retryTimer = null; }
   stopChatHeartbeat();
   if (chat.ws) { try { chat.ws.onclose = null; chat.ws.close(); } catch (e) {} chat.ws = null; }
@@ -307,30 +441,38 @@ function disconnectChat() {
 // Kick puts emotes inline as [emote:12345:Name]. Render the real emote image so
 // chat looks like Kick, not "KEKW" text. Built node by node (never innerHTML) so
 // message text can never inject markup. If an image fails, fall back to its name.
+function chatEmoteImage(url, name) {
+  var img = document.createElement('img');
+  img.className = 'cemote';
+  img.decoding = 'async';   // keep an unseen emote's decode off the paint that shows the message
+  img.setAttribute('data-ui-src', url);
+  img.setAttribute('data-ui-emote', '1');
+  img.alt = name;
+  img.onerror = function () {
+    if (this.parentNode) this.parentNode.replaceChild(document.createTextNode(name), this);
+  };
+  return img;
+}
+// The text between Kick's own emotes, where 7TV emotes hide as plain words.
+function appendChatText(row, text) {
+  if (settings.chatEmotes === 'text') { row.appendChild(document.createTextNode(text)); return; }
+  var parts = chatTextParts(text);
+  for (var i = 0; i < parts.length; i++) {
+    row.appendChild(parts[i].emote
+      ? chatEmoteImage(SEVENTV_CDN + parts[i].emote + '/2x.webp', parts[i].name)
+      : document.createTextNode(parts[i].text));
+  }
+}
 function appendChatContent(row, content) {
   content = String(content || '');
   var re = /\[emote:(\d+):([^\]]+)\]/g, last = 0, m;
   while ((m = re.exec(content)) !== null) {
-    if (m.index > last) row.appendChild(document.createTextNode(content.slice(last, m.index)));
-    if (settings.chatEmotes === 'text') {
-      row.appendChild(document.createTextNode(m[2]));   // just the emote name, no image
-    } else {
-      var img = document.createElement('img');
-      img.className = 'cemote';
-      img.decoding = 'async';   // keep an unseen emote's decode off the paint that shows the message
-      img.setAttribute('data-ui-src', 'https://files.kick.com/emotes/' + m[1] + '/fullsize');
-      img.setAttribute('data-ui-emote', '1');
-      img.alt = m[2];
-      (function (name) {
-        img.onerror = function () {
-          if (this.parentNode) this.parentNode.replaceChild(document.createTextNode(name), this);
-        };
-      })(m[2]);
-      row.appendChild(img);
-    }
+    if (m.index > last) appendChatText(row, content.slice(last, m.index));
+    if (settings.chatEmotes === 'text') row.appendChild(document.createTextNode(m[2]));   // just the emote name
+    else row.appendChild(chatEmoteImage('https://files.kick.com/emotes/' + m[1] + '/fullsize', m[2]));
     last = re.lastIndex;
   }
-  if (last < content.length) row.appendChild(document.createTextNode(content.slice(last)));
+  if (last < content.length) appendChatText(row, content.slice(last));
 }
 // Kick tags chatters with badges (broadcaster, mod, sub, VIP, OG...). We show the
 // top one or two as small coloured tags before the name, drawn as plain text so
@@ -384,7 +526,7 @@ function chatNameColor(hex, lightBackground) {
 var chatRenderQueue = [], chatRenderFrame = null;
 function chatCovered() { return document.hidden || browse.open || cats.open || vods.open; }
 function addChatMessage(d, receivedAt) {
-  if (!d || !d.sender) return;
+  if (!d || !(d.sender || d.notice)) return;
   if (settings.chatBots === 'hide' && isBotMessage(d)) return;
   chatRenderQueue.push({ data: d, at: receivedAt });
   while (chatRenderQueue.length > CHAT_MAX) chatRenderQueue.shift();
@@ -411,13 +553,17 @@ function flushChatRender() {
 }
 function buildChatMessage(d, receivedAt) {
   var row = document.createElement('div');
-  row.className = 'cmsg';
+  row.className = d.notice ? 'cmsg cnotice' : 'cmsg';
+  // Moderation finds rows by these (dropChatRows).
+  if (d.id) row.setAttribute('data-id', String(d.id));
+  if (d.sender && d.sender.id) row.setAttribute('data-uid', String(d.sender.id));
   if (settings.chatTimestamps) {
     var ts = document.createElement('span'); ts.className = 'ctime';
     var dt = new Date(receivedAt || Date.now());
     ts.textContent = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2) + ' ';
     row.appendChild(ts);
   }
+  if (d.notice) { row.appendChild(document.createTextNode(d.notice)); return row; }
   badgeChipsFor(d.sender).forEach(function (c) {
     var b = document.createElement('span');
     b.className = 'cbadge ' + c.cls;

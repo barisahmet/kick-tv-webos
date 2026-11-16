@@ -209,7 +209,7 @@ body.ui-text-large #browse-hideblocked, body.ui-text-large #vods-filter,
 body.ui-text-large #browse-cats-btn, body.ui-text-large #browse-langbtn { font-size: 24px; }
 body.ui-text-large .favname { font-size: 28px; }
 body.ui-text-large .favgame, body.ui-text-large .favtitle { font-size: 23px; }
-body.ui-text-large #toast { font-size: 32px; }
+body.ui-text-large #toast, body.ui-text-large #sleepwarn { font-size: 32px; }
 
 /* Reserve a clear lower strip for film subtitles without resizing the picture. */
 

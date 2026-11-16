@@ -63,6 +63,39 @@
 #chat.copacity-high #chat-messages { opacity: 1; }
 #chat .chat-notice { color: #b8c2c9; font-style: italic; }
 #chat.ctheme-light .chat-notice { color: #555c61; }
+/* A subscription, gift or raid: one quiet line in the flow of the conversation. */
+#chat .cnotice { color: #9fd492; }
+#chat.ctheme-light .cnotice { color: #2f6b1f; }
+/* The pinned message and a running poll stay put above the messages. Both are
+   capped in height: chat is the point of the window, not its header. */
+#chat-head {
+  flex: none; padding: 10px 18px; box-sizing: border-box;
+  border-bottom: 1px solid rgba(224,233,237,0.28);
+}
+#chat.ctheme-light #chat-head { border-bottom-color: #9aa2a7; }
+#chat-pin { max-height: 2.64em; overflow: hidden; margin: 0; overflow-wrap: anywhere; }
+#chat-pin, #chat-poll { font-size: 24px; line-height: 1.32; }
+#chat.csize-small #chat-pin, #chat.csize-small #chat-poll { font-size: 20px; }
+#chat.csize-large #chat-pin, #chat.csize-large #chat-poll { font-size: 30px; }
+#chat-pin .cuser { font-weight: 800; }
+#chat-pin .cemote { height: 30px; vertical-align: -8px; margin: 0 1px; }
+#chat-pin + #chat-poll { margin-top: 8px; }
+.chead-label {
+  display: inline-block; font-size: 15px; font-weight: 800; line-height: 1; text-transform: uppercase;
+  padding: 3px 6px; border-radius: 5px; margin-right: 8px; vertical-align: 2px;
+  background: #53fc18; color: #0b0e0f; text-shadow: none;
+}
+.cpoll-title { font-weight: 700; max-height: 2.64em; overflow: hidden; }
+.cpoll-left { margin-left: 10px; font-weight: 400; color: #b8c2c9; font-variant-numeric: tabular-nums; }
+#chat.ctheme-light .cpoll-left { color: #555c61; }
+.cpoll-row {
+  position: relative; display: flex; margin-top: 6px; padding: 3px 8px;
+  border-radius: 6px; overflow: hidden; background: rgba(224,233,237,0.14);
+}
+#chat.ctheme-light .cpoll-row { background: rgba(23,25,27,0.12); }
+.cpoll-bar { position: absolute; top: 0; bottom: 0; left: 0; background: rgba(83,252,24,0.38); }
+.cpoll-text { position: relative; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
+.cpoll-pct { position: relative; flex: none; margin-left: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 #chat-jump {
   position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);

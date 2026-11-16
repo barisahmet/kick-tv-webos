@@ -15,7 +15,7 @@ document.addEventListener('visibilitychange', function () {
     saveVodProgress(true); saveLiveMark(true); pauseNotify();
     // Nobody is reading chat while another app is in front; parsing a busy room
     // for hours is wasted CPU. The setting is untouched, so it reconnects on return.
-    if (chat.want) disconnectChat();
+    if (chat.want || chatReplay.on) disconnectChat();
     // Another app owns the screen. Polling on regardless costs a Luna round trip for
     // every channel every ninety seconds for nobody; the visible branch below already
     // refetches on the way back, so nothing goes stale.
@@ -24,7 +24,7 @@ document.addEventListener('visibilitychange', function () {
   }
   if (state.ready) startPlayerPoll();
   flushChatRender();
-  if (state.current && !state.vod) syncChat();   // reconnect what the background dropped
+  if (state.current || state.vod) syncChat();    // reconnect what the background dropped
   fetchFavorites(function () {
     if (state.sidebarOpen) renderSidebar();
     if (state.ready && !state.current && !state.vod) {

@@ -17,7 +17,7 @@ var BROWSE_MEMORY_MS = 60000;     // reopen inside this window and the loaded po
 var browse = { open: false, langs: [], langIdx: 0, zone: 'grid', gridIdx: 0,
                raw: [], streams: [], page: 1, hasMore: true, fetching: false,
                cats: [], session: 0, closedAt: 0, scrollTop: 0, langMenuOpen: false,
-               discover: false, hideBlocked: true, renderLimit: 60,
+               discover: false, hideBlocked: true,
                fillTimer: null, retryTimer: null, retryCount: 0, error: false, capped: false, headerIdx: 3, pinIdx: 0 };
 var CATALOGUE_LIMIT = 2000;
 var browseGridView = null, catsGridView = null, vodGridView = null;
@@ -210,7 +210,7 @@ function openBrowse(categorySlug, categoryName) {
   browse.session++;               // orphan any request still in flight from a previous opening
   browse.raw = [];
   browse.streams = []; browse.page = 1; browse.hasMore = true; browse.fetching = false;
-  browse.renderLimit = 60; browse.error = false; browse.capped = false;
+  browse.error = false; browse.capped = false;
   getBrowseGrid().clear();
   browse.discover = loadBrowseDiscoverPref();
   browse.hideBlocked = loadBrowseHideBlockedPref();
@@ -393,7 +393,7 @@ function isBotStream(s) {
   if (s.__bot === undefined) s.__bot = looksBotStream(s);
   return s.__bot;
 }
-function makeBrowseCard(s, i, favs) {
+function makeBrowseCard(s, i) {
   var ch = s.channel || {}, user = ch.user || {};
   var card = document.createElement('div');
   card.className = 'bcard';
@@ -434,11 +434,6 @@ function hasBrowseCat(slug) {
   if (!slug) return false;
   for (var i = 0; i < browse.cats.length; i++) if (browse.cats[i].slug === slug) return true;
   return false;
-}
-function browseCatLabel() {
-  var out = [];
-  for (var i = 0; i < browse.cats.length; i++) out.push(browse.cats[i].name || browse.cats[i].slug);
-  return out.join(' / ');
 }
 // Everything that has to catch up once the selection changes. The Categories
 // popup stays open while you pick, so its ticks re-render too.
@@ -524,11 +519,11 @@ function finishRenderBrowse(list, preserveScroll, filterChanged, onStatus, ident
   var view = getBrowseGrid(), savedScroll = view.container.scrollTop;
   if (filterChanged && found === -1) { savedScroll = 0; view.container.scrollTop = 0; }
   if (preserveScroll && identity !== null) savedScroll = catalogueAnchoredScroll(view, browse.gridIdx, identity, savedScroll);
-  var favs = getFavorites(), items = list.slice();
+  var items = list.slice();
   if (browse.error) items.push(catalogueTerminal('browse', 'Could not load more streams', true));
   else if (browse.fetching) items.push(catalogueTerminal('browse', 'Loading more streams...'));
   else if (!browse.hasMore) items.push(catalogueTerminal('browse', browse.capped ? 'Directory limit reached · Refine your filters' : (list.length ? 'End of live directory' : 'No matching streams in this directory')));
-  function create(item, i) { return item.catalogueTerminal ? makeCatalogueTerminal(item) : makeBrowseCard(item, i, favs); }
+  function create(item, i) { return item.catalogueTerminal ? makeCatalogueTerminal(item) : makeBrowseCard(item, i); }
   function signature(item) { return JSON.stringify(item) + (item.catalogueTerminal ? '' : '|' + isFavorite(catalogueKey(item))); }
   view.setItems(items, function (item) { return item.catalogueTerminal ? '__state' : catalogueKey(item); }, function (item, i) {
     var node = create(item, i); node.__signature = signature(item); return node;

@@ -84,3 +84,39 @@ test('a slow metadata reply leaves only the remaining budget for the image', () 
   assert.equal(completed, 1);
   assert.equal(f.h.previewCache.alpha.url, 'previous');
 });
+
+// The background warmer. Lookups run one at a time behind everything else, so
+// starting every channel's three-second budget at once left the later ones no time.
+function warmFixture() {
+  const f = fixture(), asked = [], replies = [];
+  const slugs = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  f.h.state = { ready: true, order: slugs, tempChannel: null, sidebarOpen: false, sideItems: [], sideFocus: 0,
+    channels: Object.fromEntries(slugs.map(s => [s, { live: true }])) };
+  f.h.saver = { on: false };
+  f.h.serviceGet = (path, cb) => { asked.push(path.split('/').pop()); replies.push(cb); return { cancel() {} }; };
+  return { f, asked, replies, slugs };
+}
+test('warming gives every live channel its own three seconds, one after another', () => {
+  const { f, asked, replies, slugs } = warmFixture();
+  f.h.warmPreviews(true);
+  assert.deepEqual(asked, ['a'], 'one lookup at a time');
+  // 0.7s a lookup: eight of them take 5.6s, far past any one channel's budget.
+  for (let i = 0; i < 8; i++) { f.advance(700); replies[i](null, { livestream: { thumbnail: null } }); }
+  assert.deepEqual(asked, slugs, 'and the last channel is still reached');
+});
+test('a lookup that never answers gives up after its three seconds and the next channel gets its turn', () => {
+  const { f, asked } = warmFixture();
+  f.h.warmPreviews(true);
+  f.advance(2999);
+  assert.deepEqual(asked, ['a']);
+  f.advance(1);
+  assert.deepEqual(asked, ['a', 'b']);
+});
+test('a second warm pass while one is under way does not double up', () => {
+  const { f, asked, replies } = warmFixture();
+  f.h.warmPreviews(true);
+  f.h.warmPreviews(true);
+  assert.deepEqual(asked, ['a']);
+  replies[0](null, { livestream: { thumbnail: null } });
+  assert.deepEqual(asked, ['a', 'b']);
+});

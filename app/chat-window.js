@@ -349,6 +349,7 @@ var ChatWindow = (function () {
     viewportChanged: function () { finish(true); paint(); },
     hide: function () { finish(true); focusControls(false); cancelAutoLive(); fitVideo(); if (tailFrame !== null) cancelAnimationFrame(tailFrame); tailFrame = null; },
     clear: resetMessages,
+    tail: followTail,            // the message area changed height (the pinned header came or went)
     reading: function () { return !following || !!gesture; },
     activePointer: function (target) { return !!gesture || Date.now() < suppressUntil || el('chat').contains(target); },
     messageAdded: function (count) {

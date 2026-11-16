@@ -7,13 +7,16 @@ var settings = { open: false, focus: 0, items: [],
                  chatSize: 'medium', chatOpacity: 'high', chatSeparate: false,
                  chatBackground: 'black', chatTransparency: 84, chatBots: 'show',
                  chatEmotes: 'images', chatTimestamps: false, chatDelay: -1,
+                 chatEvents: true, chatPinned: true, raidFollow: true,
+                 sleepMin: 0,           // minutes left on the sleep timer; never saved (sleep.js)
                  alerts: 'all', notifySec: 10, saverMin: 1,
                  uiText: 'normal', chatResizePreview: true };
 // Chat choices belong to the watched streamer. The previous shared choices
 // become a fixed starting point for streamers without a saved profile.
 var CHAT_PREF_KEY = 'kicktv.chatprefs';
 var CHAT_PREF_FIELDS = ['chat', 'chatSeparate', 'chatSize', 'chatOpacity', 'chatBackground',
-  'chatTransparency', 'chatBots', 'chatEmotes', 'chatTimestamps', 'chatDelay', 'chatResizePreview'];
+  'chatTransparency', 'chatBots', 'chatEmotes', 'chatTimestamps', 'chatDelay', 'chatResizePreview',
+  'chatEvents', 'chatPinned'];
 var chatPreferences = { defaults: null, profiles: Object.create(null), order: [], active: '' };
 function chatStreamerSlug() { return state.current || (state.vod && state.vod.slug) || ''; }
 function chatOptionsFrom(source, fallback) {
@@ -34,6 +37,7 @@ function chatOptionsFrom(source, fallback) {
     chatBots: pickEnum(s.chatBots, ['show', 'hide'], 'show'),
     chatEmotes: pickEnum(s.chatEmotes, ['images', 'text'], 'images'),
     chatTimestamps: s.chatTimestamps === true,
+    chatEvents: s.chatEvents !== false, chatPinned: s.chatPinned !== false,   // on unless turned off
     chatDelay: delay >= -1 && delay <= 60 ? delay : -1   // -1: Auto, matched to the video
   };
 }
@@ -136,6 +140,7 @@ function loadSettings() {
   settings.hideOffline = !!s.hideOffline;
   settings.diagnostics = !!s.diagnostics;
   settings.hideBots = s.hideBots !== false;      // on unless deliberately turned off
+  settings.raidFollow = s.raidFollow !== false;
   settings.rememberDim = s.rememberDim === true;
   settings.dim = settings.rememberDim && s.dim === true;
   var st = parseFloat(s.dimStrength);
@@ -157,7 +162,7 @@ function saveSettings() {
     var serialized = JSON.stringify({
       lowlatency: settings.lowlatency, autoadvance: settings.autoadvance, autoSkipWatched: settings.autoSkipWatched,
       hideOffline: settings.hideOffline, diagnostics: settings.diagnostics,
-      hideBots: settings.hideBots,
+      hideBots: settings.hideBots, raidFollow: settings.raidFollow,
       dim: settings.rememberDim ? settings.dim : false, rememberDim: settings.rememberDim,
       dimStrength: settings.dimStrength, dimScope: settings.dimScope,
       alerts: settings.alerts, notifySec: settings.notifySec, saverMin: settings.saverMin,
@@ -196,6 +201,7 @@ function settingsBuild() {
     { kind: 'chatopt', label: 'Live chat' },
     { kind: 'toggle', key: 'lowlatency', label: 'Low latency' },
     { kind: 'toggle', key: 'autoadvance', label: 'Auto-advance' },
+    { kind: 'toggle', key: 'raidFollow', label: 'Follow raids' },
     { kind: 'toggle', key: 'autoSkipWatched', label: 'Skip watched videos' },
     { kind: 'toggle', key: 'hideOffline', label: 'Hide offline' },
     { kind: 'toggle', key: 'hideBots', label: 'Hide bot streams' },
@@ -204,6 +210,8 @@ function settingsBuild() {
     { kind: 'toggle', key: 'diagnostics', label: 'Diagnostics' },
     { kind: 'choice', key: 'uiText', label: 'Big UI', values: [{ v: 'normal', label: 'Normal' }, { v: 'large', label: 'Large' }] },
     { kind: 'dimopt', label: 'Dim (night)' },
+    { kind: 'range', key: 'sleepMin', label: 'Sleep timer',
+      range: { id: 'sleep-timer', min: 0, max: 180, step: 15, unit: 'min' } },
     { kind: 'choice', key: 'alerts', label: 'Live alerts',
       values: [{ v: 'all', label: 'All' }, { v: 'pinned', label: 'Pinned only' }, { v: 'off', label: 'Off' }] },
     { kind: 'range', key: 'notifySec', label: 'Alert duration',
@@ -225,6 +233,7 @@ function openSettings() {
   sidePreviewCard.cancel();
   settings.open = true;
   setMode('settings');
+  settings.sleepMin = sleepLeftMin();        // the row shows what is left, not what was set
   settings.items = settingsBuild();
   settings.focus = firstFocusableSetting();
   document.getElementById('settingsmodal').className = '';
@@ -271,7 +280,8 @@ function settingChoices(label, choices, current, select) {
   return group;
 }
 function settingsRangeLabel(it) {
-  return it.key === 'saverMin' && !settings[it.key] ? 'Off' : settings[it.key] + ' ' + it.range.unit;
+  var offAtZero = it.key === 'saverMin' || it.key === 'sleepMin';
+  return offAtZero && !settings[it.key] ? 'Off' : settings[it.key] + ' ' + it.range.unit;
 }
 function paintSettingsRange(it) {
   var slider = document.getElementById(it.range.id);
@@ -284,6 +294,7 @@ function paintSettingsRange(it) {
 }
 function setSettingsRange(it, value, persist) {
   settings[it.key] = Math.max(it.range.min, Math.min(it.range.max, Math.round(Number(value) || 0)));
+  if (it.key === 'sleepMin') setSleepTimer(settings.sleepMin);
   paintSettingsRange(it); touchSettings();
   if (it.key === 'saverMin' && !settings.saverMin) wakeSaver();
   if (persist) saveSettings();
@@ -412,7 +423,10 @@ function settingsActivate(dir) {
   } else if (it.kind === 'backup') {
     openBackup();
   } else if (it.kind === 'range') {
-    setSettingsRange(it, settings[it.key] + dir * it.range.step, true);
+    // One stop in the direction pressed. A value between two stops (the sleep timer
+    // shows the minutes left) goes to the nearest stop that way, not a full step past it.
+    var step = it.range.step, cur = settings[it.key];
+    setSettingsRange(it, dir > 0 ? Math.floor(cur / step) * step + step : Math.ceil(cur / step) * step - step, true);
   } else if (it.kind === 'choice') {
     cycleChoice(it, dir);
     renderSettings();
@@ -425,11 +439,6 @@ function settingsOk() {
   else if (it && it.kind === 'blockedcats') openBlockedCats();
   else if (it && it.kind === 'backup') openBackup();
   else settingsActivate();
-}
-// Find the display label for a 'choice' row's current value.
-function choiceLabel(it) {
-  for (var i = 0; i < it.values.length; i++) if (it.values[i].v === settings[it.key]) return it.values[i].label;
-  return '';
 }
 // Step a 'choice' row to its next (dir +1) or previous (dir -1) value and apply it.
 function cycleChoice(it, dir) {
@@ -453,8 +462,9 @@ function selectChoice(it, index) {
    card used by the original Settings layout. */
 var SETTINGS_DESC = {
   uiText: 'Larger labels and controls for easier reading from the sofa. Video size stays the same.',
-  chat: 'Green toggles live chat. Drag anywhere to move, use any corner to resize, or move the pointer to the left or right edge and release to dock. Each streamer remembers all chat settings and its layout.',
+  chat: 'Green toggles chat. Drag anywhere to move, use any corner to resize, or move the pointer to the left or right edge and release to dock. Each streamer remembers all chat settings and its layout. A past video replays the chat from its stream.',
   lowlatency: 'Stay closer to live. This may buffer more on a slower connection.',
+  raidFollow: 'When a streamer ends by raiding another channel, go there after a short countdown. Stay, or Back, keeps you where you are.',
   autoadvance: 'Offer the next video after a 10-second countdown you can cancel. Live streams continue to another channel, with pinned channels first.',
   autoSkipWatched: 'Skip already watched recordings when automatically choosing the next video. You can still play them yourself.',
   hideOffline: 'Put offline channels in a collapsed group at the bottom. Open the group whenever you need it.',
@@ -462,6 +472,7 @@ var SETTINGS_DESC = {
   blockedcats: 'Categories you would rather not see. Followed channels streaming in one drop to the bottom of the list, greyed out, and stay quiet. Block a category from Browse, then Categories.',
   backup: 'Save your channels and settings to your phone, bring them back after a reinstall, or add channels by typing names on the phone. Scan the code with the phone camera.',
   diagnostics: 'Show playback quality, network, buffer, live delay, frame and recovery information.',
+  sleepMin: 'Stop playback and darken the screen after this long. A warning shows for the last minute; any button then keeps the stream on. The timer is off again the next time the app starts.',
   dim: 'Reduce screen brightness. Press OK or select the label for strength, scope and startup behavior, or press 0 while watching.',
   alerts: 'Choose which followed channels may show a live alert when they come online.',
   notifySec: 'Keep each live alert on screen for 5–30 seconds. Drag the slider, or use Left and Right to adjust by one second.',
@@ -529,7 +540,7 @@ function applyDimAwareUi() {
   // Settings remains readable at no darker than Medium. Every other popup uses
   // the selected strength, including Strong and Max.
   var settingsPopups = ['settingsbox', 'dimoptbox', 'chatoptbox', 'blockedcatsbox', 'backupbox'];
-  var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'wtwbox', 'vod-next-box', 'toast'];
+  var upperPopups = ['confirmbox', 'addbox', 'updatebox', 'qualityoptbox', 'wtwbox', 'vod-next-box', 'raid-next-box', 'toast'];
   var lowerPopups = ['browse-panel', 'cats-panel', 'vods-panel', 'chpop-panel',
                      'pbstatus', 'overlay', 'vodbar', 'vodplay', 'vodback', 'vodfwd', 'seekpop', 'spinner',
                      'livebar'];
@@ -563,6 +574,9 @@ function applyToggle(key) {
     toast('Low latency ' + (settings.lowlatency ? 'on' : 'off'));
     // a deliberate settings reload must not eat into the fatal-failure budget
     if (state.current) { PB.recoverCount = 0; recoverPlayback(state.current); }
+  } else if (key === 'raidFollow') {
+    syncChat();                // the raid announcement rides on the chat socket
+    toast('Follow raids ' + (settings.raidFollow ? 'on' : 'off'));
   } else if (key === 'autoadvance') {
     toast('Auto-advance ' + (settings.autoadvance ? 'on' : 'off'));
   } else if (key === 'hideOffline') {
@@ -570,7 +584,7 @@ function applyToggle(key) {
     if (state.sidebarOpen) renderSidebar(settings.hideOffline ? 'offline-group' : state.current);
     toast('Hide offline channels ' + (settings.hideOffline ? 'on' : 'off'));
   } else if (key === 'hideBots') {
-    if (browse.open) { browse.gridIdx = 0; browse.renderLimit = 60; renderBrowse(); }
+    if (browse.open) { browse.gridIdx = 0; renderBrowse(); }
     toast('Bot streams ' + (settings.hideBots ? 'hidden' : 'shown'));
   } else if (key === 'diagnostics') {
     syncDiagnostics();
@@ -969,7 +983,7 @@ function dimQuickKey() {
 /* Live chat options popup, opened from the chat toolbar or Settings. */
 var chatopt = { open: false, focus: 0 };
 var CHATOPT_ROWS = [
-  { key: 'chat',           label: 'Chat',         bool: true, desc: 'Green toggles live chat. The latest 160 messages stay until replaced by newer ones or you leave the channel.' },
+  { key: 'chat',           label: 'Chat',         bool: true, desc: 'Green toggles chat. The latest 160 messages stay until replaced by newer ones or you leave the channel. A past video replays the chat from its stream, in step with the picture.' },
   { key: 'chatSeparate',   label: 'Separate chat', bool: true, desc: 'Fit the stream beside chat when docked left or right. Drag the inside edge to adjust the width. Floating chat stays over the stream.' },
   { key: 'chatResizePreview', label: 'Resize preview', bool: true, desc: 'Use an outline while resizing docked chat. The video resizes once when you release, which is lighter on the TV.' },
   { key: 'chatBackground', label: 'White background', vals: [['black', 'Black'], ['white', 'White']], desc: 'On uses white; off uses black. Adjust transparency below. Text adapts to a light or dark background.' },
@@ -978,7 +992,9 @@ var CHATOPT_ROWS = [
   { key: 'chatOpacity',    label: 'Text opacity', vals: [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], desc: 'Adjust message transparency. Controls stay fully visible when you point at chat.' },
   { key: 'chatDelay',      label: 'Message delay', range: { id: 'chat-delay', min: -1, max: 60, remoteStep: 1 }, desc: 'Auto holds each message until the video reaches the moment it was sent, so chat stays in step with the picture. Or pick Off, or a fixed 1 to 60 seconds.' },
   { key: 'chatBots',       label: 'Hide bot messages', vals: [['show', 'Show'], ['hide', 'Hide']], desc: 'Hide messages from known bots and chat !commands.' },
-  { key: 'chatEmotes',     label: 'Emote images', vals: [['text', 'Text'], ['images', 'Images']], desc: 'Show emotes as their real images, or just their names as text.' },
+  { key: 'chatEmotes',     label: 'Emote images', vals: [['text', 'Text'], ['images', 'Images']], desc: 'Show emotes as their real images, 7TV emotes included, or just their names as text.' },
+  { key: 'chatEvents',     label: 'Event messages', bool: true, desc: 'Show subscriptions, gifted subs and incoming raids as lines in chat.' },
+  { key: 'chatPinned',     label: 'Pinned message', bool: true, desc: 'Keep the pinned message, and a poll while one runs, above the chat.' },
   { key: 'chatTimestamps', label: 'Timestamps',   bool: true, desc: 'Show the time before each message.' },
   { key: 'chatReset',      label: 'Reset this layout', action: true, desc: 'Restore the default size and position for this channel. Other channels and message options stay the same.' }
 ];
@@ -1090,6 +1106,8 @@ function chatoptActivate(dir) {
   }
   saveSettings();
   if (row.key === 'chat') syncChat();        // connect/disconnect the chat socket
+  else if (row.key === 'chatEmotes') useSevenTv();   // switched to images: fetch the sets
+  else if (row.key === 'chatPinned') renderChatHead();
   applyChatStyle();                          // appearance and video layout update immediately
   renderChatOpt();
 }

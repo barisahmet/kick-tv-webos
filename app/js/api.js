@@ -48,18 +48,23 @@ function xhrGet(slug, cb) {
   xhr.onerror = xhr.ontimeout = function () { cb('network'); };
   xhr.send();
 }
+// cb(null, channel) or cb(error). An answer that is not an object (an empty or
+// `null` body under a 200) counts as an error: every caller reads fields off it.
 function apiGet(slug, cb, options) {
   options = options || { priority: 0 };
   var path = '/api/v2/channels/' + encodeURIComponent(slug);
+  function usable(err, data) { return !err && data && typeof data === 'object'; }
   serviceGet(path, function (err, data) {
-    if (!err) { cb(null, data); return; }
+    if (usable(err, data)) { cb(null, data); return; }
     if (err === 404) { cb(404); return; }
     // give it one more quick try before falling back, in case that was a hiccup
     setTimeout(function () {
       serviceGet(path, function (err2, data2) {
-        if (!err2) { cb(null, data2); return; }
+        if (usable(err2, data2)) { cb(null, data2); return; }
         if (err2 === 404) { cb(404); return; }
-        xhrGet(slug, cb);
+        xhrGet(slug, function (err3, data3) {
+          if (usable(err3, data3)) cb(null, data3); else cb(err3 || 'parse');
+        });
       }, options);
     }, 700);
   }, options);
@@ -79,7 +84,8 @@ function normalize(slug, raw) {
     categorySlug: cats && cats[0] ? (cats[0].slug || '') : '',
     startedAt: live ? (raw.livestream.created_at || null) : null,
     playbackUrl: raw.playback_url || null,
-    chatroomId: (raw.chatroom && raw.chatroom.id) || null
+    chatroomId: (raw.chatroom && raw.chatroom.id) || null,
+    userId: (raw.user && raw.user.id) || raw.user_id || null     // the owner's id: 7TV sets are filed under it
   };
 }
 function offlineStub(slug) {
@@ -146,6 +152,7 @@ function fetchFavorites(done, liveOnly) {
 }
 function runFetchFavorites(done, liveOnly) {
   var favs = getFavorites(), ok = 0, hard = 0, started = 0, finished = 0;
+  var unanswered = Object.create(null);     // channels this pass could not get an answer for
   var gen = ++fetchGeneration;
   if (!favs.length) { state.order = []; state.baselineSet = true; setNetDown(false); done(); return; }
   // A liveOnly pass re-checks just the channels that can change the screen
@@ -177,7 +184,7 @@ function runFetchFavorites(done, liveOnly) {
     try {
       if (!err) { if (!stale) state.channels[slug] = normalize(slug, raw); ok++; }
       else {
-        if (err !== 404) hard++;         // a 404 is a definitive answer, not a connectivity failure
+        if (err !== 404) { hard++; unanswered[slug] = true; }   // a 404 is a definitive answer, not a connectivity failure
         if (!stale) {
           if (err === 404) {             // channel is gone: drop stale live data but keep its name
             var old = state.channels[slug];
@@ -202,7 +209,7 @@ function runFetchFavorites(done, liveOnly) {
       // Sort what the list is NOW, not what it was when this pass began: a remove
       // or pin made mid-pass must not be undone by the pass finishing.
       var favsNow = currentFavoritesWithData();
-      try { sortOrder(favsNow); detectOnline(favsNow); saveChannelCache(); }
+      try { sortOrder(favsNow); detectOnline(favsNow, unanswered); saveChannelCache(); }
       finally { done(); }
     } else {
       pump();                          // a slot freed up — start the next one
@@ -220,12 +227,16 @@ function setNetDown(down) { state.netDown = down; }
 // Watch for a channel going from offline to live and show a small alert. The
 // first load just records who is live, so channels that were already on when
 // you opened the app do not all pop up at once.
-function detectOnline(favs) {
+// unanswered: channels whose lookup failed this pass. What the list holds for them
+// is old or placeholder data, so it neither raises an alert nor counts as having
+// seen them offline (which would make their next real answer look like going live).
+function detectOnline(favs, unanswered) {
   var newly = [], liveNow = [];
   favs.forEach(function (slug) {
     var c = state.channels[slug];
     if (!c) return;
     if (c.live) liveNow.push(slug);
+    if (unanswered && unanswered[slug]) return;
     if (state.baselineSet && c.live && state.wasLive[slug] === false) {
       // respect the Live alerts setting: All, Pinned only, or Off
       if (settings.alerts === 'all' || (settings.alerts === 'pinned' && isPinned(slug))) {
@@ -252,7 +263,7 @@ function alertAllowed(item) {
 function anyPanelOpen() {
   return !!(browse.open || vods.open || cats.open || chpop.open || settings.open || dimopt.open ||
     chatopt.open || blockedcats.open || (qualityopt && qualityopt.open) || updateopen ||
-    (wtw && wtw.open) || (backup && backup.open) || (vodNext && vodNext.open));
+    (wtw && wtw.open) || (backup && backup.open) || (vodNext && vodNext.open) || (raid && raid.open));
 }
 function notifyUiBusy() {
   return document.hidden || saver.on || !state.ready || state.mode !== 'player' || state.sidebarOpen ||
@@ -295,10 +306,14 @@ function pumpNotify() {
   else av.textContent = (item.name || '?').charAt(0).toUpperCase();
   el.appendChild(av);
   el.appendChild(document.createTextNode(item.name + ' is online'));
-  var hint = document.createElement('span');
-  hint.className = 'nhint';
-  hint.textContent = 'Press OK to watch';
-  el.appendChild(hint);
+  // During a past video OK is play/pause and does not open the alert, so the hint
+  // is left off rather than promise it.
+  if (!state.vod) {
+    var hint = document.createElement('span');
+    hint.className = 'nhint';
+    hint.textContent = 'Press OK to watch';
+    el.appendChild(hint);
+  }
   el.style.filter = settings.dim && settings.dimScope !== 'all' ? popupDimFilter() : '';
   el.className = 'show';
   clearTimeout(state.notifyTimer);

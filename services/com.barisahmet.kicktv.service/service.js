@@ -10,7 +10,8 @@
   turned away with a 403 here. The trick is to send the same cipher list and
   curves that Chrome sends, which is what the constants below do. Tested on a
   webOS 22 TV: the default handshake gets a 403, the Chrome style handshake gets
-  a 200. Please leave the ciphers and ecdhCurve settings in place.
+  a 200. Please leave the ciphers and ecdhCurve settings in place. TVs that lack
+  one of the curves get the nearest list they do support (see CURVE_CHOICES).
 */
 var Service = require('webos-service');
 var https = require('https');
@@ -30,6 +31,22 @@ var CHROME_CIPHERS = [
   'AES128-GCM-SHA256', 'AES256-GCM-SHA384'
 ].join(':');
 var CHROME_CURVES = 'X25519:prime256v1:secp384r1';
+// Older TVs cannot offer all of them. OpenSSL 1.0.2 (webOS 5 and 6) has no X25519
+// and refuses any list that names it, which used to fail every request before a
+// byte was sent. So take the first list this TV's TLS library accepts, closest to
+// Chrome first; the last entry is for a Node old enough to take one name only.
+// If none can be checked, say nothing and let Node use its own default.
+var CURVE_CHOICES = [CHROME_CURVES, 'prime256v1:secp384r1', 'prime256v1'];
+function usableCurves() {
+  for (var i = 0; i < CURVE_CHOICES.length; i++) {
+    try {
+      require('tls').createSecureContext({ ecdhCurve: CURVE_CHOICES[i] });
+      return CURVE_CHOICES[i];
+    } catch (e) {}
+  }
+  return null;
+}
+var TLS_CURVES = usableCurves();
 
 // Reuse connections: without keep-alive every request pays a full TLS
 // handshake (~0.5s), which made paginated browsing crawl.
@@ -50,7 +67,8 @@ var REQUEST_DEADLINE_MS = 11000;
 // not something the app can use, and buffering it would starve the TV of memory.
 var MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-function kickGet(path, cb, postBody) {
+// host is for the one request that is not Kick's (see sevenTv below).
+function kickGet(path, cb, postBody, host) {
   // One answer per request, whatever happens. The request and the response are
   // separate event sources and an abort can fire both, so without this guard a
   // single fetch could respond twice on the same Luna message.
@@ -75,13 +93,13 @@ function kickGet(path, cb, postBody) {
       headers['x-app-platform'] = 'web';
     }
     var options = {
-      host: postBody ? 'web.kick.com' : 'kick.com',
+      host: host || (postBody ? 'web.kick.com' : 'kick.com'),
       path: path,
       headers: headers,
       ciphers: CHROME_CIPHERS,
-      ecdhCurve: CHROME_CURVES,
       agent: KEEPALIVE_AGENT
     };
+    if (TLS_CURVES) options.ecdhCurve = TLS_CURVES;
     if (postBody) { options.method = 'POST'; req = https.request(options, onResponse); }
     else req = https.get(options, onResponse);
   } catch (e) {
@@ -227,12 +245,50 @@ service.register('chatConnection', function (message) {
   }, body);
 });
 
-// A small health check, handy when poking at the service by hand.
-service.register('info', function (message) {
+/* 7TV is the third-party emote set many Kick chats use; Kick sends those emotes as
+   plain words and the viewer's side draws them. A big channel's set is over 2 MB of
+   JSON, nearly all of it things the app never reads, so it is parsed here, off the
+   TV's UI thread, and only [name, id] pairs go back. Ids end up in an image URL,
+   so anything that is not a plain id is dropped. */
+var SEVENTV_HOST = '7tv.io';
+var SEVENTV_MAX_EMOTES = 3000;
+function sevenTvPairs(body, global) {
+  var data = JSON.parse(body);
+  var set = global ? data : (data && data.emote_set);
+  var list = (set && Array.isArray(set.emotes)) ? set.emotes : [];
+  var out = [];
+  for (var i = 0; i < list.length && out.length < SEVENTV_MAX_EMOTES; i++) {
+    var e = list[i];
+    if (!e || typeof e.name !== 'string' || typeof e.id !== 'string') continue;
+    if (!/^\S{1,100}$/.test(e.name) || !/^[0-9A-Za-z]{10,40}$/.test(e.id)) continue;
+    out.push([e.name, e.id]);
+  }
+  return out;
+}
+// payload: { userId } (the channel owner's Kick user id) or { global: true }
+service.register('sevenTv', function (message) {
+  var p = message.payload || {}, id = p.userId, global = p.global === true;
+  if (!global && (typeof id !== 'number' || !isFinite(id) || id <= 0 || Math.floor(id) !== id || id > 9007199254740991)) {
+    message.respond({ ok: false, error: 'bad user id' }); return;
+  }
+  kickGet(global ? '/v3/emote-sets/global' : '/v3/users/kick/' + id, function (err, status, body) {
+    if (err) { message.respond({ ok: false, error: err }); return; }
+    if (status !== 200) { message.respond({ ok: true, status: status, body: '' }); return; }
+    var pairs;
+    try { pairs = sevenTvPairs(body, global); } catch (e) { message.respond({ ok: false, error: 'parse' }); return; }
+    message.respond({ ok: true, status: 200, body: JSON.stringify({ emotes: pairs }) });
+  }, null, SEVENTV_HOST);
+});
+
+// A small health check, handy when poking at the service by hand. Not called
+// "info": webos-service answers that name itself, so a method registered under it
+// is never reached on a TV.
+service.register('status', function (message) {
   message.respond({
     ok: true,
     node: process.version,
     openssl: process.versions.openssl,
+    curves: TLS_CURVES || 'default',
     platform: process.platform + '/' + process.arch
   });
 });

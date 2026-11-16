@@ -198,7 +198,7 @@ function clipSidebarText() {
     var el = names[i], w = nameW[i], full = el.getAttribute('data-full');
     if (w <= 0) continue;
     if (full === null) { full = el.textContent; el.setAttribute('data-full', full); }
-    var key = full + '\n' + w;
+    var key = full + '\n' + w + '\n' + f['.favname'];     // Big UI changes the font, not the width
     if (el._sideClipKey === key) continue;
     var clipped = clipWithDots(full, f['.favname'], w);
     if (el.textContent !== clipped) el.textContent = clipped;
@@ -207,7 +207,7 @@ function clipSidebarText() {
   for (i = 0; i < subs.length; i++) {
     var sub = subs[i], sw = subW[i];
     if (sw <= 0 || !sub._sideParts) continue;
-    var skey = sub.getAttribute('data-full') + '\n' + sw;
+    var skey = sub.getAttribute('data-full') + '\n' + sw + '\n' + f['.favcat'] + '\n' + f['.favtitle'];
     if (sub._sideClipKey === skey) continue;
     clipTwoParts(sub.children[0], sub.children[1], sub._sideParts.cat, sub._sideParts.rest,
       f['.favcat'], f['.favtitle'], sw);
@@ -441,9 +441,18 @@ function prunePreviews(keep) {
   }
 }
 /* Keep every live channel's frame warm in the background, on a one-minute beat,
-   so opening the sidebar or surf list shows real frames at once. Stale ones only;
-   the request queue runs them two at a time at background priority, behind playback. */
+   so opening the sidebar or surf list shows real frames at once. Stale ones only,
+   and one at a time: a lookup's three-second budget starts when it is asked for,
+   and they all share one idle slot in the request queue, so asking for every
+   channel at once left the ones at the back of the queue no time at all. */
 var previewWarmLast = 0;
+var previewWarmQueue = [], previewWarmBusy = false;
+function warmNextPreview() {
+  var slug = previewWarmQueue.shift();
+  if (!slug) { previewWarmBusy = false; return; }
+  previewWarmBusy = true;
+  fetchPreviewUrl(slug, warmNextPreview);     // called back however the lookup ends
+}
 function warmPreviews(force) {
   if (!state.ready || document.hidden || saver.on) return;
   if (!force && Date.now() - previewWarmLast < PREVIEW_REFRESH_MS - 5000) return;
@@ -457,10 +466,13 @@ function warmPreviews(force) {
     targets.splice(targets.indexOf(focusItem.slug), 1);
     targets.unshift(focusItem.slug);
   }
-  targets.forEach(function (slug) {
+  // A new pass replaces whatever the last one had not got to. A lookup already
+  // under way is left to finish rather than queued a second time.
+  previewWarmQueue = targets.filter(function (slug) {
     var cached = previewCache[slug];
-    if (!cached || Date.now() - cached.t >= PREVIEW_REFRESH_MS - 5000) fetchPreviewUrl(slug);
+    return !previewPending[slug] && (!cached || Date.now() - cached.t >= PREVIEW_REFRESH_MS - 5000);
   });
+  if (!previewWarmBusy) warmNextPreview();
 }
 // Opening a list forces a pass over anything stale (the timer may be up to a
 // minute away); fresh frames are left alone, so this costs nothing when warm.
@@ -891,7 +903,11 @@ function addTempToFavorites() {
   addFavorite(slug);
   state.tempChannel = null;
   toast('Added ' + (state.channels[slug] ? state.channels[slug].name : slug));
-  fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(slug); });
+  // It is playing, so its data is as fresh as it gets: sorting it in is local.
+  if (state.channels[slug]) {
+    sortOrder(currentFavoritesWithData()); saveChannelCache();
+    if (state.sidebarOpen) renderSidebar(slug);
+  } else fetchFavorites(function () { if (state.sidebarOpen) renderSidebar(slug); });
 }
 function refreshSide() {
   if (!state.sidebarOpen) openSidebar();     // show the list right away, with the spinner turning

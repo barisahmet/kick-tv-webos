@@ -30,6 +30,9 @@ function idleModeForNothing() {
 // menu straight away so the Add row is right there.
 function showNothing() {
   if (state.vod) return;                 // a past video is playing; never show an idle screen over it
+  // The Add and confirm dialogs hide the idle screen so it does not show through
+  // them, and bring it back when they close. A refresh in between leaves it hidden.
+  if (state.mode === 'add' || state.mode === 'confirm') return;
   var m = idleModeForNothing();
   showState(m);
   if (m === 'offline' || m === 'available') {   // mini home: continue watching + live tiles
@@ -143,6 +146,7 @@ function setBanner(msg) {
 }
 function teardownVideo() {
   cancelVodNext();
+  cancelRaid();                   // an offer to follow a raid belongs to what was playing
   if (wtw.open) closeWhatToWatch();
   saveVodProgress(true);          // capture the old VOD before its media/state is replaced
   saveLiveMark(true);             // ...and where we were in a live stream, for its recording
@@ -426,6 +430,8 @@ function recoverPlayback(slug) {
 var MAX_AUTO_ADVANCE = 3;
 var autoAdvanceRun = 0;
 function advanceOrIdle(slug) {
+  // The stream ended while its raid was still counting down: that is where to go.
+  if (followRaidFrom(slug)) { autoAdvanceRun = 0; return; }
   if (settings.autoadvance && autoAdvanceRun < MAX_AUTO_ADVANCE) {
     // prefer a live pinned channel, then fall back to the next live one
     var nx = firstLivePinned(slug) || nextLiveAfter(slug);

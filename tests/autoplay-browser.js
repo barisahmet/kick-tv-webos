@@ -25,6 +25,21 @@ window.runAutoplayTests = function (assert) {
     ended(); advanceVodOrExit();
     Object.defineProperty(document, 'hidden', { configurable: true, value: true }); tickVodNext(); delete document.hidden;
     assert(!vodNext.open && played.length === 2, 'backgrounding the app cancels automatic playback');
+    // A video that ends under an open panel is offered once the panel is gone,
+    // instead of being left on its last frame for good.
+    ended(); settings.open = true; advanceVodOrExit();
+    assert(!vodNext.open && played.length === 2, 'no countdown is laid over an open panel');
+    tickVodNextWait();
+    assert(!vodNext.open, 'and it keeps waiting while the panel is up');
+    settings.open = false; tickVodNextWait();
+    assert(vodNext.open && document.getElementById('vod-next-title').textContent === 'watched', 'the countdown appears once the panel closes');
+    dismissVodNext(); tickVodNextWait();
+    assert(!vodNext.open, 'a countdown the viewer cancelled does not come back');
+    ended(); advanceVodOrExit();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true }); tickVodNext();
+    delete document.hidden; tickVodNextWait();
+    assert(vodNext.open, 'and one cut short by another app comes back on return');
+    cancelVodNext();
     ended(); advanceVodOrExit(); dismissVodNext();
     var video = document.getElementById('video');
     Object.defineProperty(video, 'ended', { configurable: true, value: false });

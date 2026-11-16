@@ -2,9 +2,10 @@
 
 Watch Kick livestreams on an LG webOS TV. It opens on your last stream and keeps
 your channels in a sidebar. No sign-in. You get live status, viewer counts,
-pinning, a live channel browser with categories, past videos (VODs), an optional
-read-only chat overlay with real Kick emotes and badges, quality options, low
-latency, and auto-advance to the next live channel.
+pinning, a live channel browser with categories, past videos (VODs) with chat
+replay, an optional read-only chat overlay with real Kick and
+7TV emotes and badges, quality options, low latency, raid follow, a sleep timer,
+and auto-advance to the next live channel.
 
 This is an unofficial personal project. It is not affiliated with or endorsed by
 Kick, and it reads Kick's public web endpoints, so it can break if Kick changes
@@ -115,6 +116,19 @@ NODE_OPTIONS="--require ./shim.js" ares-install --device tv com.barisahmet.kickt
   **Resize preview** shows an outline while dragging and applies the video size
   on release. This choice is saved for the streamer too.
   The sidebar's refresh icon refreshes channels.
+- Chat opens with the room's recent messages and shows 7TV emotes as images.
+  Messages a moderator deletes, and those of a banned chatter, leave the window.
+  The pinned message, and a poll while one runs, stay above the messages;
+  subscriptions, gifted subs and incoming raids appear as single lines. **Event
+  messages** and **Pinned message** in the chat options turn those off.
+- A past video replays the chat from its stream, in step with the picture; the
+  green button toggles it there too.
+- When a streamer ends by raiding another channel, a countdown offers to follow.
+  **Stay**, or Back, keeps the current stream. **Follow raids** in Settings
+  turns this off.
+- **Sleep timer** in Settings stops playback and darkens the screen after 15
+  minutes to 3 hours. A warning shows for the last minute; any button then keeps
+  the stream on.
 - The blue button opens the live channel browser. Inside it, the yellow button
   (or the Categories button) lets you browse by category.
 - The gear at the bottom right, or the red button, opens Settings: chat, low

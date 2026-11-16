@@ -35,6 +35,7 @@
         <button id="chat-close" class="chat-tool" type="button" tabindex="-1" title="Close chat" aria-label="Close chat"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
       <button id="chat-jump" class="hidden" type="button" tabindex="-1">Jump to live</button>
+      <div id="chat-head" class="hidden"><div id="chat-pin" class="hidden"></div><div id="chat-poll" class="hidden"></div></div>
       <div id="chat-scroll"><div id="chat-messages"></div></div>
       <div id="chat-divider" data-resize="edge" title="Drag to resize chat width" aria-label="Resize docked chat width"></div>
       <div id="chat-resize-tl" class="chat-resize top left" data-resize="nw" title="Drag to resize" aria-label="Resize chat from top left"><svg viewBox="0 0 60 60" aria-hidden="true"><path d="M8 52V20Q8 8 20 8H52"/></svg></div>
@@ -273,6 +274,12 @@
     </div>
   </div>
 
+  <div id="raid-next" class="hidden" role="dialog" aria-label="Raid">
+    <div id="raid-next-box"><div id="raid-next-count" role="status"></div><div id="raid-next-title"></div>
+      <div id="raid-next-actions"><button id="raid-next-go">Go now</button><button id="raid-next-stay">Stay</button></div>
+    </div>
+  </div>
+
   <div id="wtwmodal" class="hidden">
     <div id="wtwbox">
       <div id="wtw-head">What to watch<span id="wtw-sub">Past videos from who you watch most</span></div>
@@ -315,6 +322,7 @@
     </div>
   </div>
 
+  <div id="sleepwarn" class="hidden" role="status"></div>
   <div id="toast" class="hidden"></div>
 
   <script src="hls.min.js"></script>
@@ -337,6 +345,11 @@
   <script src="js/player-options.js"></script>
   <script src="js/settings.js"></script>
   <script src="js/chat-overlay.js"></script>
+  <script src="js/chat-emotes.js"></script>
+  <script src="js/chat-events.js"></script>
+  <script src="js/chat-replay.js"></script>
+  <script src="js/raid.js"></script>
+  <script src="js/sleep.js"></script>
   <script src="js/saver.js"></script>
   <script src="js/surf.js"></script>
   <script src="js/helpers.js"></script>

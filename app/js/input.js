@@ -5,6 +5,7 @@ document.addEventListener('keydown', function (e) {
   var wasSaver = saver.on;
   markInput();                                      // any key counts as activity for the burn-in guard
   if (wasSaver) { e.preventDefault(); return; }     // the first press just dismisses the screensaver
+  if (sleepKeepWatching()) { e.preventDefault(); return; }   // ...or answers the sleep timer's warning
   if (!state.ready) {                               // still on the splash, ignore input until data is ready
     e.preventDefault();
     // ...except the way out. disableBackHistoryAPI means we own the Back key, so
@@ -13,6 +14,7 @@ document.addEventListener('keydown', function (e) {
     return;
   }
   if (vodNext.open) { e.preventDefault(); vodNextKey(k); return; }
+  if (raid.open) { e.preventDefault(); raidKey(k); return; }
   if (state.vod && vodPointerHover) {
     vodPointerHover = '';     // remote input resumes timed hiding, even under a parked cursor
     if (vodBarVisible()) armVodOverlayHide();
@@ -1028,6 +1030,10 @@ function browseCardFromEvent(e) {
   document.addEventListener('mousemove', function () { markInput(); });
   document.addEventListener('mousedown', function () { markInput(); });
   document.addEventListener('wheel', function () { markInput(); });
+  // A click or the wheel answers the sleep timer's warning as a button does. Caught
+  // on the way down, because the chat window keeps its own pointer events to itself.
+  document.addEventListener('mousedown', function () { sleepKeepWatching(); }, true);
+  document.addEventListener('wheel', function () { sleepKeepWatching(); }, true);
 })();
 
 /* Watching the video element for trouble */
@@ -1052,7 +1058,10 @@ function browseCardFromEvent(e) {
     if (PB.active && state.current) handleEnded(state.current);   // detect a finished live stream
   });
   video.addEventListener('playing', function () {
-    PB.stallCount = 0; PB.netRetries = 0; PB.mediaRetries = 0; setBanner('');
+    // The retry counts are not cleared here: a recovery that plays for a moment and
+    // fails again must still add up, or it never escalates to a fresh stream link.
+    // The watchdog clears them once the picture has really been moving.
+    PB.stallCount = 0; setBanner('');
     setPosterStill(null);                           // real frames are on the plane now
     hideSpinner();
   });

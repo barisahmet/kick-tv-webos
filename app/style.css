@@ -1550,6 +1550,17 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
   color: #fff; font-size: 28px; padding: 18px 10px; border-radius: 10px;
 }
 
+/* Sleep timer warning: stays up for the last minute. It sits under the info bar,
+   clear of everything that lives along the bottom (toasts, the next-video and raid
+   prompts, the seek bar). */
+#sleepwarn {
+  position: absolute; top: 150px; left: 50%; margin-left: -460px; z-index: 80;
+  width: 920px; box-sizing: border-box; text-align: center;
+  background: rgba(23,25,27,0.95); border: 2px solid #53fc18;
+  color: #fff; font-size: 28px; padding: 18px 24px; border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Backup & restore popup: a QR code for the phone, and the confirm step for
    whatever the phone sends back. No blurred shadow (it costs frames on the TV). */
 #backupmodal {
@@ -1641,9 +1652,15 @@ html.hidecursor, html.hidecursor * { cursor: none !important; }
 #backup-cancel, #backup-retry { font-family: inherit; margin-top: 16px; cursor: pointer; }
 
 #vod-next { position: absolute; inset: 0; z-index: 79; background: rgba(0,0,0,0.25); }
+/* The raid prompt is the same card, without the layer behind it: it comes up over
+   a live picture, where a full-screen translucent layer costs frames and would
+   also take the pointer away from everything else. */
+#raid-next { position: absolute; right: 40px; bottom: 100px; width: 660px; z-index: 79; }
+#raid-next-box { box-sizing: border-box; padding: 24px; border: 2px solid #53fc18; border-radius: 14px; background: #17191b; color: #eee; }
 #vod-next-box { position: absolute; right: 40px; bottom: 100px; width: 660px; box-sizing: border-box; padding: 24px; border: 2px solid #53fc18; border-radius: 14px; background: #17191b; color: #eee; }
-#vod-next-count { font-size: 22px; color: #53fc18; margin-bottom: 12px; }
-#vod-next-title { font-size: 28px; font-weight: 700; line-height: 1.3; max-height: 110px; overflow: hidden; }
-#vod-next-actions { display: flex; margin-top: 22px; }
-#vod-next-actions button { font: inherit; font-size: 24px; color: #eee; background: #292d32; border: 2px solid transparent; border-radius: 8px; padding: 12px 24px; margin-right: 12px; cursor: pointer; }
-#vod-next-actions button.focused, #vod-next-actions button:hover { border-color: #53fc18; }
+#vod-next-count, #raid-next-count { font-size: 22px; color: #53fc18; margin-bottom: 12px; }
+#vod-next-title, #raid-next-title { font-size: 28px; font-weight: 700; line-height: 1.3; max-height: 110px; overflow: hidden; }
+#vod-next-actions, #raid-next-actions { display: flex; margin-top: 22px; }
+#vod-next-actions button, #raid-next-actions button { font: inherit; font-size: 24px; color: #eee; background: #292d32; border: 2px solid transparent; border-radius: 8px; padding: 12px 24px; margin-right: 12px; cursor: pointer; }
+#vod-next-actions button.focused, #vod-next-actions button:hover,
+#raid-next-actions button.focused, #raid-next-actions button:hover { border-color: #53fc18; }

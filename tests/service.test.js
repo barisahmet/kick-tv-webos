@@ -6,8 +6,19 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const source = fs.readFileSync(path.join(__dirname, '../services/com.barisahmet.kicktv.service/service.js'), 'utf8');
 
-function harness() {
+// unsupportedCurves: curve names this TV's TLS library does not know. Asking for a
+// list that contains one throws, exactly as OpenSSL 1.0.2 does for X25519.
+function harness({ unsupportedCurves = [], tlsBroken = false } = {}) {
   const handlers = {}, requests = [];
+  const tls = {
+    createSecureContext(options) {
+      if (tlsBroken) throw Error('no TLS contexts here');
+      for (const curve of String(options.ecdhCurve).split(':')) {
+        if (unsupportedCurves.includes(curve)) throw Error('Failed to set ECDH curve');
+      }
+      return {};
+    }
+  };
   function Service() { this.register = (name, fn) => { handlers[name] = fn; }; }
   const https = {
     Agent: function (options) { this.options = options; },
@@ -23,7 +34,7 @@ function harness() {
     }
   };
   const timers = [];
-  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : name === 'http' ? require('node:http') : name === 'os' ? require('node:os') : assert.fail(name), Buffer, process,
+  const context = { require: name => name === 'webos-service' ? Service : name === 'https' ? https : name === 'http' ? require('node:http') : name === 'os' ? require('node:os') : name === 'tls' ? tls : assert.fail(name), Buffer, process,
     setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; },
     clearTimeout: t => { if (t) t.cleared = true; }, setInterval, clearInterval };
   vm.createContext(context); vm.runInContext(source, context);
@@ -162,6 +173,94 @@ test('TLS fingerprint constants and connection reuse are unchanged', () => {
   assert.equal(options.agent.options.keepAlive, true); assert.equal(options.agent.options.maxSockets, 6);
 });
 
+// Issue #1: OpenSSL 1.0.2 (webOS 5 and 6) has no X25519, and asking for it made
+// every request throw before anything was sent.
+test('a TV without X25519 falls back to the curves it has, for API and chat calls alike', () => {
+  const h = harness({ unsupportedCurves: ['X25519'] });
+  h.begin({ path: '/api/v2/channels/channel' });
+  assert.equal(h.requests[0].options.ecdhCurve, 'prime256v1:secp384r1');
+  h.handlers.chatConnection({ payload: { channelId: 42 }, respond() {} });
+  assert.equal(h.requests[1].options.ecdhCurve, 'prime256v1:secp384r1');
+});
+
+test('a TV that only takes a single curve name still gets one it accepts', () => {
+  const h = harness({ unsupportedCurves: ['X25519', 'secp384r1'] });
+  h.begin({ path: '/api/v2/channels/channel' });
+  assert.equal(h.requests[0].options.ecdhCurve, 'prime256v1');
+});
+
+test('when no curve list can be checked, requests leave the choice to the TV', () => {
+  const h = harness({ tlsBroken: true });
+  const pending = h.begin({ path: '/api/v2/channels/channel' });
+  assert.equal('ecdhCurve' in h.requests[0].options, false);
+  h.response(pending.request, '{}').emit('end');
+  assert.equal(pending.replies[0].ok, true);
+});
+
+test('the health check reports which curves are in use', () => {
+  for (const [options, curves] of [[{}, 'X25519:prime256v1:secp384r1'], [{ unsupportedCurves: ['X25519'] }, 'prime256v1:secp384r1'], [{ tlsBroken: true }, 'default']]) {
+    const replies = [];
+    harness(options).handlers.status({ respond: r => replies.push(r) });
+    assert.equal(replies[0].curves, curves);
+  }
+});
+
+// 7TV: the third-party emotes many Kick chats use. A big channel's set is over 2 MB
+// of JSON, so the service boils it down to names and ids before it reaches the app.
+const sevenTvEmote = (name, id, extra = {}) => ({ id, name, flags: 0, data: { id, name, animated: true, owner: { username: 'someone', connections: [] }, host: { url: '//cdn.7tv.app/emote/' + id, files: [{ name: '1x.webp' }] } }, ...extra });
+function sevenTv(h, payload) {
+  const replies = [], before = h.requests.length;
+  h.handlers.sevenTv({ payload, respond: r => replies.push(r) });
+  return { replies, request: h.requests.length > before ? h.requests[h.requests.length - 1] : null };
+}
+
+test('7TV: a channel set is fetched by Kick user id and reduced to names and ids', () => {
+  const h = harness(), call = sevenTv(h, { userId: 676 });
+  assert.equal(call.request.options.host, '7tv.io');
+  assert.equal(call.request.options.path, '/v3/users/kick/676');
+  assert.equal(call.request.options.method, undefined);
+  h.response(call.request, JSON.stringify({ id: '676', platform: 'KICK', emote_set: { id: 'set', emotes: [
+    sevenTvEmote('GAMBA', '01G3WEGZN0000ET2J0MQP5YJ0G'), sevenTvEmote('catJAM', '60ae7316f7c927fad14e6ca2')] } })).emit('end');
+  assert.equal(call.replies[0].ok, true); assert.equal(call.replies[0].status, 200);
+  assert.deepEqual(JSON.parse(call.replies[0].body), { emotes: [['GAMBA', '01G3WEGZN0000ET2J0MQP5YJ0G'], ['catJAM', '60ae7316f7c927fad14e6ca2']] });
+});
+
+test('7TV: the global set comes from its own endpoint', () => {
+  const h = harness(), call = sevenTv(h, { global: true });
+  assert.equal(call.request.options.path, '/v3/emote-sets/global');
+  h.response(call.request, JSON.stringify({ id: 'global', emotes: [sevenTvEmote('Clap', '62fc0a0c4a75fd54bd3520a9')] })).emit('end');
+  assert.deepEqual(JSON.parse(call.replies[0].body), { emotes: [['Clap', '62fc0a0c4a75fd54bd3520a9']] });
+});
+
+test('7TV: entries the app could not draw safely are left out', () => {
+  const h = harness(), call = sevenTv(h, { userId: 1 });
+  h.response(call.request, JSON.stringify({ emote_set: { emotes: [
+    sevenTvEmote('ok', '01G3WEGZN0000ET2J0MQP5YJ0G'),
+    sevenTvEmote('two words', '01G3WEGZN0000ET2J0MQP5YJ0H'),
+    sevenTvEmote('badid', '../../evil'),
+    sevenTvEmote('', '01G3WEGZN0000ET2J0MQP5YJ0J'),
+    sevenTvEmote('x'.repeat(101), '01G3WEGZN0000ET2J0MQP5YJ0K'),
+    null, 'text', { name: 'noid' }] } })).emit('end');
+  assert.deepEqual(JSON.parse(call.replies[0].body), { emotes: [['ok', '01G3WEGZN0000ET2J0MQP5YJ0G']] });
+});
+
+test('7TV: a channel without 7TV, a bad id and a broken answer each say so', () => {
+  const h = harness();
+  const none = sevenTv(h, { userId: 5 });
+  h.response(none.request, '{"status_code":404}', 404).emit('end');
+  assert.equal(none.replies[0].status, 404);
+  const noSet = sevenTv(h, { userId: 6 });
+  h.response(noSet.request, JSON.stringify({ id: '6', emote_set: null })).emit('end');
+  assert.deepEqual(JSON.parse(noSet.replies[0].body), { emotes: [] });
+  for (const userId of [undefined, 0, -3, 1.5, '676', '1/../2', {}, Infinity]) {
+    const bad = sevenTv(h, { userId });
+    assert.equal(bad.request, null); assert.equal(bad.replies[0].ok, false);
+  }
+  const broken = sevenTv(h, { userId: 7 });
+  h.response(broken.request, '<html>').emit('end');
+  assert.equal(broken.replies[0].ok, false);
+});
+
 test('slow, oversized and unsendable requests still answer exactly once', () => {
   const h = harness();
   // an overall deadline, independent of the idle timeout
@@ -196,11 +295,14 @@ test('share server: page, backup download, restore inbox, token guard, stop', as
   const token = 'abcdefghijkl1234';
   const started = await call('shareStart', { token, backup: '{"v":1}', names: ['<b>xqc</b>'] });
   assert.equal(started.ok, true);
-  const base = 'http://127.0.0.1:' + started.port + '/' + token + '/';
+  // Reached the way a phone reaches it, over the network address the TV would show.
+  // (Loopback can belong to some other program listening on the same port.)
+  const host = started.addresses[0] || '127.0.0.1';
+  const base = 'http://' + host + ':' + started.port + '/' + token + '/';
   const page = await (await fetch(base)).text();
   assert.match(page, /&lt;b&gt;xqc&lt;\/b&gt;/, 'channel names are escaped');
   assert.equal(await (await fetch(base + 'backup.json')).text(), '{"v":1}');
-  assert.equal((await fetch('http://127.0.0.1:' + started.port + '/wrongtoken12345/')).status, 404);
+  assert.equal((await fetch('http://' + host + ':' + started.port + '/wrongtoken12345/')).status, 404);
   const sent = await (await fetch(base + 'restore', { method: 'POST', body: JSON.stringify({ kind: 'names', data: ['a', 'b'] }) })).json();
   assert.equal(sent.ok, true);
   const bad = await fetch(base + 'restore', { method: 'POST', body: '{"kind":"evil"}' });
