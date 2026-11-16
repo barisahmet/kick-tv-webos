@@ -51,7 +51,8 @@ const server = http.createServer((req, res) => {
   chrome.stderr.on('data', d => { stderr = (stderr + d).slice(-4000); });
   chrome.on('error', e => { stderr += e.message; });
   const portFile = path.join(profile, 'DevToolsActivePort');
-  for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await delay(100);
+  // Up to a minute: a cold CI runner has taken more than ten seconds to bring Chrome up.
+  for (let i = 0; i < 600 && !fs.existsSync(portFile); i++) await delay(100);
   if (!fs.existsSync(portFile)) throw new Error('Local Chrome did not start: ' + stderr);
   const [port, endpoint] = fs.readFileSync(portFile, 'utf8').trim().split('\n');
   ws = new WebSocket('ws://127.0.0.1:' + port + endpoint);
